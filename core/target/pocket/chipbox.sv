@@ -168,6 +168,8 @@ module chipbox #(
   reg [31:0] okim_phase_inc = DEFAULT_OKIM_PHASE_INC;
   reg [7:0] okim_gain = 8'd64;
   reg okim_ss = 1;
+  reg [31:0] k060_phase_inc = DEFAULT_K060_PHASE_INC;
+  reg [7:0] k060_gain = 8'd64;
   reg nsf_mode = 0;
   reg gbs_mode = 0;
   reg cpu_run = 0;
@@ -244,6 +246,10 @@ module chipbox #(
   // 0x100000-0x3FFFFF свободно между SegaPCM<=512К и ADPCM_BASE 0x400000)
   localparam [31:0] DEFAULT_OKIM_PHASE_INC = 32'((64'd1_000_000 << 32) / CLK_HZ);
   localparam [21:0] OKIM_BASE_WORD = 22'h08_0000;  // байт 0x100000
+  // K053260 (Konami): клок ~3.58 МГц; ROM сэмплов (до 2 МБ, 21-битный
+  // адрес) в PSRAM с байта 0x200000 (окно 0x200000-0x3FFFFF свободно)
+  localparam [31:0] DEFAULT_K060_PHASE_INC = 32'((64'd3_579_545 << 32) / CLK_HZ);
+  localparam [21:0] K060_BASE_WORD = 22'h10_0000;  // байт 0x200000
   reg [31:0] gb_phase_inc = DEFAULT_GB_PHASE_INC;
   reg gb_stub_wr = 0;
   reg [9:0] gb_stub_wr_addr = 0;
@@ -295,6 +301,20 @@ module chipbox #(
   reg okim_req_byte = 0;
   reg [17:0] okim_req_addr = 0;
   reg [17:0] okim_fetched_addr = 18'h3FFFF;
+
+  // ROM-выборка K053260: один фетчер по кругу для 4 канальных адресов
+  reg k060_pending = 0;
+  reg k060_wait = 0;
+  reg [1:0] k060_rr = 0;         // указатель round-robin
+  reg [1:0] k060_req_ch = 0;
+  reg k060_req_byte = 0;
+  reg [20:0] k060_req_addr = 0;
+  reg [20:0] k060_fa0 = 21'h1FFFFF, k060_fa1 = 21'h1FFFFF,
+             k060_fa2 = 21'h1FFFFF, k060_fa3 = 21'h1FFFFF;
+  wire [20:0] k060_cur = k060_rr == 0 ? roma_addr : k060_rr == 1 ? romb_addr
+                       : k060_rr == 2 ? romc_addr : romd_addr;
+  wire [20:0] k060_cur_fa = k060_rr == 0 ? k060_fa0 : k060_rr == 1 ? k060_fa1
+                          : k060_rr == 2 ? k060_fa2 : k060_fa3;
 
   always @(posedge clk) begin
     ack <= 0;
@@ -360,6 +380,27 @@ module chipbox #(
       okim_rom_ok <= 1;
     end
 
+    // ROM-выборка K053260: круговой опрос 4 каналов, устаревший -> фетч
+    if (!k060_pending && !k060_wait) begin
+      if (k060_cur != k060_cur_fa) begin
+        k060_pending <= 1;
+        k060_req_ch <= k060_rr;
+        k060_req_addr <= k060_cur;
+      end else begin
+        k060_rr <= k060_rr + 1'b1;
+      end
+    end
+    if (mem_rdata_valid && k060_wait) begin
+      case (k060_req_ch)
+        2'd0: begin roma_data_r <= k060_req_byte ? mem_rdata[15:8] : mem_rdata[7:0]; k060_fa0 <= k060_req_addr; end
+        2'd1: begin romb_data_r <= k060_req_byte ? mem_rdata[15:8] : mem_rdata[7:0]; k060_fa1 <= k060_req_addr; end
+        2'd2: begin romc_data_r <= k060_req_byte ? mem_rdata[15:8] : mem_rdata[7:0]; k060_fa2 <= k060_req_addr; end
+        2'd3: begin romd_data_r <= k060_req_byte ? mem_rdata[15:8] : mem_rdata[7:0]; k060_fa3 <= k060_req_addr; end
+      endcase
+      k060_wait <= 0;
+      k060_rr <= k060_rr + 1'b1;
+    end
+
     // Байтовая запись: от секвенсора (DPCM в окно NES) либо от CPU
     // в sid-режиме (RAM в регионе NSF/SID)
     if (fsm_wr_req && !fsm_wr_pending) begin
@@ -423,7 +464,7 @@ module chipbox #(
     // ROM SegaPCM > DMC > CPU NSF > ADPCM-поток > записи секвенсора > загрузка
     if (!mem_busy && !mem_rd && !mem_wr && !rom_wait_data && !pf_wait_data
         && !dmc_wait_data && !nsf_inflight && !gbs_wait_data && !dbg_wait
-        && !okim_wait) begin
+        && !okim_wait && !k060_wait) begin
       if (rom_pending) begin
         mem_rd <= 1;
         mem_addr <= {4'b0, rom_word};
@@ -436,6 +477,12 @@ module chipbox #(
         okim_req_addr <= okim_rom_addr;
         okim_pending <= 0;
         okim_wait <= 1;
+      end else if (k060_pending) begin
+        mem_rd <= 1;
+        mem_addr <= K060_BASE_WORD + {2'b0, k060_req_addr[20:1]};
+        k060_req_byte <= k060_req_addr[0];
+        k060_pending <= 0;
+        k060_wait <= 1;
       end else if (dmc_pending) begin
         mem_rd <= 1;
         // в NSF-режиме DMC читает через банки, в VGM — плоское окно
@@ -538,6 +585,8 @@ module chipbox #(
           6'h22: scc_gain <= data_write[7:0];
           6'h23: okim_phase_inc <= data_write;
           6'h24: {okim_ss, okim_gain} <= data_write[8:0];
+          6'h25: k060_phase_inc <= data_write;
+          6'h26: k060_gain <= data_write[7:0];
           5'h10: gb_phase_inc <= data_write;
           5'h11: begin
             gb_stub_wr_addr <= data_write[17:8];
@@ -722,6 +771,14 @@ module chipbox #(
   always @(posedge clk) begin
     cen_okim <= 0;
     if (!pause_r) {cen_okim, okim_cen_phase} <= {1'b0, okim_cen_phase} + {1'b0, okim_phase_inc};
+  end
+
+  // Клок K053260 (~3.58 МГц)
+  reg [31:0] k060_cen_phase = 0;
+  reg cen_k060 = 0;
+  always @(posedge clk) begin
+    cen_k060 <= 0;
+    if (!pause_r) {cen_k060, k060_cen_phase} <= {1'b0, k060_cen_phase} + {1'b0, k060_phase_inc};
   end
 
   localparam [31:0] TICK_RATE = 44_100;
@@ -971,6 +1028,44 @@ module chipbox #(
       .rom_ok(okim_rom_ok),
       .sound(okim_sound),
       .sample()
+  );
+
+  // --------------------------------------------------------------------
+  // K053260 (jt053260): 4 канала PCM/ADPCM, у каждого свой ROM-порт. Все
+  // читают общий ROM в PSRAM (окно K060_BASE_WORD) — один фетчер по
+  // кругу подкачивает 4 канальных адреса в отдельные защёлки. Записи —
+  // по шине sound-CPU (addr[5:0]/din, строб cs&~wr_n).
+  reg k060_cs = 0;
+  reg k060_wr_n = 1;
+  reg [5:0] k060_addr = 0;
+  reg [7:0] k060_din = 0;
+  wire [20:0] roma_addr, romb_addr, romc_addr, romd_addr;
+  reg [7:0] roma_data_r = 0, romb_data_r = 0, romc_data_r = 0, romd_data_r = 0;
+  wire signed [15:0] k060_l, k060_r;
+
+  jt053260 k060 (
+      .rst(chip_reset),
+      .clk(clk),
+      .cen(cen_k060),
+      .ma0(1'b0),
+      .mrdnw(1'b1),
+      .mcs(1'b0),
+      .mdout(8'd0),
+      .mdin(),
+      .addr(k060_addr),
+      .wr_n(k060_wr_n),
+      .rd_n(1'b1),
+      .cs(k060_cs),
+      .din(k060_din),
+      .dout(),
+      .roma_addr(roma_addr), .roma_data(roma_data_r), .roma_cs(),
+      .romb_addr(romb_addr), .romb_data(romb_data_r), .romb_cs(),
+      .romc_addr(romc_addr), .romc_data(romc_data_r), .romc_cs(),
+      .romd_addr(romd_addr), .romd_data(romd_data_r), .romd_cs(),
+      .aux_l(16'd0), .aux_r(16'd0),
+      .snd_l(k060_l), .snd_r(k060_r),
+      .sample(), .tim2(),
+      .ch_en(5'b11111)
   );
 
   // --------------------------------------------------------------------
@@ -1664,6 +1759,8 @@ module chipbox #(
   // OKIM6295 моно, знаковый 14 бит -> << 2 (x4) до 16 бит
   wire signed [8:0] g_okim = {1'b0, okim_gain};
   wire signed [15:0] okim_wide = {okim_sound, 2'b00};
+  // K053260 стерео, знаковый 16 бит
+  wire signed [8:0] g_k060 = {1'b0, k060_gain};
   wire signed [15:0] sid_wide = sid_audio[17:2];
   wire signed [16:0] sid_wide17 = {sid_wide[15], sid_wide};
 
@@ -1671,7 +1768,7 @@ module chipbox #(
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ym_l_g, ym_r_g, ay_g, pcm_l_g, pcm_r_g;
   reg signed [25:0] adpcm_l_g, adpcm_r_g, apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
-  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g, okim_g;
+  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g, okim_g, k060_l_g, k060_r_g;
 
   always @(posedge clk) begin
     ym_l_g <= (ym_l * g_ym) >>> 6;
@@ -1692,10 +1789,12 @@ module chipbox #(
     sn_g <= (sn_wide * g_sn) >>> 6;
     scc_g <= (scc_wide * g_scc) >>> 6;
     okim_g <= (okim_wide * g_okim) >>> 6;
+    k060_l_g <= (k060_l * g_k060) >>> 6;
+    k060_r_g <= (k060_r * g_k060) >>> 6;
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g + okim_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g + okim_g;
+  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g + okim_g + k060_l_g;
+  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g + okim_g + k060_r_g;
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -1770,6 +1869,7 @@ module chipbox #(
   localparam OP_EXT = 4'hF;   // расширенные чипы: суб-код в fifo_q[27:24]
   localparam EXT_SCC = 4'h0;  // Konami SCC/K051649
   localparam EXT_OKIM = 4'h1; // OKIM6295
+  localparam EXT_K060 = 4'h2; // Konami K053260
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -1794,6 +1894,8 @@ module chipbox #(
   localparam S_SCC_A = 5'd21;  // строб SCC ассерчен, ждём cen_scc
   localparam S_SCC_Z = 5'd22;  // строб снят, ждём восстановления
   localparam S_OKIM = 5'd23;   // импульс wrn OKIM6295 (один такт)
+  localparam S_K060_A = 5'd24; // строб K053260 ассерчен, ждём cen
+  localparam S_K060_Z = 5'd25; // строб снят
 
   // Отображение (порт VGM 0xD2, регистр aa) -> адрес MSX ABLO (0x9800+)
   function automatic [7:0] scc_ablo_map(input [2:0] port, input [7:0] r);
@@ -1853,6 +1955,8 @@ module chipbox #(
       scc_cs_n <= 1;
       scc_wr_n <= 1;
       okim_wrn <= 1;
+      k060_cs <= 0;
+      k060_wr_n <= 1;
       opl_cs_n <= 1;
       opl_wr_n <= 1;
       fm_cs_n <= 1;
@@ -1981,6 +2085,15 @@ module chipbox #(
                   okim_wrn <= 0;
                   state <= S_OKIM;
                 end
+                EXT_K060: begin
+                  // запись регистра K053260: addr[13:8], data[7:0]
+                  k060_addr <= fifo_q[13:8];
+                  k060_din <= fifo_q[7:0];
+                  k060_cs <= 1;
+                  k060_wr_n <= 0;
+                  scc_wait <= 0;
+                  state <= S_K060_A;
+                end
                 default: ;
               endcase
             end
@@ -2081,6 +2194,21 @@ module chipbox #(
         S_OKIM: begin
           okim_wrn <= 1;
           state <= S_IDLE;
+        end
+
+        // K053260: держим cs/wr_n 2 такта cen_k060, затем снимаем
+        S_K060_A: begin
+          if (cen_k060) scc_wait <= scc_wait + 1'b1;
+          if (scc_wait >= 4'd2) begin
+            k060_cs <= 0;
+            k060_wr_n <= 1;
+            scc_wait <= 0;
+            state <= S_K060_Z;
+          end
+        end
+        S_K060_Z: begin
+          if (cen_k060) scc_wait <= scc_wait + 1'b1;
+          if (scc_wait >= 4'd2) state <= S_IDLE;
         end
 
         // Байт DPCM в окно NES-RAM: ждём свободного канала записи

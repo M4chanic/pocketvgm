@@ -562,6 +562,62 @@ static int okim_selftest(const char* out, double seconds) {
     return ok ? 0 : 1;
 }
 
+// Селфтест K053260: кладём PCM-синус (8-бит знак) в PSRAM по K060_BASE,
+// настраиваем канал 0 (start/length/pitch/vol/pan), даём keyon по фронту
+// и проверяем звук. Один из 4 каналов с общим ROM через round-robin фетч.
+static int k060_selftest(const char* out, double seconds) {
+    Tb tb;
+    const uint32_t K060_BASE = 0x200000;
+    uint32_t start = 0x400, length = 64;
+    for (uint32_t i = 0; i < length; i++)
+        tb.mem[K060_BASE + start + i] = (int8_t)lround(100.0 * sin(2.0 * M_PI * i / length)) & 0xFF;
+
+    tb.wb(6, true, 0);
+    tb.wb(0xC, true, 0);
+    tb.wb(0x15, true, 0);
+    tb.wb(0x22, true, 0);
+    tb.wb(0x24, true, 0);        // okim off
+    tb.wb(0x26, true, 64);       // k060_gain
+    tb.wb(0x25, true, (uint32_t)(3579545.0 / CLK_HZ * 4294967296.0 + 0.5));
+
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 2048; i++) tb.step();
+    tb.wb(2, true, 0);
+    for (int i = 0; i < 1200; i++) tb.step();
+
+    auto k060 = [&](int reg, int data) {
+        tb.wb(0, true, 0xF2000000u | ((reg & 0x3F) << 8) | (data & 0xFF));
+        for (int i = 0; i < 40; i++) tb.step();  // дать строб cs/wr_n завершиться
+    };
+    int pitch = 0xF00;
+    k060(0x28, 0x00);            // keyon все выкл (сброс дефолта 0xF)
+    k060(0x08, pitch & 0xFF);    // ch0 pitch lo
+    k060(0x09, (pitch >> 8) & 0x0F);
+    k060(0x0A, length & 0xFF);   // length lo
+    k060(0x0B, (length >> 8) & 0xFF);
+    k060(0x0C, start & 0xFF);    // start lo
+    k060(0x0D, (start >> 8) & 0xFF);
+    k060(0x0E, (start >> 16) & 0x1F);
+    k060(0x0F, 0x40);            // volume
+    k060(0x2A, 0x01);            // loop ch0, adpcm off
+    k060(0x2C, 0x04);            // ch0 pan = центр
+    k060(0x2F, 0x02);            // mode[1]=1: разрешить выход (иначе fade)
+    k060(0x28, 0x01);            // keyon ch0 -> фронт, старт
+
+    uint64_t cycles = (uint64_t)(seconds * CLK_HZ);
+    while (tb.cycle < cycles) tb.step();
+
+    uint32_t rate = (uint32_t)((double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ) + 0.5);
+    write_wav_file(out, tb.pcm, rate);
+    size_t n = tb.pcm.size() / 2;
+    int16_t peak = 0;
+    for (size_t i = n / 4; i < n; i++)
+        peak = std::max(peak, (int16_t)abs(tb.pcm[2 * i]));
+    bool ok = peak > 500;
+    fprintf(stderr, "селфтест K053260: peak=%d (PCM из PSRAM, канал 0) → %s\n", peak, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int sid_selftest(const char* out, double seconds) {
     static const uint8_t stub[] = {
         0x78,                    // $0334 SEI
@@ -1001,6 +1057,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--vrc6-selftest")) { return vrc6_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--scc-selftest")) { return scc_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--okim-selftest")) { return okim_selftest(out, 1.0); }
+        else if (!strcmp(argv[i], "--k060-selftest")) { return k060_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--gbsfile") && i + 1 < argc) { return gbs_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else if (!strcmp(argv[i], "--nsffile") && i + 1 < argc) { return nsf_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else if (!strcmp(argv[i], "--sidfile") && i + 1 < argc) { return sid_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
