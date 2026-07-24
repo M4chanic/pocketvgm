@@ -117,6 +117,7 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.nes_apu != 0 { add("2A03"); }
     if c.ay8910 != 0 { add("AY/5B"); }
     if c.k051649 != 0 { add("SCC"); }
+    if c.okim6295 != 0 { add("OKIM6295"); }
     if c.gb_dmg != 0 { add("GB APU"); }
     let system = if c.ym2612 != 0 {
         "Sega Mega Drive"
@@ -174,12 +175,15 @@ const OP_NESRAM_WR: u32 = 0xB000_0000;
 // Расширенные чипы: опкод 0xF, суб-код в [27:24]. SCC = суб-код 0.
 const OP_EXT: u32 = 0xF000_0000;
 const EXT_SCC: u32 = 0x0000_0000;
+const EXT_OKIM: u32 = 0x0100_0000;
 
 /// База банка ADPCM-потоков в памяти сэмплов (PSRAM): нижние 4 МБ — ROM
 /// SegaPCM, выше — данные DAC-стримов MSM6258.
 const ADPCM_BASE: u32 = 0x40_0000;
 /// NSF-данные в PSRAM (окно $8000-$FFFF через банки)
 const NSF_PSRAM_BASE: u32 = 0x70_0000;
+/// ROM сэмплов OKIM6295 в PSRAM (свободное окно 0x100000-0x3FFFFF)
+const OKIM_PSRAM_BASE: u32 = 0x10_0000;
 
 fn chipbox_write(word_offset: usize, value: u32) {
     unsafe { CHIPBOX_BASE.add(word_offset).write_volatile(value) }
@@ -1513,6 +1517,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         && header.clocks.ym2612 == 0
         && header.clocks.sn76489 == 0
         && header.clocks.k051649 == 0
+        && header.clocks.okim6295 == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
@@ -1552,6 +1557,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     if scc_clk != 0 {
         chipbox_write(0x21, (((scc_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
         chipbox_write(0x22, 64); // scc_gain
+    }
+    let okim_clk = header.clocks.okim6295 & 0x7FFF_FFFF; // бит31 = флаг чипа
+    if okim_clk != 0 {
+        chipbox_write(0x23, (((okim_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+        chipbox_write(0x24, 1 << 8 | 64); // ss=1, okim_gain=64
     }
     // Genesis-баланс: PSG заметно тише FM
     chipbox_write(
@@ -1667,6 +1677,20 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::Write { chip: Chip::Okim6258, addr, data: d, .. }) => {
                 sink.push(OP_ADPCM | ((addr & 3) as u32) << 8 | d as u32);
+            }
+            Ok(Event::Write { chip: Chip::Okim6295, data: d, .. }) => {
+                sink.push(OP_EXT | EXT_OKIM | d as u32);
+            }
+            Ok(Event::DataBlock { kind: 0x8B, start, len }) if len >= 8 => {
+                // ROM-образ OKIM6295: [u32 полный размер][u32 смещение][данные]
+                let block = &data[start..start + len];
+                let rom_off = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+                let bytes = &block[8..];
+                chipbox_write(8, OKIM_PSRAM_BASE + rom_off);
+                for pair in bytes.chunks(2) {
+                    let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
+                    chipbox_write(9, w);
+                }
             }
             Ok(Event::Write { chip: Chip::NesApu, addr, data: d, .. }) if addr <= 0x1F => {
                 sink.push(OP_APU | (addr as u32) << 8 | d as u32);

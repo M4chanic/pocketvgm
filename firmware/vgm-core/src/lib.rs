@@ -84,6 +84,7 @@ pub struct Clocks {
     pub okim6258_flags: u8,
     pub ay_flags: u8,
     pub k051649: u32,
+    pub okim6295: u32,
 }
 
 /// Разобранный заголовок VGM. Владение данными остаётся у вызывающего.
@@ -159,6 +160,7 @@ impl Header {
             okim6258: clock_field(d, 0x90, hdr_end),
             okim6258_flags: if hdr_end > 0x94 { d[0x94] } else { 0 },
             k051649: clock_field(d, 0x9C, hdr_end),
+            okim6295: clock_field(d, 0x98, hdr_end),
         };
 
         Ok(Header {

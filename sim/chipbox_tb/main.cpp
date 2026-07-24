@@ -509,6 +509,59 @@ static int scc_selftest(const char* out, double seconds) {
     return ok ? 0 : 1;
 }
 
+// Селфтест OKIM6295: кладём таблицу фраз + ADPCM-данные (треугольник) в
+// PSRAM-модель по OKIM_BASE (байт 0x100000), запускаем фразу 0 двухбайтовой
+// командой и проверяем, что чип фетчит ROM и выдаёт звук.
+static int okim_selftest(const char* out, double seconds) {
+    Tb tb;
+    const uint32_t OKIM_BASE = 0x100000;
+    // фраза 0: заголовок в байтах 0..7, данные 0x400.. (длинные, на всю
+    // секунду воспроизведения: OKIM6295 не зациклен)
+    uint32_t start = 0x400, stop = 0x4000;
+    // jt6295 читает фразу как start[17:0] в байтах 0-2, stop в байтах 3-5
+    tb.mem[OKIM_BASE + 0] = (start >> 16) & 3;
+    tb.mem[OKIM_BASE + 1] = (start >> 8) & 0xFF;
+    tb.mem[OKIM_BASE + 2] = start & 0xFF;
+    tb.mem[OKIM_BASE + 3] = (stop >> 16) & 3;
+    tb.mem[OKIM_BASE + 4] = (stop >> 8) & 0xFF;
+    tb.mem[OKIM_BASE + 5] = stop & 0xFF;
+    // ADPCM: 4 байта макс.+дельт (подъём), 4 байта макс.-дельт (спуск)
+    for (uint32_t a = start; a <= stop; a++)
+        tb.mem[OKIM_BASE + a] = ((a >> 2) & 1) ? 0xFF : 0x77;
+
+    tb.wb(6, true, 0);            // ym/ay/pcm/adpcm = 0
+    tb.wb(0xC, true, 0);          // opl/sid/gb/apu = 0
+    tb.wb(0x15, true, 0);         // sn/fm = 0
+    tb.wb(0x22, true, 0);         // scc = 0
+    tb.wb(0x24, true, (1u << 8) | 64);  // okim: ss=1, gain=64
+    tb.wb(0x23, true, (uint32_t)(1000000.0 / CLK_HZ * 4294967296.0 + 0.5));
+
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 2048; i++) tb.step();
+    tb.wb(2, true, 0);
+    for (int i = 0; i < 1200; i++) tb.step();
+
+    auto okim = [&](int data) {
+        tb.wb(0, true, 0xF1000000u | (data & 0xFF));  // OP_EXT|EXT_OKIM
+    };
+    okim(0x80);                  // старт фразы 0 (бит7=1, phrase=0)
+    okim(0x10);                  // канал 0 (маска 0001), аттенюация 0
+    for (int i = 0; i < 512; i++) tb.step();
+
+    uint64_t cycles = (uint64_t)(seconds * CLK_HZ);
+    while (tb.cycle < cycles) tb.step();
+
+    uint32_t rate = (uint32_t)((double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ) + 0.5);
+    write_wav_file(out, tb.pcm, rate);
+    size_t n = tb.pcm.size() / 2;
+    int16_t peak = 0;
+    for (size_t i = n / 4; i < n; i++)  // вторая половина: устойчивое воспр.
+        peak = std::max(peak, (int16_t)abs(tb.pcm[2 * i]));
+    bool ok = peak > 1000;
+    fprintf(stderr, "селфтест OKIM6295: peak=%d (ADPCM из PSRAM) → %s\n", peak, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int sid_selftest(const char* out, double seconds) {
     static const uint8_t stub[] = {
         0x78,                    // $0334 SEI
@@ -947,6 +1000,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--ff-selftest")) { return ff_selftest(); }
         else if (!strcmp(argv[i], "--vrc6-selftest")) { return vrc6_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--scc-selftest")) { return scc_selftest(out, 1.0); }
+        else if (!strcmp(argv[i], "--okim-selftest")) { return okim_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--gbsfile") && i + 1 < argc) { return gbs_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else if (!strcmp(argv[i], "--nsffile") && i + 1 < argc) { return nsf_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else if (!strcmp(argv[i], "--sidfile") && i + 1 < argc) { return sid_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }

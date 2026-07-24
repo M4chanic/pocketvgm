@@ -18,3 +18,4 @@ directories.
 | jt89 (SN76489) | https://github.com/jotego/jt89 | b688c5767f4b5910c43f4c2b3909142156a8f584 | GPL-3.0 |
 | font8x8 (UI font) | https://github.com/dhepper/font8x8 | — | Public Domain |
 | IKASCC (Konami SCC / K051649) | https://github.com/ika-musume/IKASCC | 5d07811350621de275b56f3ff88c439d0973521d | BSD-2-Clause; used with IMPL_TYPE=0 (sync). Files: IKASCC.v + IKASCC_player_s.v + IKASCC_vrc_s.v + IKASCC_primitives.v (the *_a async variants are kept for upstream fidelity but unused) |
+| jt6295 (OKIM6295) | https://github.com/jotego/jt6295 | 65a5fe118c89173350ce0fc20aa9d06927f46676 | GPL-3.0; used with INTERPOL=0 (INTERPOL>0 would pull jtframe_fir_mono). Sample ROM streamed from PSRAM via the chipbox arbiter |

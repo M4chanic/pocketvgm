@@ -165,6 +165,9 @@ module chipbox #(
   reg [7:0] gb_gain = 8'd64;
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
   reg [7:0] scc_gain = 8'd64;
+  reg [31:0] okim_phase_inc = DEFAULT_OKIM_PHASE_INC;
+  reg [7:0] okim_gain = 8'd64;
+  reg okim_ss = 1;
   reg nsf_mode = 0;
   reg gbs_mode = 0;
   reg cpu_run = 0;
@@ -237,6 +240,10 @@ module chipbox #(
   localparam [31:0] DEFAULT_GB_PHASE_INC = 32'((64'd8_388_608 << 32) / CLK_HZ);
   // Konami SCC (K051649): phiM ~1.79 МГц
   localparam [31:0] DEFAULT_SCC_PHASE_INC = 32'((64'd1_789_772 << 32) / CLK_HZ);
+  // OKIM6295: клок ~1 МГц; ROM сэмплов в PSRAM с байта 0x100000 (окно
+  // 0x100000-0x3FFFFF свободно между SegaPCM<=512К и ADPCM_BASE 0x400000)
+  localparam [31:0] DEFAULT_OKIM_PHASE_INC = 32'((64'd1_000_000 << 32) / CLK_HZ);
+  localparam [21:0] OKIM_BASE_WORD = 22'h08_0000;  // байт 0x100000
   reg [31:0] gb_phase_inc = DEFAULT_GB_PHASE_INC;
   reg gb_stub_wr = 0;
   reg [9:0] gb_stub_wr_addr = 0;
@@ -280,6 +287,14 @@ module chipbox #(
   reg nsf_lane = 0;
   reg nsf_done = 0;
   reg [7:0] nsf_dbyte = 0;
+
+  // ROM-выборка OKIM6295 (jt6295 в домене clk): следим за rom_addr,
+  // подкачиваем байт, rom_ok=1 когда выбранный адрес совпал
+  reg okim_pending = 0;
+  reg okim_wait = 0;
+  reg okim_req_byte = 0;
+  reg [17:0] okim_req_addr = 0;
+  reg [17:0] okim_fetched_addr = 18'h3FFFF;
 
   always @(posedge clk) begin
     ack <= 0;
@@ -331,6 +346,18 @@ module chipbox #(
       gbs_rom_data <= gbs_lane ? mem_rdata[15:8] : mem_rdata[7:0];
       gbs_wait_data <= 0;
       gbs_fetch <= gbs_fetch + 1'b1;
+    end
+
+    // ROM-выборка OKIM6295: запрос при рассинхроне адреса
+    if (okim_rom_addr != okim_fetched_addr && !okim_pending && !okim_wait) begin
+      okim_pending <= 1;
+      okim_rom_ok <= 0;
+    end
+    if (mem_rdata_valid && okim_wait) begin
+      okim_rom_data_r <= okim_req_byte ? mem_rdata[15:8] : mem_rdata[7:0];
+      okim_fetched_addr <= okim_req_addr;
+      okim_wait <= 0;
+      okim_rom_ok <= 1;
     end
 
     // Байтовая запись: от секвенсора (DPCM в окно NES) либо от CPU
@@ -395,12 +422,20 @@ module chipbox #(
     // Арбитр внешней памяти:
     // ROM SegaPCM > DMC > CPU NSF > ADPCM-поток > записи секвенсора > загрузка
     if (!mem_busy && !mem_rd && !mem_wr && !rom_wait_data && !pf_wait_data
-        && !dmc_wait_data && !nsf_inflight && !gbs_wait_data && !dbg_wait) begin
+        && !dmc_wait_data && !nsf_inflight && !gbs_wait_data && !dbg_wait
+        && !okim_wait) begin
       if (rom_pending) begin
         mem_rd <= 1;
         mem_addr <= {4'b0, rom_word};
         rom_pending <= 0;
         rom_wait_data <= 1;
+      end else if (okim_pending) begin
+        mem_rd <= 1;
+        mem_addr <= OKIM_BASE_WORD + {5'b0, okim_rom_addr[17:1]};
+        okim_req_byte <= okim_rom_addr[0];
+        okim_req_addr <= okim_rom_addr;
+        okim_pending <= 0;
+        okim_wait <= 1;
       end else if (dmc_pending) begin
         mem_rd <= 1;
         // в NSF-режиме DMC читает через банки, в VGM — плоское окно
@@ -501,6 +536,8 @@ module chipbox #(
           5'h17: sn_phase_inc <= data_write;
           6'h21: scc_phase_inc <= data_write;
           6'h22: scc_gain <= data_write[7:0];
+          6'h23: okim_phase_inc <= data_write;
+          6'h24: {okim_ss, okim_gain} <= data_write[8:0];
           5'h10: gb_phase_inc <= data_write;
           5'h11: begin
             gb_stub_wr_addr <= data_write[17:8];
@@ -677,6 +714,14 @@ module chipbox #(
   always @(posedge clk) begin
     cen_scc <= 0;
     if (!pause_r) {cen_scc, scc_cen_phase} <= {1'b0, scc_cen_phase} + {1'b0, scc_phase_inc};
+  end
+
+  // Клок OKIM6295 (~1 МГц)
+  reg [31:0] okim_cen_phase = 0;
+  reg cen_okim = 0;
+  always @(posedge clk) begin
+    cen_okim <= 0;
+    if (!pause_r) {cen_okim, okim_cen_phase} <= {1'b0, okim_cen_phase} + {1'b0, okim_phase_inc};
   end
 
   localparam [31:0] TICK_RATE = 44_100;
@@ -898,6 +943,34 @@ module chipbox #(
       .o_ROMADDR(),
       .o_SOUND(scc_sound),
       .o_TEST()
+  );
+
+  // --------------------------------------------------------------------
+  // OKIM6295 (jt6295): ADPCM с сэмплами из PSRAM. Секвенсор пишет байты
+  // команд по wrn (одна запись = импульс wrn 1->0). ROM-байты подаёт
+  // арбитр (окно OKIM_BASE_WORD), rom_ok — по завершении выборки.
+  reg okim_wrn = 1;
+  reg [7:0] okim_din = 0;
+  wire [17:0] okim_rom_addr;
+  reg [7:0] okim_rom_data_r = 0;
+  reg okim_rom_ok = 0;
+  wire signed [13:0] okim_sound;
+
+  jt6295 #(
+      .INTERPOL(0)
+  ) okim (
+      .rst(chip_reset),
+      .clk(clk),
+      .cen(cen_okim),
+      .ss(okim_ss),
+      .wrn(okim_wrn),
+      .din(okim_din),
+      .dout(),
+      .rom_addr(okim_rom_addr),
+      .rom_data(okim_rom_data_r),
+      .rom_ok(okim_rom_ok),
+      .sound(okim_sound),
+      .sample()
   );
 
   // --------------------------------------------------------------------
@@ -1588,6 +1661,9 @@ module chipbox #(
   // SCC моно, знаковый 11 бит -> << 5 (x32) до 16 бит
   wire signed [8:0] g_scc = {1'b0, scc_gain};
   wire signed [15:0] scc_wide = {scc_sound, 5'b00000};
+  // OKIM6295 моно, знаковый 14 бит -> << 2 (x4) до 16 бит
+  wire signed [8:0] g_okim = {1'b0, okim_gain};
+  wire signed [15:0] okim_wide = {okim_sound, 2'b00};
   wire signed [15:0] sid_wide = sid_audio[17:2];
   wire signed [16:0] sid_wide17 = {sid_wide[15], sid_wide};
 
@@ -1595,7 +1671,7 @@ module chipbox #(
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ym_l_g, ym_r_g, ay_g, pcm_l_g, pcm_r_g;
   reg signed [25:0] adpcm_l_g, adpcm_r_g, apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
-  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g;
+  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g, okim_g;
 
   always @(posedge clk) begin
     ym_l_g <= (ym_l * g_ym) >>> 6;
@@ -1615,10 +1691,11 @@ module chipbox #(
     fm_r_g <= (fm_r * g_fm) >>> 6;
     sn_g <= (sn_wide * g_sn) >>> 6;
     scc_g <= (scc_wide * g_scc) >>> 6;
+    okim_g <= (okim_wide * g_okim) >>> 6;
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g;
+  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g + okim_g;
+  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g + okim_g;
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -1692,6 +1769,7 @@ module chipbox #(
   localparam OP_SN = 4'hE;
   localparam OP_EXT = 4'hF;   // расширенные чипы: суб-код в fifo_q[27:24]
   localparam EXT_SCC = 4'h0;  // Konami SCC/K051649
+  localparam EXT_OKIM = 4'h1; // OKIM6295
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -1715,6 +1793,7 @@ module chipbox #(
   localparam S_SN_WR = 5'd20;
   localparam S_SCC_A = 5'd21;  // строб SCC ассерчен, ждём cen_scc
   localparam S_SCC_Z = 5'd22;  // строб снят, ждём восстановления
+  localparam S_OKIM = 5'd23;   // импульс wrn OKIM6295 (один такт)
 
   // Отображение (порт VGM 0xD2, регистр aa) -> адрес MSX ABLO (0x9800+)
   function automatic [7:0] scc_ablo_map(input [2:0] port, input [7:0] r);
@@ -1773,6 +1852,7 @@ module chipbox #(
       fsm_wr_req <= 0;
       scc_cs_n <= 1;
       scc_wr_n <= 1;
+      okim_wrn <= 1;
       opl_cs_n <= 1;
       opl_wr_n <= 1;
       fm_cs_n <= 1;
@@ -1895,6 +1975,12 @@ module chipbox #(
                   scc_wait <= 0;
                   state <= S_SCC_A;
                 end
+                EXT_OKIM: begin
+                  // один байт команды в OKIM6295: импульс wrn 1->0
+                  okim_din <= fifo_q[7:0];
+                  okim_wrn <= 0;
+                  state <= S_OKIM;
+                end
                 default: ;
               endcase
             end
@@ -1989,6 +2075,12 @@ module chipbox #(
         S_SCC_Z: begin
           if (cen_scc) scc_wait <= scc_wait + 1'b1;
           if (scc_wait >= 4'd2) state <= S_IDLE;
+        end
+
+        // OKIM6295: wrn держался 0 один такт (negedge словлен), снимаем
+        S_OKIM: begin
+          okim_wrn <= 1;
+          state <= S_IDLE;
         end
 
         // Байт DPCM в окно NES-RAM: ждём свободного канала записи
