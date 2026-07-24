@@ -163,6 +163,8 @@ module chipbox #(
   reg [31:0] nes_phase_inc = DEFAULT_NES_PHASE_INC;
   reg [7:0] apu_gain = 8'd64;
   reg [7:0] gb_gain = 8'd64;
+  reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
+  reg [7:0] scc_gain = 8'd64;
   reg nsf_mode = 0;
   reg gbs_mode = 0;
   reg cpu_run = 0;
@@ -233,6 +235,8 @@ module chipbox #(
   reg [31:0] opl_phase_inc = DEFAULT_OPL_PHASE_INC;
   reg [7:0] opl_gain = 8'd64;
   localparam [31:0] DEFAULT_GB_PHASE_INC = 32'((64'd8_388_608 << 32) / CLK_HZ);
+  // Konami SCC (K051649): phiM ~1.79 МГц
+  localparam [31:0] DEFAULT_SCC_PHASE_INC = 32'((64'd1_789_772 << 32) / CLK_HZ);
   reg [31:0] gb_phase_inc = DEFAULT_GB_PHASE_INC;
   reg gb_stub_wr = 0;
   reg [9:0] gb_stub_wr_addr = 0;
@@ -495,6 +499,8 @@ module chipbox #(
           5'h15: {sn_gain, fm_gain} <= data_write[15:0];
           5'h16: fm_phase_inc <= data_write;
           5'h17: sn_phase_inc <= data_write;
+          6'h21: scc_phase_inc <= data_write;
+          6'h22: scc_gain <= data_write[7:0];
           5'h10: gb_phase_inc <= data_write;
           5'h11: begin
             gb_stub_wr_addr <= data_write[17:8];
@@ -663,6 +669,14 @@ module chipbox #(
     if (!pause_r) {cen_nes, nes_cen_phase} <= {1'b0, nes_cen_phase} + {1'b0, nes_phase_inc};
     if (cen_nes) nes_odd <= ~nes_odd;
     nes_phi2_d <= nes_phi2;
+  end
+
+  // Клок Konami SCC (~1.79 МГц)
+  reg [31:0] scc_cen_phase = 0;
+  reg cen_scc = 0;
+  always @(posedge clk) begin
+    cen_scc <= 0;
+    if (!pause_r) {cen_scc, scc_cen_phase} <= {1'b0, scc_cen_phase} + {1'b0, scc_phase_inc};
   end
 
   localparam [31:0] TICK_RATE = 44_100;
@@ -851,6 +865,39 @@ module chipbox #(
       .wr_pending(adpcm_wr_pending),
       .playing(),
       .sound(adpcm_sound)
+  );
+
+  // --------------------------------------------------------------------
+  // Konami SCC (K051649, IKASCC). Волновая таблица, без внешнего ROM.
+  // Секвенсор гоняет шину MSX: разблокировка BR2=0x3F (ABHI=0x12), затем
+  // регистры звука при ABHI=0x13. Строб CS/WR держится счётом cen_scc:
+  // write_request в чипе ловит переход (CS|WR) 1->0 по своему клоку.
+  reg scc_cs_n = 1;
+  reg scc_wr_n = 1;
+  reg [4:0] scc_abhi = 0;
+  reg [7:0] scc_ablo = 0;
+  reg [7:0] scc_db = 0;
+  wire signed [10:0] scc_sound;
+
+  IKASCC #(
+      .IMPL_TYPE(0),
+      .RAM_BLOCK(1)
+  ) scc (
+      .i_EMUCLK(clk),
+      .i_MCLK_PCEN_n(~cen_scc),
+      .i_RST_n(~chip_reset),
+      .i_CS_n(scc_cs_n),
+      .i_RD_n(1'b1),
+      .i_WR_n(scc_wr_n),
+      .i_ABLO(scc_ablo),
+      .i_ABHI(scc_abhi),
+      .i_DB(scc_db),
+      .o_DB(),
+      .o_DB_OE(),
+      .o_ROMCS_n(),
+      .o_ROMADDR(),
+      .o_SOUND(scc_sound),
+      .o_TEST()
   );
 
   // --------------------------------------------------------------------
@@ -1538,6 +1585,9 @@ module chipbox #(
   wire signed [8:0] g_fm = {1'b0, fm_gain};
   wire signed [8:0] g_sn = {1'b0, sn_gain};
   wire signed [15:0] sn_wide = {sn_sound, 5'b00000};
+  // SCC моно, знаковый 11 бит -> << 5 (x32) до 16 бит
+  wire signed [8:0] g_scc = {1'b0, scc_gain};
+  wire signed [15:0] scc_wide = {scc_sound, 5'b00000};
   wire signed [15:0] sid_wide = sid_audio[17:2];
   wire signed [16:0] sid_wide17 = {sid_wide[15], sid_wide};
 
@@ -1545,7 +1595,7 @@ module chipbox #(
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ym_l_g, ym_r_g, ay_g, pcm_l_g, pcm_r_g;
   reg signed [25:0] adpcm_l_g, adpcm_r_g, apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
-  reg signed [25:0] fm_l_g, fm_r_g, sn_g;
+  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g;
 
   always @(posedge clk) begin
     ym_l_g <= (ym_l * g_ym) >>> 6;
@@ -1564,10 +1614,11 @@ module chipbox #(
     fm_l_g <= (fm_l * g_fm) >>> 6;
     fm_r_g <= (fm_r * g_fm) >>> 6;
     sn_g <= (sn_wide * g_sn) >>> 6;
+    scc_g <= (scc_wide * g_scc) >>> 6;
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g;
+  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g;
+  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g;
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -1639,6 +1690,8 @@ module chipbox #(
   localparam OP_OPL3 = 4'hC;
   localparam OP_FM2612 = 4'hD;
   localparam OP_SN = 4'hE;
+  localparam OP_EXT = 4'hF;   // расширенные чипы: суб-код в fifo_q[27:24]
+  localparam EXT_SCC = 4'h0;  // Konami SCC/K051649
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -1660,6 +1713,21 @@ module chipbox #(
   localparam S_G_POLL_D = 5'd18;
   localparam S_G_WR_D = 5'd19;
   localparam S_SN_WR = 5'd20;
+  localparam S_SCC_A = 5'd21;  // строб SCC ассерчен, ждём cen_scc
+  localparam S_SCC_Z = 5'd22;  // строб снят, ждём восстановления
+
+  // Отображение (порт VGM 0xD2, регистр aa) -> адрес MSX ABLO (0x9800+)
+  function automatic [7:0] scc_ablo_map(input [2:0] port, input [7:0] r);
+    case (port)
+      3'd0: scc_ablo_map = r;             // waveform 0x00-0x7F
+      3'd1: scc_ablo_map = 8'h80 + r;     // frequency
+      3'd2: scc_ablo_map = 8'h8A + r;     // volume
+      3'd3: scc_ablo_map = 8'h8F;         // key on/off
+      3'd4: scc_ablo_map = r;             // SCC-I 5-й канал (прибл.)
+      3'd5: scc_ablo_map = 8'hE0 + r;     // test/deformation
+      default: scc_ablo_map = r;
+    endcase
+  endfunction
 
   reg fm_port_l = 0;
 
@@ -1669,6 +1737,7 @@ module chipbox #(
   reg opl_bank_l = 0;
 
   reg [4:0] state = S_IDLE;
+  reg [3:0] scc_wait = 0;
   reg [14:0] nesram_ptr = 0;
   reg fsm_wr_req = 0;
   reg [14:0] fsm_wr_addr = 0;
@@ -1702,6 +1771,8 @@ module chipbox #(
       str_stop <= 0;
       apu_cs <= 0;
       fsm_wr_req <= 0;
+      scc_cs_n <= 1;
+      scc_wr_n <= 1;
       opl_cs_n <= 1;
       opl_wr_n <= 1;
       fm_cs_n <= 1;
@@ -1806,6 +1877,27 @@ module chipbox #(
               opl_phase_cnt <= 2;
               state <= S_OPL_A;
             end
+            OP_EXT: begin
+              case (fifo_q[27:24])
+                EXT_SCC: begin
+                  // порт 7 = разблокировка BR2 (ABHI=0x12, DB=0x3F)
+                  if (fifo_q[18:16] == 3'd7) begin
+                    scc_abhi <= 5'h12;
+                    scc_ablo <= 8'h00;
+                    scc_db   <= 8'h3F;
+                  end else begin
+                    scc_abhi <= 5'h13;
+                    scc_ablo <= scc_ablo_map(fifo_q[18:16], fifo_q[15:8]);
+                    scc_db   <= fifo_q[7:0];
+                  end
+                  scc_cs_n <= 0;
+                  scc_wr_n <= 0;
+                  scc_wait <= 0;
+                  state <= S_SCC_A;
+                end
+                default: ;
+              endcase
+            end
             default: ;  // незнакомый опкод — пропускаем
           endcase
         end
@@ -1881,6 +1973,22 @@ module chipbox #(
             sn_wr_n <= 1;
             state <= S_IDLE;
           end
+        end
+
+        // SCC: держим CS/WR ассерченными 2 такта cen_scc (чип ловит
+        // переход 1->0 по своему клоку), затем снимаем и ждём столько же
+        S_SCC_A: begin
+          if (cen_scc) scc_wait <= scc_wait + 1'b1;
+          if (scc_wait >= 4'd2) begin
+            scc_cs_n <= 1;
+            scc_wr_n <= 1;
+            scc_wait <= 0;
+            state <= S_SCC_Z;
+          end
+        end
+        S_SCC_Z: begin
+          if (cen_scc) scc_wait <= scc_wait + 1'b1;
+          if (scc_wait >= 4'd2) state <= S_IDLE;
         end
 
         // Байт DPCM в окно NES-RAM: ждём свободного канала записи

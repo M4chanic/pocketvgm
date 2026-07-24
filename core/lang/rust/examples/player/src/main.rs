@@ -116,6 +116,7 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.okim6258 != 0 { add("MSM6258"); }
     if c.nes_apu != 0 { add("2A03"); }
     if c.ay8910 != 0 { add("AY/5B"); }
+    if c.k051649 != 0 { add("SCC"); }
     if c.gb_dmg != 0 { add("GB APU"); }
     let system = if c.ym2612 != 0 {
         "Sega Mega Drive"
@@ -123,6 +124,8 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
         "Sega Arcade"
     } else if c.ym2151 != 0 && c.okim6258 != 0 {
         "Sharp X68000"
+    } else if c.k051649 != 0 {
+        "MSX"
     } else if c.nes_apu != 0 {
         "Famicom / NES"
     } else if c.sn76489 != 0 {
@@ -168,6 +171,9 @@ const OP_FM2612: u32 = 0xD000_0000;
 const OP_SN: u32 = 0xE000_0000;
 const OP_NESRAM_PTR: u32 = 0xA000_0000;
 const OP_NESRAM_WR: u32 = 0xB000_0000;
+// Расширенные чипы: опкод 0xF, суб-код в [27:24]. SCC = суб-код 0.
+const OP_EXT: u32 = 0xF000_0000;
+const EXT_SCC: u32 = 0x0000_0000;
 
 /// База банка ADPCM-потоков в памяти сэмплов (PSRAM): нижние 4 МБ — ROM
 /// SegaPCM, выше — данные DAC-стримов MSM6258.
@@ -1506,6 +1512,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         && header.clocks.nes_apu == 0
         && header.clocks.ym2612 == 0
         && header.clocks.sn76489 == 0
+        && header.clocks.k051649 == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
@@ -1541,6 +1548,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     if sn_clk != 0 {
         chipbox_write(0x17, (((sn_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
     }
+    let scc_clk = header.clocks.k051649;
+    if scc_clk != 0 {
+        chipbox_write(0x21, (((scc_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+        chipbox_write(0x22, 64); // scc_gain
+    }
     // Genesis-баланс: PSG заметно тише FM
     chipbox_write(
         0x15,
@@ -1557,6 +1569,10 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     chipbox_write(2, 1);
 
     let mut sink = CmdSink::new();
+    // SCC: разблокировать регистры звука (BR2=0x3F) первой командой FIFO
+    if scc_clk != 0 {
+        sink.push(OP_EXT | EXT_SCC | (7u32 << 16));
+    }
     let mut reader = Reader::new(data, header.data_offset);
     let mut loops: u32 = 0;
     let mut shown_s = u32::MAX;
@@ -1579,6 +1595,9 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::Write { chip: Chip::Sn76489, data, .. }) => {
                 sink.push(OP_SN | data as u32);
+            }
+            Ok(Event::Write { chip: Chip::K051649, port, addr, data }) => {
+                sink.push(OP_EXT | EXT_SCC | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
             }
             Ok(Event::Ym2612Dac { ticks, offset }) => {
                 let b = *dac_bank.get(offset as usize).unwrap_or(&0);

@@ -394,6 +394,55 @@ static int gbs_selftest(const char* out, double seconds) {
 
 // Селфтест SID: 6502 в C64-карте (вся память в PSRAM), пила ~440 Гц,
 // PLAY гоняет верхний байт частоты по кольцу через счётчик в RAM $0300.
+// Селфтест SCC: грузим синус в волновую таблицу ch1, ставим частоту/
+// громкость/keyon и проверяем тон. f = mclock/(32*(freq+1)); freq=0xFD ~ 220 Гц.
+static int scc_selftest(const char* out, double seconds) {
+    Tb tb;
+    // все прочие микс-каналы в ноль, SCC на полную
+    tb.wb(6, true, 0);            // mix_gains (ym/ay/pcm/adpcm) = 0
+    tb.wb(0xC, true, 0);          // opl/sid/gb/apu = 0
+    tb.wb(0x15, true, 0);         // sn/fm = 0
+    tb.wb(0x22, true, 64);        // scc_gain = 64
+    tb.wb(0x21, true, (uint32_t)(1789772.0 / CLK_HZ * 4294967296.0 + 0.5));
+
+    tb.wb(2, true, 1);            // сброс чипов
+    for (int i = 0; i < 2048; i++) tb.step();
+    tb.wb(2, true, 0);           // снять сброс
+    for (int i = 0; i < 1200; i++) tb.step();  // дождаться снятия chip_reset
+
+    auto scc = [&](int port, int reg, int data) {
+        tb.wb(0, true, 0xF0000000u | (port << 16) | (reg << 8) | (data & 0xFF));
+    };
+    scc(7, 0, 0);                // разблокировка BR2 = 0x3F
+    // синус, 32 знаковых 8-битных отсчёта
+    for (int i = 0; i < 32; i++) {
+        int v = (int)lround(127.0 * sin(2.0 * M_PI * i / 32.0));
+        scc(0, i, v & 0xFF);     // порт 0: waveform ch1 (0x00-0x1F)
+    }
+    scc(1, 0, 0xFD);             // порт 1: freq ch1 lo
+    scc(1, 1, 0x00);             // freq ch1 hi
+    scc(2, 0, 0x0F);             // порт 2: volume ch1 = max
+    scc(3, 0, 0x01);             // порт 3: keyon, ch1
+
+    uint64_t cycles = (uint64_t)(seconds * CLK_HZ);
+    while (tb.cycle < cycles) tb.step();
+
+    uint32_t rate = (uint32_t)((double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ) + 0.5);
+    write_wav_file(out, tb.pcm, rate);
+    size_t n = tb.pcm.size() / 2;
+    int16_t peak = 0;
+    int zc = 0;
+    for (size_t i = n / 2; i < n; i++) {
+        peak = std::max(peak, (int16_t)abs(tb.pcm[2 * i]));
+        if (i > n / 2 && (tb.pcm[2 * i] >= 0) != (tb.pcm[2 * (i - 1)] >= 0)) zc++;
+    }
+    double hz = zc * 1.0 / (n - n / 2) * rate / 2;
+    // ожидаемая высота 1789772/(32*(0xFD+1)) ~ 220 Гц
+    bool ok = peak > 1000 && hz > 185 && hz < 260;
+    fprintf(stderr, "селфтест SCC: peak=%d, тон ~%.0f Гц (ждём ~220) → %s\n", peak, hz, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int sid_selftest(const char* out, double seconds) {
     static const uint8_t stub[] = {
         0x78,                    // $0334 SEI
@@ -830,6 +879,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--reset-selftest")) { return reset_selftest(out); }
         else if (!strcmp(argv[i], "--ff-selftest")) { return ff_selftest(); }
         else if (!strcmp(argv[i], "--vrc6-selftest")) { return vrc6_selftest(out, 1.0); }
+        else if (!strcmp(argv[i], "--scc-selftest")) { return scc_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--gbsfile") && i + 1 < argc) { return gbs_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else if (!strcmp(argv[i], "--nsffile") && i + 1 < argc) { return nsf_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else if (!strcmp(argv[i], "--sidfile") && i + 1 < argc) { return sid_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }

@@ -1,1 +1,0 @@
-/root/projects/m4pocket/firmware/midi-core/target/debug/examples/mid2cmds: /root/projects/m4pocket/firmware/midi-core/examples/mid2cmds.rs /root/projects/m4pocket/firmware/midi-core/genmidi.lmp /root/projects/m4pocket/firmware/midi-core/src/lib.rs

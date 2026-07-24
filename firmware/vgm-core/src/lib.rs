@@ -35,6 +35,7 @@ pub enum Chip {
     GbDmg,
     Okim6258,
     Okim6295,
+    K051649,
     Unknown(u8),
 }
 
@@ -82,6 +83,7 @@ pub struct Clocks {
     pub okim6258: u32,
     pub okim6258_flags: u8,
     pub ay_flags: u8,
+    pub k051649: u32,
 }
 
 /// Разобранный заголовок VGM. Владение данными остаётся у вызывающего.
@@ -156,6 +158,7 @@ impl Header {
             nes_apu: clock_field(d, 0x84, hdr_end),
             okim6258: clock_field(d, 0x90, hdr_end),
             okim6258_flags: if hdr_end > 0x94 { d[0x94] } else { 0 },
+            k051649: clock_field(d, 0x9C, hdr_end),
         };
 
         Ok(Header {
@@ -259,6 +262,13 @@ impl<'a> Reader<'a> {
             0xC0 => {
                 let offset = self.u16()?;
                 Event::SegaPcmWrite { offset, data: self.u8()? }
+            }
+            0xD2 => {
+                // K051649/K052539 (SCC): pp aa dd — порт, регистр, данные
+                let port = self.u8()?;
+                let addr = self.u8()?;
+                let data = self.u8()?;
+                Event::Write { chip: Chip::K051649, port, addr, data }
             }
             0xC1..=0xDF => {
                 self.skip(3)?;
@@ -391,6 +401,20 @@ mod tests {
         );
         assert_eq!(r.next_event().unwrap(), Event::Wait { ticks: 735 });
         assert_eq!(r.next_event().unwrap(), Event::Wait { ticks: 4 });
+        assert_eq!(r.next_event().unwrap(), Event::End);
+    }
+
+    #[test]
+    fn parses_scc_write() {
+        // 0xD2 pp aa dd -> K051649 write (порт, регистр, данные)
+        let body = [0xD2, 0x01, 0x00, 0xFD, 0x66];
+        let d = synth_vgm(&body, None);
+        let h = Header::parse(&d).unwrap();
+        let mut r = Reader::new(&d, h.data_offset);
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::K051649, port: 0x01, addr: 0x00, data: 0xFD }
+        );
         assert_eq!(r.next_event().unwrap(), Event::End);
     }
 
