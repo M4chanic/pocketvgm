@@ -87,9 +87,12 @@ because each one completes many packs whose FM half already plays here.
 
 ## Note on FPGA area
 
-SCC, OKIM6295 and K053260 together overflow the Cyclone V by ~1% at maximum
-area optimization. To fit, **K053260 runs with 2 channels instead of 4**
-(`NUMCH=2` on the `jt053260` instance in `chipbox.sv`). The three chips target
-mutually exclusive platforms (MSX / Capcom / Konami), so they are never needed
-at once; the 2-channel limit only affects busy K053260 tracks. It can be raised
-back to 4 once area is freed elsewhere.
+SCC, OKIM6295 and K053260 together overflow the Cyclone V (99% ALM, badly
+degraded timing) even at maximum area optimization. The default bitstream
+therefore ships **SCC + OKIM6295**; **K053260 is built for simulation only**
+(gated behind `M4_SIM` in `chipbox.sv`, with its RTL and self-test kept so it
+stays verified). The three chips target mutually exclusive platforms
+(MSX / Capcom / Konami), so this loses no simultaneous playback. K053260 can be
+brought back on hardware — e.g. as a separate build variant — once area is
+freed; the integration is complete and tested, it just does not fit alongside
+the other two on this device.

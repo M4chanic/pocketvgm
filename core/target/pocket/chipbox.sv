@@ -311,10 +311,12 @@ module chipbox #(
   reg [20:0] k060_req_addr = 0;
   reg [20:0] k060_fa0 = 21'h1FFFFF, k060_fa1 = 21'h1FFFFF,
              k060_fa2 = 21'h1FFFFF, k060_fa3 = 21'h1FFFFF;
+`ifdef M4_SIM
   wire [20:0] k060_cur = k060_rr == 0 ? roma_addr : k060_rr == 1 ? romb_addr
                        : k060_rr == 2 ? romc_addr : romd_addr;
   wire [20:0] k060_cur_fa = k060_rr == 0 ? k060_fa0 : k060_rr == 1 ? k060_fa1
                           : k060_rr == 2 ? k060_fa2 : k060_fa3;
+`endif
 
   always @(posedge clk) begin
     ack <= 0;
@@ -380,6 +382,7 @@ module chipbox #(
       okim_rom_ok <= 1;
     end
 
+`ifdef M4_SIM
     // ROM-выборка K053260: круговой опрос 4 каналов, устаревший -> фетч
     if (!k060_pending && !k060_wait) begin
       if (k060_cur != k060_cur_fa) begin
@@ -400,6 +403,7 @@ module chipbox #(
       k060_wait <= 0;
       k060_rr <= k060_rr + 1'b1;
     end
+`endif
 
     // Байтовая запись: от секвенсора (DPCM в окно NES) либо от CPU
     // в sid-режиме (RAM в регионе NSF/SID)
@@ -1031,20 +1035,20 @@ module chipbox #(
   );
 
   // --------------------------------------------------------------------
-  // K053260 (jt053260): 4 канала PCM/ADPCM, у каждого свой ROM-порт. Все
-  // читают общий ROM в PSRAM (окно K060_BASE_WORD) — один фетчер по
-  // кругу подкачивает 4 канальных адреса в отдельные защёлки. Записи —
-  // по шине sound-CPU (addr[5:0]/din, строб cs&~wr_n).
+  // K053260 (jt053260): 4 канала PCM/ADPCM. НЕ помещался в битстрим вместе
+  // с SCC+OKIM6295 (99% ALM, slack -3.75) — по решению пользователя дропнут
+  // из Quartus-сборки, но остаётся под M4_SIM (симуляция + селфтест). Чтобы
+  // вернуть на железе: определить M4_SIM-эквивалент и освободить ~1К ALM.
   reg k060_cs = 0;
   reg k060_wr_n = 1;
   reg [5:0] k060_addr = 0;
   reg [7:0] k060_din = 0;
+`ifdef M4_SIM
   wire [20:0] roma_addr, romb_addr, romc_addr, romd_addr;
   reg [7:0] roma_data_r = 0, romb_data_r = 0, romc_data_r = 0, romd_data_r = 0;
   wire signed [15:0] k060_l, k060_r;
 
-  // NUMCH=2: 4-канальный K053260 урезан до 2 каналов ради площади FPGA
-  // (все три партнёрских чипа не влезали ~1%). Вернуть 4 — сменить на 4.
+  // NUMCH=2: урезан до 2 каналов (см. историю площади). Вернуть 4 — сменить.
   jt053260 #(.NUMCH(2)) k060 (
       .rst(chip_reset),
       .clk(clk),
@@ -1069,6 +1073,7 @@ module chipbox #(
       .sample(), .tim2(),
       .ch_en(5'b11111)
   );
+`endif
 
   // --------------------------------------------------------------------
   // NES APU (2A03, из NES_MiSTer). Регистры пишутся стробом CS через
@@ -1770,7 +1775,9 @@ module chipbox #(
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ym_l_g, ym_r_g, ay_g, pcm_l_g, pcm_r_g;
   reg signed [25:0] adpcm_l_g, adpcm_r_g, apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
-  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g, okim_g, k060_l_g, k060_r_g;
+  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g, okim_g;
+  // K053260 только в симуляции (дропнут из битстрима); в Quartus = 0
+  reg signed [25:0] k060_l_g = 0, k060_r_g = 0;
 
   always @(posedge clk) begin
     ym_l_g <= (ym_l * g_ym) >>> 6;
@@ -1791,8 +1798,10 @@ module chipbox #(
     sn_g <= (sn_wide * g_sn) >>> 6;
     scc_g <= (scc_wide * g_scc) >>> 6;
     okim_g <= (okim_wide * g_okim) >>> 6;
+`ifdef M4_SIM
     k060_l_g <= (k060_l * g_k060) >>> 6;
     k060_r_g <= (k060_r * g_k060) >>> 6;
+`endif
   end
 
   wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g + okim_g + k060_l_g;
@@ -2087,6 +2096,7 @@ module chipbox #(
                   okim_wrn <= 0;
                   state <= S_OKIM;
                 end
+`ifdef M4_SIM
                 EXT_K060: begin
                   // запись регистра K053260: addr[13:8], data[7:0]
                   k060_addr <= fifo_q[13:8];
@@ -2096,6 +2106,7 @@ module chipbox #(
                   scc_wait <= 0;
                   state <= S_K060_A;
                 end
+`endif
                 default: ;
               endcase
             end
@@ -2198,6 +2209,7 @@ module chipbox #(
           state <= S_IDLE;
         end
 
+`ifdef M4_SIM
         // K053260: держим cs/wr_n 2 такта cen_k060, затем снимаем
         S_K060_A: begin
           if (cen_k060) scc_wait <= scc_wait + 1'b1;
@@ -2212,6 +2224,7 @@ module chipbox #(
           if (cen_k060) scc_wait <= scc_wait + 1'b1;
           if (scc_wait >= 4'd2) state <= S_IDLE;
         end
+`endif
 
         // Байт DPCM в окно NES-RAM: ждём свободного канала записи
         S_NESRAM: begin
