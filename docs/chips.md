@@ -84,3 +84,12 @@ The six most common chips (YM2151, YM2612, SN76489, NES APU, OKIM6258, AY) are
 already implemented, covering the bulk of the top packs. The biggest remaining
 wins are the **arcade ADPCM/PCM partners** — OKIM6295, C140, K053260, SCC —
 because each one completes many packs whose FM half already plays here.
+
+## Note on FPGA area
+
+SCC, OKIM6295 and K053260 together overflow the Cyclone V by ~1% at maximum
+area optimization. To fit, **K053260 runs with 2 channels instead of 4**
+(`NUMCH=2` on the `jt053260` instance in `chipbox.sv`). The three chips target
+mutually exclusive platforms (MSX / Capcom / Konami), so they are never needed
+at once; the 2-channel limit only affects busy K053260 tracks. It can be raised
+back to 4 once area is freed elsewhere.

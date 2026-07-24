@@ -16,7 +16,7 @@
     Version: 1.0
     Date: 14-4-2023 */
 
-module jt053260(
+module jt053260 #(parameter NUMCH=4)( // m4pocket: NUMCH=2 режет площадь FPGA
     input                    rst,
     input                    clk,
     input                    cen,
@@ -292,6 +292,8 @@ jt053260_channel u_ch1(
     .snd_r    ( ch1_snd_r   )
 );
 
+generate
+if (NUMCH > 2) begin : g_ch23
 jt053260_channel u_ch2(
     .rst      ( rst         ),
     .clk      ( clk         ),
@@ -349,5 +351,23 @@ jt053260_channel u_ch3(
     .snd_l    ( ch3_snd_l   ),
     .snd_r    ( ch3_snd_r   )
 );
+end else begin : g_no_ch23
+// m4pocket: каналы 3-4 отключены ради площади — глушим их выходы
+assign ch2_sample = 1'b0;
+assign ch3_sample = 1'b0;
+assign bsy[2]     = 1'b0;
+assign bsy[3]     = 1'b0;
+assign match[2]   = 1'b0;
+assign match[3]   = 1'b0;
+assign romc_addr  = 21'd0;
+assign romc_cs    = 1'b0;
+assign romd_addr  = 21'd0;
+assign romd_cs    = 1'b0;
+assign ch2_snd_l  = 16'sd0;
+assign ch2_snd_r  = 16'sd0;
+assign ch3_snd_l  = 16'sd0;
+assign ch3_snd_r  = 16'sd0;
+end
+endgenerate
 
 endmodule

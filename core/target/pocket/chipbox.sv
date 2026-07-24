@@ -1043,7 +1043,9 @@ module chipbox #(
   reg [7:0] roma_data_r = 0, romb_data_r = 0, romc_data_r = 0, romd_data_r = 0;
   wire signed [15:0] k060_l, k060_r;
 
-  jt053260 k060 (
+  // NUMCH=2: 4-канальный K053260 урезан до 2 каналов ради площади FPGA
+  // (все три партнёрских чипа не влезали ~1%). Вернуть 4 — сменить на 4.
+  jt053260 #(.NUMCH(2)) k060 (
       .rst(chip_reset),
       .clk(clk),
       .cen(cen_k060),
