@@ -59,9 +59,9 @@ module gbsbox (
       .din(cpu_din),
       .rd(cpu_rd),
       .wr(cpu_wr),
-      .int_en(5'b0),
-      .int_flags_in(5'b0),
-      .int_flags_out(),
+      .int_en(int_ie),
+      .int_flags_in(int_if),
+      .int_flags_out(int_flags_out),
       .key_in(8'h00),
       .done(),
       .fault()
@@ -117,6 +117,26 @@ module gbsbox (
   // play-тик
   reg [2:0] tick_sync = 0;
   reg tick_pending = 0;
+
+  // Прерывания: IE ($FFFF), IF ($FF0F). vb_cpu сам вектрит и чистит
+  // обслуженный бит через int_flags_out. GBDK-рипы делают HALT в INIT,
+  // ожидая vblank — раздаём его по растру (ly входит в 144). HALT будит
+  // (IF&IE)!=0 даже без IME; поллинг-стаб держит DI, для него безвредно.
+  reg [4:0] int_ie = 0;
+  reg [4:0] int_if = 0;
+  wire [4:0] int_flags_out;
+  wire [4:0] vblank_pulse = (ly_pre == 9'd455 && ly_reg == 8'd143) ? 5'b00001 : 5'b0;
+
+  always @(posedge gb_clk) begin
+    if (rst) begin
+      int_ie <= 0;
+      int_if <= 0;
+    end else begin
+      int_if <= int_flags_out | vblank_pulse;
+      if (cpu_wr && cpu_a == 16'hFFFF) int_ie <= cpu_dout[4:0];
+      if (cpu_wr && cpu_a == 16'hFF0F) int_if <= cpu_dout[4:0] | vblank_pulse;
+    end
+  end
 
   // ROM-адрес到 PSRAM: $0000-$3FFF банк 0, $4000-$7FFF банк N
   wire [22:0] rom_lin = cpu_a[14]
@@ -184,6 +204,8 @@ module gbsbox (
     else if (a_d == 16'hFF04) cpu_din = div_reg;
     else if (a_d == 16'hFF44) cpu_din = ly_reg;
     else if (a_d == 16'hFF41) cpu_din = {6'b0, ly_reg >= 8'd144, 1'b0}; // STAT: mode1 в vblank
+    else if (a_d == 16'hFF0F) cpu_din = {3'b111, int_if};  // IF (верхние биты = 1)
+    else if (a_d == 16'hFFFF) cpu_din = {3'b111, int_ie};  // IE
     else if (a_d >= 16'hFF10 && a_d < 16'hFF40) cpu_din = snd_dout;
     else if (a_d >= 16'hFF80 && a_d < 16'hFFFF) cpu_din = hram_q;
     else cpu_din = 8'hFF;

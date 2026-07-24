@@ -392,6 +392,72 @@ static int gbs_selftest(const char* out, double seconds) {
     return (peak > 1000 && f1 > f0 * 1.1) ? 0 : 1;
 }
 
+// Селфтест прерывания GBS: INIT ставит IE=vblank, EI, HALT — и играет тон
+// ТОЛЬКО после пробуждения. Если vblank не доставлен, HALT висит вечно и
+// звука нет. Векторный обработчик $0040 в стабе = RETI. (Регресс для
+// GBDK-рипов, которые ждут vblank в INIT.)
+static int gbs_int_selftest(const char* out, double seconds) {
+    uint8_t stub[0x100] = {0};
+    static const uint8_t stub_body[] = {
+        0xF3,                    // $00A0 DI
+        0x31, 0xFF, 0xDF,        // LD SP,$DFFF
+        0x3E, 0x00,              // LD A,0
+        0xCD, 0x00, 0x04,        // CALL $0400 (INIT c HALT)
+        0xFA, 0xA0, 0xFE,        // $00A9 LD A,($FEA0)
+        0xA7,                    // AND A
+        0x28, 0xFA,              // JR Z,-6
+        0xEA, 0xA0, 0xFE,        // LD ($FEA0),A
+        0xCD, 0x40, 0x04,        // CALL $0440 (PLAY = RET)
+        0xC3, 0xA9, 0x00,        // JP $00A9
+    };
+    memcpy(stub + 0xA0, stub_body, sizeof stub_body);
+    stub[0x40] = 0xD9;           // $0040 vblank-вектор: RETI
+    static const uint8_t prog[] = {
+        // INIT @ $0400: включить vblank, EI, HALT — потом тон
+        0x3E, 0x01, 0xE0, 0xFF,  // LD A,1; LDH ($FF),A  -> IE=vblank
+        0xFB,                    // EI
+        0x76,                    // HALT (ждём vblank)
+        0x3E, 0x80, 0xE0, 0x26,  // NR52 on
+        0x3E, 0x77, 0xE0, 0x24,  // NR50
+        0x3E, 0xFF, 0xE0, 0x25,  // NR51
+        0x3E, 0x80, 0xE0, 0x11,  // NR11 duty
+        0x3E, 0xF0, 0xE0, 0x12,  // NR12 vol
+        0x3E, 0xD6, 0xE0, 0x13,  // NR13 freq lo
+        0x3E, 0x86, 0xE0, 0x14,  // NR14 trigger + freq hi
+        0xC9,                    // RET
+    };
+    uint8_t prog_full[0x50] = {0};
+    memcpy(prog_full, prog, sizeof prog);
+    prog_full[0x40] = 0xC9;      // PLAY @ $0440: RET
+
+    Tb tb;
+    tb.wb(6, true, 0);
+    tb.wb(0xC, true, 64 << 8);   // только GB
+    tb.wb(0x10, true, (uint32_t)(2000000.0 / CLK_HZ * 4294967296.0 + 0.5));
+    tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
+
+    tb.wb(8, true, 0x700000 + 0x400);
+    for (size_t i = 0; i < sizeof prog_full; i += 2)
+        tb.wb(9, true, prog_full[i] | (i + 1 < sizeof prog_full ? prog_full[i + 1] << 8 : 0));
+    for (size_t i = 0; i < sizeof stub; i++) tb.wb(0x11, true, i << 8 | stub[i]);
+
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 2048; i++) tb.step();
+    tb.wb(2, true, 0xC);         // gbs_mode | cpu_run
+
+    uint64_t cycles = (uint64_t)(seconds * CLK_HZ);
+    while (tb.cycle < cycles) tb.step();
+
+    uint32_t rate = (uint32_t)((double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ) + 0.5);
+    write_wav_file(out, tb.pcm, rate);
+    size_t n = tb.pcm.size() / 2;
+    int16_t peak = 0;
+    for (size_t i = n / 2; i < n; i++) peak = std::max(peak, (int16_t)abs(tb.pcm[2 * i]));
+    bool ok = peak > 1000;
+    fprintf(stderr, "селфтест GBS-int: peak=%d (тон после HALT) → %s\n", peak, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 // Селфтест SID: 6502 в C64-карте (вся память в PSRAM), пила ~440 Гц,
 // PLAY гоняет верхний байт частоты по кольцу через счётчик в RAM $0300.
 // Селфтест SCC: грузим синус в волновую таблицу ch1, ставим частоту/
@@ -873,6 +939,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--nsf-selftest")) selftest = true;
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
         else if (!strcmp(argv[i], "--gbs-selftest")) { return gbs_selftest(out, 2.0); }
+        else if (!strcmp(argv[i], "--gbs-int-selftest")) { return gbs_int_selftest(out, 2.0); }
         else if (!strcmp(argv[i], "--sid-selftest")) { return sid_selftest(out, 2.0); }
         else if (!strcmp(argv[i], "--cmds") && i + 1 < argc) { return play_cmds(argv[i+1], out); }
         else if (!strcmp(argv[i], "--pause-selftest")) { return pause_selftest(out); }

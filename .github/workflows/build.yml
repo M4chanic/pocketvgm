@@ -33,6 +33,8 @@ jobs:
           ./chipbox_tb --vrc6-selftest
           ./chipbox_tb --nsf-selftest
           ./chipbox_tb --gbs-selftest
+          ./chipbox_tb --gbs-int-selftest
+          ./chipbox_tb --scc-selftest
           ./chipbox_tb --sid-selftest
           ./chipbox_tb --apu-selftest
 
