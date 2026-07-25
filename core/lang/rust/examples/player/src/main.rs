@@ -441,6 +441,14 @@ impl CmdSink {
     /// В спине живут VU и снятие перемотки (стримовые форматы: mode 0).
     fn push(&mut self, word: u32) {
         if self.since_check == 0 {
+            // Опрос обязан идти НЕ только в спине backpressure. При
+            // перемотке секвенсор дренит FIFO в 8 раз быстрее, спин почти
+            // не запускается, а в плотных DAC-местах (ударные Mega Drive)
+            // события Wait не приходят — отпускание R оставалось
+            // незамеченным и перемотка залипала на всю музыку.
+            self.btn.scan();
+            self.btn.sync_ff(0);
+            vu_tick(&mut self.vu_last);
             while chipbox_status() & 0x1FFF > 1900 {
                 self.btn.scan();
                 self.btn.sync_ff(0);
