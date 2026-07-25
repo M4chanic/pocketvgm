@@ -21,7 +21,7 @@ module gbsbox (
     // запись стаба из clk_sys (истинная двухпортовая BRAM)
     input wire sys_clk,
     input wire stub_wr,
-    input wire [9:0] stub_wr_addr,
+    input wire [14:0] stub_wr_addr,
     input wire [7:0] stub_wr_data,
 
     // play-тик (toggle из clk_sys, синхронизируется здесь)
@@ -89,13 +89,19 @@ module gbsbox (
 
   // ------------------------------------------------------------------
   // Память
-  reg [7:0] stub_rom[1024];
+  // ROM целиком в BRAM: $0000-$7FFF (стаб в младшем килобайте, тело
+  // рипа с его load-адреса). Раньше тело читалось из PSRAM по запросу,
+  // а SM83 брал rom_data уже на следующем такте gb_clk, ничего не
+  // дожидаясь. На 1 МГц (только симулятор) круговой путь успевал, на
+  // штатных 4.19 МГц — нет, и процессор исполнял мусор: отсюда молчание
+  // на железе при растущем счётчике фетчей. Из BRAM байт готов за такт.
+  reg [7:0] rom_ram[32768];
   reg [7:0] wram[8192];
   reg [7:0] cram[8192];
   reg [7:0] hram[127];
 
   always @(posedge sys_clk) begin
-    if (stub_wr) stub_rom[stub_wr_addr] <= stub_wr_data;
+    if (stub_wr) rom_ram[stub_wr_addr] <= stub_wr_data;
   end
 
   // банк ROM (MBC-подобный)
@@ -143,7 +149,8 @@ module gbsbox (
       ? {1'b0, rom_bank, cpu_a[13:0]}
       : {8'b0, cpu_a[14:0]};
 
-  reg [7:0] stub_q, wram_q, cram_q, hram_q;
+  reg [7:0] rom_q, wram_q, cram_q, hram_q;
+  reg rom_hit_d = 0;
   reg [15:0] a_d;
 
   always @(posedge gb_clk) begin
@@ -164,13 +171,18 @@ module gbsbox (
 
     // защёлкиваем адрес и BRAM-чтения каждый такт
     a_d <= cpu_a;
-    stub_q <= stub_rom[cpu_a[9:0]];
+    rom_q <= rom_ram[cpu_a[14:0]];
+    // банк 1 ложится на те же адреса, что и линейный файл; всё выше
+    // остаётся на старом пути через PSRAM
+    rom_hit_d <= !cpu_a[14] || rom_bank == 8'd1;
     wram_q <= wram[cpu_a[12:0]];
     cram_q <= cram[cpu_a[12:0]];
     hram_q <= hram[cpu_a[6:0]];
 
-    // ROM-запрос при смене адреса в ROM-области
-    if (!cpu_a[15] && cpu_a != a_d) begin
+    // ROM-запрос в PSRAM нужен только для банков выше первого: всё
+    // остальное лежит в BRAM и читается за такт. Раньше запрос слался
+    // на каждый адрес, и шина PSRAM грелась впустую.
+    if (!cpu_a[15] && cpu_a != a_d && cpu_a[14] && rom_bank != 8'd1) begin
       rom_addr <= rom_lin;
       rom_req_toggle <= ~rom_req_toggle;
     end
@@ -195,9 +207,8 @@ module gbsbox (
   wire [7:0] boot_jp = a_d[1:0] == 2'd0 ? 8'hC3 : a_d[1:0] == 2'd1 ? 8'hA0 : 8'h00;
 
   always @(*) begin
-    if (!a_d[15]) cpu_din = a_d < 16'h0400
-        ? (!booted && a_d < 16'h0003 ? boot_jp : stub_q)
-        : rom_data;
+    if (!a_d[15]) cpu_din = !booted && a_d < 16'h0003 ? boot_jp
+        : rom_hit_d ? rom_q : rom_data;
     else if (a_d[15:13] == 3'b101) cpu_din = cram_q;
     else if (a_d[15:13] == 3'b110) cpu_din = wram_q;
     else if (a_d == 16'hFEA0) cpu_din = {7'b0, tick_pending};

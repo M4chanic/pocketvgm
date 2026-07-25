@@ -847,11 +847,22 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         return error_wait("GBS", "load address < $0400 unsupported");
     }
 
-    // Данные линейно от load-адреса
+    // Данные линейно от load-адреса. В PSRAM — для банков выше первого,
+    // в BRAM ядра ($0000-$7FFF) — для всего остального: оттуда SM83
+    // читает байт за такт. Через PSRAM фетч не успевал на штатных
+    // 4.19 МГц, и процессор исполнял мусор вместо кода.
     chipbox_write(8, NSF_PSRAM_BASE + load as u32);
     for pair in data[0x70..].chunks(2) {
         let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
         chipbox_write(9, w);
+    }
+    let body = &data[0x70..];
+    let fits = body.len().min(0x8000 - load as usize);
+    for (i, &b) in body[..fits].iter().enumerate() {
+        chipbox_write(0x11, (load as u32 + i as u32) << 8 | b as u32);
+    }
+    if body.len() > fits {
+        println!("GBS: {} байт за $7FFF читаются из PSRAM (банки >1)", body.len() - fits);
     }
 
     // Темп: таймер из заголовка или VBlank 59.73 Гц

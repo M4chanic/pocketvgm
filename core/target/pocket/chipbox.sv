@@ -273,7 +273,7 @@ module chipbox #(
   localparam [21:0] K060_BASE_WORD = 22'h10_0000;  // байт 0x200000
   reg [31:0] gb_phase_inc = DEFAULT_GB_PHASE_INC;
   reg gb_stub_wr = 0;
-  reg [9:0] gb_stub_wr_addr = 0;
+  reg [14:0] gb_stub_wr_addr = 0;
   reg [7:0] gb_stub_wr_data = 0;
 
   // Загрузка сэмпл-ROM и мост чтения SegaPCM -> внешняя память.
@@ -647,7 +647,7 @@ module chipbox #(
 `endif
           5'h10: gb_phase_inc <= data_write;
           5'h11: begin
-            gb_stub_wr_addr <= data_write[17:8];
+            gb_stub_wr_addr <= data_write[22:8];
             gb_stub_wr_data <= data_write[7:0];
             gb_stub_wr <= 1;
           end

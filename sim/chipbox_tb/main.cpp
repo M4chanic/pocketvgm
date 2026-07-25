@@ -476,6 +476,7 @@ static int gbs_selftest(const char* out, double seconds) {
     tb.wb(8, true, 0x700000 + 0x400);
     for (size_t i = 0; i < sizeof prog; i += 2)
         tb.wb(9, true, prog[i] | (i + 1 < sizeof prog ? prog[i+1] << 8 : 0));
+    for (size_t i = 0; i < sizeof prog; i++) tb.wb(0x11, true, (uint32_t)(0x400 + i) << 8 | prog[i]);
     for (size_t i = 0; i < sizeof stub; i++) tb.wb(0x11, true, i << 8 | stub[i]);
 
     tb.wb(2, true, 1);
@@ -549,6 +550,7 @@ static int gbs_int_selftest(const char* out, double seconds) {
     tb.wb(8, true, 0x700000 + 0x400);
     for (size_t i = 0; i < sizeof prog_full; i += 2)
         tb.wb(9, true, prog_full[i] | (i + 1 < sizeof prog_full ? prog_full[i + 1] << 8 : 0));
+    for (size_t i = 0; i < sizeof prog_full; i++) tb.wb(0x11, true, (uint32_t)(0x400 + i) << 8 | prog_full[i]);
     for (size_t i = 0; i < sizeof stub; i++) tb.wb(0x11, true, i << 8 | stub[i]);
 
     tb.wb(2, true, 1);
@@ -959,6 +961,9 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     tb.wb(8, true, 0x700000 + load);
     for (size_t i = 0x70; i < d.size(); i += 2)
         tb.wb(9, true, d[i] | (i + 1 < d.size() ? d[i+1] << 8 : 0));
+    // тело так же в BRAM ядра: ROM теперь читается оттуда
+    for (size_t i = 0x70; i < d.size() && load + (i - 0x70) < 0x8000; i++)
+        tb.wb(0x11, true, (uint32_t)(load + (i - 0x70)) << 8 | d[i]);
 
     double play_hz = 59.73;
     if (tac & 4) {
