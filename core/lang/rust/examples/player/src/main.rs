@@ -1744,16 +1744,19 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         chipbox_write(0x25, (((k060_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
         chipbox_write(0x26, 64); // k060_gain
     }
-    // Genesis-баланс: PSG заметно тише FM
+    // Genesis-баланс: PSG заметно тише FM. Гейн FM включает и OPN: у
+    // файла YM2608/YM2203 поле клока YM2612 пустое, и раньше FM глушился
+    // в ноль — маршрутизация работала, а на выходе была тишина.
     chipbox_write(
         0x15,
-        if sn_clk != 0 { 32u32 } else { 0 } << 8 | if fm_clk != 0 { 64u32 } else { 0 },
+        if sn_clk != 0 { 32u32 } else { 0 } << 8
+            | if fm_clk != 0 || opn_clk != 0 { 64u32 } else { 0 },
     );
     // Гейны: неиспользуемые чипы глушим; SegaPCM 34/64 — баланс Out Run
     // по MAME (0.30 FM / 0.70 PCM с учётом нативных амплитуд ядер)
     let gains = if adpcm_clk != 0 { 64u32 } else { 0 } << 24
         | if pcm_clk != 0 { 34u32 } else { 0 } << 16
-        | if ay_clk != 0 { 64u32 } else { 0 } << 8
+        | if ay_clk != 0 || opn_clk != 0 { 64u32 } else { 0 } << 8
         | if ym_clk != 0 { 64u32 } else { 0 };
     chipbox_write(6, gains);
     // {opl_gain, sid_gain, gb_gain, apu_gain}. У VGM-AdLib регистры громкости

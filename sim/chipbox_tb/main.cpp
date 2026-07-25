@@ -1257,9 +1257,14 @@ int main(int argc, char** argv) {
                      : ym3526_clk ? ym3526_clk * 4 : 0;
     uint32_t scc_clk  = hdr_end >= 0xA0 ? rd32(d, 0x9C) & 0x3FFFFFFF : 0;
     uint32_t k060_clk = hdr_end >= 0xB0 ? rd32(d, 0xAC) & 0x3FFFFFFF : 0;
+    uint32_t huc_clk  = hdr_end >= 0xA8 ? rd32(d, 0xA4) & 0x3FFFFFFF : 0;
+    // OPN: FM уходит на YM2612, SSG на jt49; делители FM 1/6, SSG 1/4
+    uint32_t ym2608_clk = hdr_end >= 0x4C ? rd32(d, 0x48) & 0x3FFFFFFF : 0;
+    uint32_t ym2203_clk = hdr_end >= 0x48 ? rd32(d, 0x44) & 0x3FFFFFFF : 0;
+    uint32_t opn_clk = ym2608_clk ? ym2608_clk : ym2203_clk;
 
     if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk
-        && !scc_clk && !k060_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
+        && !scc_clk && !k060_clk && !huc_clk && !opn_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
 
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
@@ -1297,6 +1302,19 @@ int main(int argc, char** argv) {
         // K053260: 0xBA рег знач -> OP_EXT|EXT_K060
         else if (cmd == 0xBA) {
             cmds.push_back(0xF2000000u | d[pos] << 8 | d[pos+1]); pos += 2;
+        }
+        // HuC6280: 0xB9 рег знач -> OP_EXT|EXT_HUC
+        else if (cmd == 0xB9) {
+            cmds.push_back(0xF3000000u | (d[pos] & 0xF) << 8 | d[pos+1]); pos += 2;
+        }
+        // OPN (YM2203 0x55, YM2608 0x56/0x57): низ порта 0 — SSG, от $20 — FM
+        else if (cmd == 0x55 || cmd == 0x56 || cmd == 0x57) {
+            uint32_t port = (cmd == 0x57) ? 1 : 0;
+            uint8_t a = d[pos], v = d[pos+1];
+            if (port == 0 && a < 0x10) cmds.push_back(0x20000000u | (a & 0xF) << 8 | v);
+            else if (a >= 0x20 && !(port == 0 && a >= 0x2D && a <= 0x2F))
+                cmds.push_back(0xD0000000u | port << 16 | a << 8 | v);
+            pos += 2;
         }
         else if ((cmd & 0xF0) == 0x80) {
             uint8_t b = dac_ptr < dac_bank.size() ? dac_bank[dac_ptr] : 0;
@@ -1402,7 +1420,7 @@ int main(int argc, char** argv) {
     // Гейны: неиспользуемые чипы глушим (idle-DC/шум не попадает в микс);
     // SegaPCM 34/64 — баланс Out Run по MAME (0.30 FM / 0.70 PCM)
     tb.wb(6, true, (adpcm_clk ? 64u : 0u) << 24 | (pcm_clk ? 34u : 0u) << 16
-                 | (ay_clk ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
+                 | ((ay_clk || opn_clk) ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
     tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 64u : 0u));
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (scc_clk) {
@@ -1412,6 +1430,15 @@ int main(int argc, char** argv) {
     if (k060_clk) {
         tb.wb(0x25, true, (uint32_t)((double)k060_clk / CLK_HZ * 4294967296.0 + 0.5));
         tb.wb(0x26, true, 64);
+    }
+    if (huc_clk) {
+        tb.wb(0x27, true, (uint32_t)((double)huc_clk / CLK_HZ * 4294967296.0 + 0.5));
+        tb.wb(0x28, true, 64);
+    }
+    if (opn_clk) {
+        // мастер-клок в FM как есть, вчетверо меньший — в SSG
+        tb.wb(0x16, true, (uint32_t)((double)opn_clk / CLK_HZ * 4294967296.0 + 0.5));
+        tb.wb(4, true, (uint32_t)((double)(opn_clk / 4) / CLK_HZ * 4294967296.0 + 0.5));
     }
     if (adpcm_clk) {
         double inc = (double)adpcm_clk / CLK_HZ * 4294967296.0;
@@ -1424,7 +1451,7 @@ int main(int argc, char** argv) {
         tb.wb(0x16, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));
     }
     if (sn_clk) tb.wb(0x17, true, (uint32_t)((double)sn_clk / CLK_HZ * 4294967296.0 + 0.5));
-    tb.wb(0x15, true, (sn_clk ? 32u : 0u) << 8 | (fm_clk ? 64u : 0u));
+    tb.wb(0x15, true, (sn_clk ? 32u : 0u) << 8 | ((fm_clk || opn_clk) ? 64u : 0u));
     tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
     // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
     if (scc_clk) tb.wb(0, true, 0xF0000000u | (7u << 16));

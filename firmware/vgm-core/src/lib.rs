@@ -171,7 +171,7 @@ impl Header {
             ym2612: clock_field(d, 0x2C, hdr_end),
             ym2203: clock_field(d, 0x44, hdr_end),
             ym2608: clock_field(d, 0x48, hdr_end),
-            huc6280: clock_field(d, 0xA5, hdr_end),
+            huc6280: clock_field(d, 0xA4, hdr_end),
             ym2151: clock_field(d, 0x30, hdr_end),
             sega_pcm: clock_field(d, 0x38, hdr_end),
             sega_pcm_iface: if version >= 0x151 { clock_field(d, 0x3C, hdr_end) } else { 0 },
@@ -572,5 +572,43 @@ mod tests {
             Event::Write { chip: Chip::Opn, port: 1, addr: 0xB4, data: 0xC0 }
         );
         assert_eq!(r.next_event().unwrap(), Event::End);
+    }
+
+    /// Смещения полей клока в заголовке. Ловится только так: у HuC6280
+    /// было записано 0xA5 вместо 0xA4, и промах на байт давал 14 кГц
+    /// вместо 3.58 МГц — заметил лишь на настоящем рипе PC Engine.
+    #[test]
+    fn clock_fields_sit_at_documented_offsets() {
+        let mut v = alloc::vec![0u8; 0x100];
+        v[0..4].copy_from_slice(VGM_MAGIC);
+        v[0x08..0x0C].copy_from_slice(&0x0161u32.to_le_bytes());
+        // заголовок до 0x100, чтобы поля за 0x80 попали внутрь
+        v[0x34..0x38].copy_from_slice(&(0x100u32 - 0x34).to_le_bytes());
+        let fields: [(usize, u32); 8] = [
+            (0x0C, 3_579_545),  // SN76489
+            (0x2C, 7_670_453),  // YM2612
+            (0x30, 4_000_000),  // YM2151
+            (0x44, 3_993_600),  // YM2203
+            (0x48, 7_987_200),  // YM2608
+            (0x5C, 14_318_180), // YMF262
+            (0x9C, 1_789_772),  // K051649
+            (0xA4, 3_579_545),  // HuC6280
+        ];
+        for (off, val) in fields {
+            v[off..off + 4].copy_from_slice(&val.to_le_bytes());
+        }
+        v.push(0x66);
+        let eof = (v.len() - 4) as u32;
+        v[0x04..0x08].copy_from_slice(&eof.to_le_bytes());
+
+        let c = Header::parse(&v).unwrap().clocks;
+        assert_eq!(c.sn76489, 3_579_545);
+        assert_eq!(c.ym2612, 7_670_453);
+        assert_eq!(c.ym2151, 4_000_000);
+        assert_eq!(c.ym2203, 3_993_600);
+        assert_eq!(c.ym2608, 7_987_200);
+        assert_eq!(c.ymf262, 14_318_180);
+        assert_eq!(c.k051649, 1_789_772);
+        assert_eq!(c.huc6280, 3_579_545);
     }
 }
