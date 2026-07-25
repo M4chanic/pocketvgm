@@ -33,6 +33,7 @@ chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB)
 # неявные провода, защёлки, выход за границы массива. Ширины операндов
 # сюда не входят — их в проекте давний безобидный шум.
 lint:
+	@python3 ../../scripts/check_multidriver.py
 	@verilator --lint-only -Wno-fatal --top-module chipbox \
 		-GCLK_HZ=8000000 -DM4_SIM -I$(VB_HDL) \
 		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) \

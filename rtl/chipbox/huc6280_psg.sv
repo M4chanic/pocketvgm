@@ -63,16 +63,10 @@ module huc6280_psg (
         ch_dda[i] <= 0;
         bal_l[i]  <= 4'hF;
         bal_r[i]  <= 4'hF;
-        dda[i]    <= 0;
-        cnt[i]    <= 0;
-        step[i]   <= 0;
-        wr_idx[i] <= 0;
-      end
-      for (i = 4; i < 6; i = i + 1) begin
-        noise_en[i]  <= 0;
-        noise_fq[i]  <= 0;
-        noise_cnt[i] <= 0;
-        lfsr[i]      <= 18'h1;
+        dda[i]      <= 0;
+        wr_idx[i]   <= 0;
+        noise_en[i] <= 0;
+        noise_fq[i] <= 0;
       end
     end else if (wr) begin
       case (addr)
@@ -108,9 +102,17 @@ module huc6280_psg (
 
   // ------------------------------------------------------------------
   // Шаг частоты: период 0 читается как 4096
+  // Счётчики частоты и шума живут только здесь: регистр, присвоенный в
+  // двух always-блоках, — два драйвера, и Quartus такое отвергает
+  // (Verilator для массивов молчит, поэтому ловится только сборкой).
   always @(posedge clk) begin
     if (rst) begin
-      // очищено выше
+      for (i = 0; i < 6; i = i + 1) begin
+        cnt[i]       <= 0;
+        step[i]      <= 0;
+        noise_cnt[i] <= 0;
+        lfsr[i]      <= 18'h1;
+      end
     end else if (cen) begin
       for (i = 0; i < 6; i = i + 1) begin
         if (cnt[i] == 12'd0) begin
