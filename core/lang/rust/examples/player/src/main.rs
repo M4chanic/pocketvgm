@@ -1713,6 +1713,21 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     if opl_clk != 0 {
         chipbox_write(0x14, (((opl_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
     }
+    // OPN (YM2203/YM2608): своего RTL нет, но FM-часть регистрово
+    // совместима с нашим YM2612, а SSG — это jt49. Делители по умолчанию
+    // у обоих чипов FM 1/6 и SSG 1/4 — те же, что закладывает jt12,
+    // поэтому мастер-клок уходит в FM как есть, а в SSG вчетверо меньше
+    // (7.987 МГц OPNA -> ~2 МГц, типовая частота AY). ADPCM и ритм-часть
+    // мы не умеем: они молчат.
+    let opn_clk = if header.clocks.ym2608 != 0 {
+        header.clocks.ym2608 & 0x3FFF_FFFF
+    } else {
+        header.clocks.ym2203 & 0x3FFF_FFFF
+    };
+    if opn_clk != 0 {
+        chipbox_write(0x16, (((opn_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+        chipbox_write(4, (((opn_clk as u64 / 4) << 32) / CHIPBOX_CLK_HZ) as u32);
+    }
     let okim_clk = header.clocks.okim6295 & 0x7FFF_FFFF; // бит31 = флаг чипа
     if okim_clk != 0 {
         chipbox_write(0x23, (((okim_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
@@ -1788,6 +1803,16 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::DataBlock { kind: 0x00, start, len }) => {
                 dac_bank.extend_from_slice(&data[start..start + len]);
+            }
+            Ok(Event::Write { chip: Chip::Opn, port, addr, data }) => {
+                if port == 0 && addr < 0x10 {
+                    sink.push(OP_AY | ((addr & 0xF) as u32) << 8 | data as u32);
+                } else if addr >= 0x20 && !(port == 0 && (0x2D..=0x2F).contains(&addr)) {
+                    // $10-$1F порта 0 — ритм, низ порта 1 — ADPCM-B:
+                    // и то и другое пропускаем. $2D-$2F — прескейлер,
+                    // jt12 его не знает, а частоту мы задали снаружи.
+                    sink.push(OP_FM2612 | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
+                }
             }
             Ok(Event::Write { chip: Chip::Ay8910, addr, data, .. }) => {
                 sink.push(OP_AY | ((addr & 0xF) as u32) << 8 | data as u32);

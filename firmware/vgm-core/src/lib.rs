@@ -37,6 +37,10 @@ pub enum Chip {
     Okim6295,
     K051649,
     K053260,
+    /// OPN-семейство (YM2203/YM2608). Отдельного RTL под них нет, но
+    /// FM-часть регистрово совместима с нашим YM2612, а SSG — это ровно
+    /// наш jt49. `port` = банк регистров (0 или 1; у YM2203 всегда 0).
+    Opn,
     /// OPL-семейство (YM3812/YM3526/YMF262) — играется на нашем OPL3.
     /// `port` = банк регистров (0 или 1; у OPL2 всегда 0).
     Opl,
@@ -78,6 +82,8 @@ pub struct Clocks {
     pub sn76489: u32,
     pub ym2413: u32,
     pub ym2612: u32,
+    pub ym2203: u32,
+    pub ym2608: u32,
     pub ym2151: u32,
     pub sega_pcm: u32,
     pub sega_pcm_iface: u32,
@@ -159,6 +165,8 @@ impl Header {
             sn76489: clock_field(d, 0x0C, hdr_end),
             ym2413: clock_field(d, 0x10, hdr_end),
             ym2612: clock_field(d, 0x2C, hdr_end),
+            ym2203: clock_field(d, 0x44, hdr_end),
+            ym2608: clock_field(d, 0x48, hdr_end),
             ym2151: clock_field(d, 0x30, hdr_end),
             sega_pcm: clock_field(d, 0x38, hdr_end),
             sega_pcm_iface: if version >= 0x151 { clock_field(d, 0x3C, hdr_end) } else { 0 },
@@ -230,6 +238,9 @@ impl<'a> Reader<'a> {
             0x52 => self.reg_write(Chip::Ym2612, 0)?,
             0x53 => self.reg_write(Chip::Ym2612, 1)?,
             0x54 => self.reg_write(Chip::Ym2151, 0)?,
+            // YM2203 — один порт; YM2608 — два
+            0x55 | 0x56 => self.reg_write(Chip::Opn, 0)?,
+            0x57 => self.reg_write(Chip::Opn, 1)?,
             // OPL-семейство на нашем OPL3: YM3812/YM3526 — один банк,
             // YMF262 — два порта (0x5E/0x5F)
             0x5A | 0x5B | 0x5E => self.reg_write(Chip::Opl, 0)?,
@@ -533,5 +544,27 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn parses_opn_writes() {
+        // 0x55 YM2203, 0x56/0x57 YM2608 порт 0/1 -> Chip::Opn
+        let body = [0x55, 0x07, 0x38, 0x56, 0x00, 0xFE, 0x57, 0xB4, 0xC0, 0x66];
+        let d = synth_vgm(&body, None);
+        let h = Header::parse(&d).unwrap();
+        let mut r = Reader::new(&d, h.data_offset);
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::Opn, port: 0, addr: 0x07, data: 0x38 }
+        );
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::Opn, port: 0, addr: 0x00, data: 0xFE }
+        );
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::Opn, port: 1, addr: 0xB4, data: 0xC0 }
+        );
+        assert_eq!(r.next_event().unwrap(), Event::End);
     }
 }
