@@ -61,7 +61,8 @@ updates the core files.
 - **R (hold)** — fast forward ×8
 - **Select** — playlist browser
 
-Track switching and the playlist browser are still being stabilised.
+On start the core shows a title screen and waits for **A**, unless a file was
+just picked through Load — then it plays straight away.
 
 ## Repository layout
 
@@ -92,8 +93,8 @@ cd sim/chipbox_tb && make && ./chipbox_tb      # path self-tests
 ```
 
 Bitstream — Quartus 21.1 (Docker image `raetro/quartus:21.1`); firmware —
-Rust nightly (custom target `riscv32imafdc-unknown-none-elf.json`). The
-easiest reference is [`.github/workflows/build.yml`](.github/workflows/build.yml).
+Rust nightly for `riscv32imac` (soft float: the FPU was removed to free
+logic). The easiest reference is [`.github/workflows/build.yml`](.github/workflows/build.yml).
 
 ## Code sources and acknowledgements
 
