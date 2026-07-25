@@ -78,7 +78,15 @@ pub fn open(path: &str) -> bool {
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
         p.APF_BRIDGE.request_openfile.write(|w| w.bits(1));
     }
-    wait_op()
+    if !wait_op() {
+        return false;
+    }
+    // Запрос «успешен» и для несуществующего файла — про это было
+    // написано выше, но не проверялось. Без проверки слот сохранял
+    // прошлое содержимое, и плеер молча играл предыдущий трек вместо
+    // выбранного либо утыкался в «unknown format».
+    let size = unsafe { core::ptr::read_volatile((STRUCT_BUF + 260) as *const u32) };
+    size != 0 && size != 0xFFFF_FFFF
 }
 
 /// Чтение из произвольного слота с таймаутом (block_op_complete litex
@@ -93,6 +101,27 @@ pub fn read_slot_to(slot_id: u32, len: u32, addr: u32) -> bool {
         p.APF_BRIDGE.request_read.write(|w| w.bits(1));
     }
     wait_op()
+}
+
+/// Расширение пути без срезов строки: `path[len-4..]` падает, если путь
+/// кончается многобайтовым символом UTF-8 (панику словили на .m3u с
+/// кириллицей в имени). Сравниваем байты — регистр ASCII не важен.
+pub fn has_ext(path: &str, ext: &str) -> bool {
+    let (b, e) = (path.as_bytes(), ext.as_bytes());
+    b.len() > e.len() && b[b.len() - e.len()..].eq_ignore_ascii_case(e)
+}
+
+/// Хвост строки длиной не больше n байт, обрезанный по границе символа
+pub fn tail(s: &str, n: usize) -> &str {
+    if s.len() <= n {
+        return s;
+    }
+    let b = s.as_bytes();
+    let mut i = s.len() - n;
+    while i < s.len() && (b[i] & 0xC0) == 0x80 {
+        i += 1;
+    }
+    core::str::from_utf8(&b[i..]).unwrap_or("")
 }
 
 /// Каталог из пути ("a/b/c.vgm" -> "a/b/")

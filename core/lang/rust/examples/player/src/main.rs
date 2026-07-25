@@ -73,8 +73,14 @@ fn ctrl_pause(on: bool) {
 
 /// Перемотка: зовётся из горячих циклов, поэтому пишет только при смене
 fn ctrl_ff(on: bool) {
-    ctrl_flag(CTRL_FF, on, false);
+    // Периодически переписываем регистр даже без смены состояния: если
+    // запись потерялась или её затёр другой путь, перемотка иначе висит
+    // до конца трека. Раз в 512 опросов — доли секунды, шину не грузит.
+    let n = CTRL_TICK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    ctrl_flag(CTRL_FF, on, n % 512 == 0);
 }
+
+static CTRL_TICK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 fn ctrl_flag(bit: u32, on: bool, always: bool) {
     use core::sync::atomic::Ordering::Relaxed;
@@ -1426,8 +1432,7 @@ fn main() -> ! {
     let mut list: alloc::vec::Vec<String>;
     let mut idx: usize = 0;
 
-    let is_m3u = own_path.len() > 4
-        && own_path[own_path.len() - 4..].eq_ignore_ascii_case(".m3u");
+    let is_m3u = files::has_ext(&own_path, ".m3u");
     if is_m3u {
         list = files::parse_m3u(staged, &base);
         println!("Плейлист: {} треков", list.len());
@@ -1504,7 +1509,7 @@ fn main() -> ! {
         };
         let ctl = if !opened {
             // код ошибки APF и хвост пути — для диагностики с экрана
-            let tail = &path[path.len().saturating_sub(26)..];
+            let tail = files::tail(&path, 26);
             let mut msg = String::from("open err ");
             msg.push((b'0' + (files::last_err() % 8) as u8) as char);
             msg.push_str(": ");
@@ -1578,7 +1583,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         Ok(h) => h,
         Err(_) => {
             let path = &pl.list[pl.idx];
-            let tail = &path[path.len().saturating_sub(24)..];
+            let tail = files::tail(&path, 24);
             let mut msg = String::from("unknown format: ");
             msg.push_str(tail);
             return error_wait("?", &msg);

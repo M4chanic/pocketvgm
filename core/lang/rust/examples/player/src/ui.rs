@@ -183,6 +183,29 @@ pub fn title(version: &str) {
     text(12, 138, "choose Load, pick a file.", DIM, 1);
 }
 
+/// Разбить строку на две по max байт, не разрезая символ UTF-8.
+/// Резать строку срезом нельзя: на многобайтовом символе это паника.
+fn split_fit(s: &str, max: usize) -> (&str, &str) {
+    if s.len() <= max {
+        return (s, "");
+    }
+    let b = s.as_bytes();
+    let mut cut = max;
+    while cut > 0 && (b[cut] & 0xC0) == 0x80 {
+        cut -= 1;
+    }
+    // по возможности рвём по пробелу, чтобы слово не разваливалось
+    let brk = b[..cut].iter().rposition(|&c| c == b' ').unwrap_or(cut);
+    let (a, rest) = s.split_at(if brk + 8 >= cut { brk } else { cut });
+    let rest = rest.trim_start();
+    let mut end = rest.len().min(max);
+    let rb = rest.as_bytes();
+    while end > 0 && end < rest.len() && (rb[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+    (a.trim_end(), &rest[..end])
+}
+
 pub fn screen(
     format: &str,
     title: &str,
@@ -205,19 +228,24 @@ pub fn screen(
     }
     hline(36, DIM);
 
-    // название — с переносом на две строки, ниже — игра/автор
+    // Название и подпись делят три строки: 46 / 58 / 70. Ниже — фикс:
+    // system с 88, а прогресс-бар с 138, двигать нечего. Поэтому если
+    // название уложилось в строку, вторую отдаём подписи — иначе
+    // «Игра - Композитор» обрезалось ровно на 30 знаках.
     let max_chars = (W - 24) / 8;
-    let bytes = title.as_bytes();
-    let line1 = core::str::from_utf8(&bytes[..bytes.len().min(max_chars)]).unwrap_or("");
-    text(12, 46, line1, FG, 1);
-    if bytes.len() > max_chars {
-        let end = bytes.len().min(max_chars * 2);
-        let line2 = core::str::from_utf8(&bytes[max_chars..end]).unwrap_or("");
-        text(12, 58, line2, FG, 1);
+    let (t1, t2) = split_fit(title, max_chars);
+    text(12, 46, t1, FG, 1);
+    let sub_y = if t2.is_empty() {
+        58
+    } else {
+        text(12, 58, t2, FG, 1);
+        70
+    };
+    let (s1, s2) = split_fit(sub, max_chars);
+    text(12, sub_y, s1, DIM, 1);
+    if !s2.is_empty() && sub_y == 58 {
+        text(12, 70, s2, DIM, 1);
     }
-    let sb = sub.as_bytes();
-    let subline = core::str::from_utf8(&sb[..sb.len().min(max_chars)]).unwrap_or("");
-    text(12, 72, subline, DIM, 1);
 
     text(12, 88, "system:", DIM, 1);
     text(12 + 64, 88, system, FG, 1);
