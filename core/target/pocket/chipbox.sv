@@ -370,6 +370,7 @@ module chipbox #(
       gbs_fetch <= gbs_fetch + 1'b1;
     end
 
+`ifdef M4_SIM
     // ROM-выборка OKIM6295: запрос при рассинхроне адреса
     if (okim_rom_addr != okim_fetched_addr && !okim_pending && !okim_wait) begin
       okim_pending <= 1;
@@ -381,6 +382,7 @@ module chipbox #(
       okim_wait <= 0;
       okim_rom_ok <= 1;
     end
+`endif
 
 `ifdef M4_SIM
     // ROM-выборка K053260: круговой опрос 4 каналов, устаревший -> фетч
@@ -474,6 +476,7 @@ module chipbox #(
         mem_addr <= {4'b0, rom_word};
         rom_pending <= 0;
         rom_wait_data <= 1;
+`ifdef M4_SIM
       end else if (okim_pending) begin
         mem_rd <= 1;
         mem_addr <= OKIM_BASE_WORD + {5'b0, okim_rom_addr[17:1]};
@@ -481,6 +484,7 @@ module chipbox #(
         okim_req_addr <= okim_rom_addr;
         okim_pending <= 0;
         okim_wait <= 1;
+`endif
       end else if (k060_pending) begin
         mem_rd <= 1;
         mem_addr <= K060_BASE_WORD + {2'b0, k060_req_addr[20:1]};
@@ -1007,11 +1011,12 @@ module chipbox #(
   );
 
   // --------------------------------------------------------------------
-  // OKIM6295 (jt6295): ADPCM с сэмплами из PSRAM. Секвенсор пишет байты
-  // команд по wrn (одна запись = импульс wrn 1->0). ROM-байты подаёт
-  // арбитр (окно OKIM_BASE_WORD), rom_ok — по завершении выборки.
+  // OKIM6295 (jt6295): ADPCM с сэмплами из PSRAM. АРКАДНЫЙ чип — вынесен из
+  // битстрима под M4_SIM (см. историю площади, docs/chips.md): в железо идут
+  // только домашние чипы, аркадные держатся в симуляции как задел.
   reg okim_wrn = 1;
   reg [7:0] okim_din = 0;
+`ifdef M4_SIM
   wire [17:0] okim_rom_addr;
   reg [7:0] okim_rom_data_r = 0;
   reg okim_rom_ok = 0;
@@ -1033,6 +1038,7 @@ module chipbox #(
       .sound(okim_sound),
       .sample()
   );
+`endif
 
   // --------------------------------------------------------------------
   // K053260 (jt053260): 4 канала PCM/ADPCM. НЕ помещался в битстрим вместе
@@ -1775,9 +1781,9 @@ module chipbox #(
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ym_l_g, ym_r_g, ay_g, pcm_l_g, pcm_r_g;
   reg signed [25:0] adpcm_l_g, adpcm_r_g, apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
-  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g, okim_g;
-  // K053260 только в симуляции (дропнут из битстрима); в Quartus = 0
-  reg signed [25:0] k060_l_g = 0, k060_r_g = 0;
+  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g;
+  // OKIM6295/K053260 — аркадные, только в симуляции; в Quartus = 0
+  reg signed [25:0] okim_g = 0, k060_l_g = 0, k060_r_g = 0;
 
   always @(posedge clk) begin
     ym_l_g <= (ym_l * g_ym) >>> 6;
@@ -1797,8 +1803,8 @@ module chipbox #(
     fm_r_g <= (fm_r * g_fm) >>> 6;
     sn_g <= (sn_wide * g_sn) >>> 6;
     scc_g <= (scc_wide * g_scc) >>> 6;
-    okim_g <= (okim_wide * g_okim) >>> 6;
 `ifdef M4_SIM
+    okim_g <= (okim_wide * g_okim) >>> 6;
     k060_l_g <= (k060_l * g_k060) >>> 6;
     k060_r_g <= (k060_r * g_k060) >>> 6;
 `endif
@@ -2090,12 +2096,14 @@ module chipbox #(
                   scc_wait <= 0;
                   state <= S_SCC_A;
                 end
+`ifdef M4_SIM
                 EXT_OKIM: begin
                   // один байт команды в OKIM6295: импульс wrn 1->0
                   okim_din <= fifo_q[7:0];
                   okim_wrn <= 0;
                   state <= S_OKIM;
                 end
+`endif
 `ifdef M4_SIM
                 EXT_K060: begin
                   // запись регистра K053260: addr[13:8], data[7:0]
@@ -2203,11 +2211,13 @@ module chipbox #(
           if (scc_wait >= 4'd2) state <= S_IDLE;
         end
 
+`ifdef M4_SIM
         // OKIM6295: wrn держался 0 один такт (negedge словлен), снимаем
         S_OKIM: begin
           okim_wrn <= 1;
           state <= S_IDLE;
         end
+`endif
 
 `ifdef M4_SIM
         // K053260: держим cs/wr_n 2 такта cen_k060, затем снимаем
