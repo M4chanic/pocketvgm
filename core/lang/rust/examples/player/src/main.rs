@@ -761,6 +761,34 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         // цикл по play-тику ($5FF0), JSR PLAY
         let mut stub: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         stub.push(0x78); // SEI
+        stub.extend_from_slice(&[0xD8, 0xA2, 0xFF, 0x9A]); // CLD, LDX #$FF, TXS
+        // Спека NSF требует обнулить $0000-$07FF и $6000-$7FFF и привести
+        // APU в известное состояние перед КАЖДЫМ вызовом INIT. Стаб этого
+        // не делал: первая песня попадала на чистую после прошивки BRAM,
+        // а следующие — на мусор от предыдущей.
+        stub.extend_from_slice(&[0xA9, 0x00, 0xAA]); // LDA #0 : TAX
+        let zp = stub.len() as u8;
+        for p in 0..8u8 {
+            stub.extend_from_slice(&[0x9D, 0x00, p]); // STA $pp00,X
+        }
+        stub.push(0xE8); // INX
+        let back = |from: u8, len: usize| (from as i32 - (len as i32 + 2)) as u8;
+        stub.extend_from_slice(&[0xD0, back(zp, stub.len())]); // BNE zp
+        // WRAM $6000-$7FFF через указатель в только что очищенной zero page
+        stub.extend_from_slice(&[0xA9, 0x00, 0x85, 0x00, 0xA9, 0x60, 0x85, 0x01]);
+        stub.extend_from_slice(&[0xA2, 0x20, 0xA0, 0x00, 0xA9, 0x00]); // 32 страницы
+        let wl = stub.len() as u8;
+        stub.extend_from_slice(&[0x91, 0x00, 0xC8]); // STA ($00),Y : INY
+        stub.extend_from_slice(&[0xD0, back(wl, stub.len())]);
+        stub.extend_from_slice(&[0xE6, 0x01, 0xCA]); // INC $01 : DEX
+        stub.extend_from_slice(&[0xD0, back(wl, stub.len())]);
+        // APU: $4000-$4013 = 0, $4015 = $0F, $4017 = $40
+        stub.extend_from_slice(&[0xA2, 0x13, 0xA9, 0x00]);
+        let ap = stub.len() as u8;
+        stub.extend_from_slice(&[0x9D, 0x00, 0x40, 0xCA]); // STA $4000,X : DEX
+        stub.extend_from_slice(&[0x10, back(ap, stub.len())]); // BPL ap
+        stub.extend_from_slice(&[0xA9, 0x0F, 0x8D, 0x15, 0x40]);
+        stub.extend_from_slice(&[0xA9, 0x40, 0x8D, 0x17, 0x40]);
         if banked {
             for (i, &b) in banks.iter().enumerate() {
                 stub.extend_from_slice(&[0xA9, b, 0x8D, 0xF8 + i as u8, 0x5F]);
@@ -1011,7 +1039,7 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
 
     // Только SID в миксе
     chipbox_write(6, 0);
-    chipbox_write(0xC, 64 << 16);
+    chipbox_write(0xC, 32 << 16);
 
     let vblank_hz = if ntsc { 59.83 } else { 50.12 };
     let body_vec: alloc::vec::Vec<u8> = body.into();
@@ -1088,7 +1116,7 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         ctrl_reset(); // сброс чипов
         // гейны заново: стоп (hold) их глушит
         chipbox_write(6, 0);
-        chipbox_write(0xC, 64 << 16);
+        chipbox_write(0xC, 32 << 16);
         chipbox_write(0x15, 0);
         ctrl_mode(0x14); // sid_mode | cpu_run
         println!("SID: песня {} ({hz:.1} Гц)", s + 1);
@@ -1124,7 +1152,7 @@ fn midi_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     let total_s = pass_ticks / 44_100 * 2;
 
     chipbox_write(6, 0);
-    chipbox_write(0xC, 64 << 24); // только OPL3
+    chipbox_write(0xC, 16 << 24); // только OPL3; 64 клиппинговало (как в VGM-пути)
     ctrl_reset();
 
     let mut sink = CmdSink::new();

@@ -207,6 +207,116 @@ static int nsf_selftest(const char* out, double seconds) {
 
 // Проигрывание настоящего .nsf через 6502+APU (небанкованный, load >= $8000).
 // Схема как в nsf_selftest: программа в PSRAM, стаб в $5000, теневые векторы.
+// Стаб NSF: тот же, что строит фирмварь (main.rs, nsf-ветка).
+// clear_ram — обнуление $0000-$07FF и $6000-$7FFF перед INIT, как того
+// требует спека NSF. Без него вторая песня подряд вешает INIT.
+static std::vector<uint8_t> nsf_stub(const uint8_t* banks, bool banked,
+                                     uint16_t init, uint16_t play,
+                                     uint8_t song, bool clear_ram) {
+    std::vector<uint8_t> b;
+    auto put = [&](std::initializer_list<uint8_t> x) { b.insert(b.end(), x); };
+    put({0x78, 0xD8});                         // SEI, CLD
+    put({0xA2, 0xFF, 0x9A});                   // LDX #$FF, TXS
+    if (clear_ram) {
+        put({0xA9, 0x00, 0xAA});               // LDA #0, TAX
+        uint8_t zp = (uint8_t)b.size();
+        for (uint8_t p = 0; p < 8; p++) put({0x9D, 0x00, (uint8_t)(p)});  // STA $pp00,X
+        put({0xE8});                                                     // INX
+        put({0xD0, (uint8_t)((zp - (b.size() + 2)) & 0xFF)});            // BNE zp
+        // WRAM $6000-$7FFF через указатель в zero page
+        put({0xA9, 0x00, 0x85, 0x00, 0xA9, 0x60, 0x85, 0x01});           // ptr=$6000
+        put({0xA2, 0x20, 0xA0, 0x00, 0xA9, 0x00});                       // X=32 стр, Y=0
+        uint8_t wl = (uint8_t)b.size();
+        put({0x91, 0x00, 0xC8});                                         // STA ($00),Y : INY
+        put({0xD0, (uint8_t)((wl - (b.size() + 2)) & 0xFF)});            // BNE wl
+        put({0xE6, 0x01, 0xCA});                                         // INC $01 : DEX
+        put({0xD0, (uint8_t)((wl - (b.size() + 2)) & 0xFF)});            // BNE wl
+        // APU в известное состояние: $4000-$4013 = 0, $4015=$0F, $4017=$40
+        put({0xA2, 0x13, 0xA9, 0x00});
+        uint8_t ap = (uint8_t)b.size();
+        put({0x9D, 0x00, 0x40, 0xCA});                                   // STA $4000,X : DEX
+        put({0x10, (uint8_t)((ap - (b.size() + 2)) & 0xFF)});            // BPL ap
+        put({0xA9, 0x0F, 0x8D, 0x15, 0x40});
+        put({0xA9, 0x40, 0x8D, 0x17, 0x40});
+    }
+    if (banked)
+        for (int i = 0; i < 8; i++)
+            put({0xA9, banks[i], 0x8D, (uint8_t)(0xF8 + i), 0x5F});
+    put({0xA2, 0x00, 0xA0, 0x00});                       // LDX #0, LDY #0
+    put({0xA9, song});                                   // LDA #песня
+    put({0x20, (uint8_t)init, (uint8_t)(init >> 8)});    // JSR INIT
+    uint8_t loop_at = (uint8_t)b.size();
+    put({0xAD, 0xF0, 0x5F, 0xF0, 0xFB});                 // LDA $5FF0 : BEQ
+    put({0x8D, 0xF0, 0x5F});                             // STA $5FF0
+    put({0x20, (uint8_t)play, (uint8_t)(play >> 8)});    // JSR PLAY
+    put({0x4C, loop_at, 0x50});                          // JMP loop
+    b.push_back(0x40);                                   // RTI
+    return b;
+}
+
+// Проигрывание одной песни: последовательность ровно как в фирмвари
+static void nsf_start(Tb& tb, const std::vector<uint8_t>& stub, bool has5b) {
+    uint8_t rti = (uint8_t)(stub.size() - 1);
+    const uint8_t vecs[6] = {rti, 0x50, 0x00, 0x50, rti, 0x50};
+    tb.wb(2, true, 0);
+    for (size_t i = 0; i < stub.size(); i++) tb.wb(0xD, true, i << 8 | stub[i]);
+    for (size_t i = 0; i < 6; i++) tb.wb(0xE, true, i << 8 | vecs[i]);
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 2048; i++) tb.step();
+    tb.wb(6, true, has5b ? 64 << 8 : 0);
+    tb.wb(0xC, true, 64);
+    tb.wb(0x15, true, 0);
+    tb.wb(2, true, 6);
+}
+
+// Проверка переключения песен: играем песню A, затем песню B тем же
+// путём, что и фирмварь. Печатаем пик и счётчики p_acks/snd_wr (WB 0x1B).
+static int nsf_songs(const char* path, const char* out, double seconds, bool clear_ram) {
+    std::vector<uint8_t> d = read_maybe_gz(path);
+    if (d.size() < 0x81 || memcmp(d.data(), "NESM\x1a", 5)) {
+        fprintf(stderr, "не NSF: %s\n", path);
+        return 1;
+    }
+    uint16_t load = d[0x08] | d[0x09] << 8;
+    uint16_t init = d[0x0A] | d[0x0B] << 8;
+    uint16_t play = d[0x0C] | d[0x0D] << 8;
+    const uint8_t* banks = &d[0x70];
+    bool banked = false;
+    for (int i = 0; i < 8; i++) banked |= banks[i] != 0;
+    uint8_t songs = d[6] ? d[6] : 1;
+    fprintf(stderr, "NSF: %u песен, load=%04x init=%04x play=%04x, банки=%d, clear_ram=%d\n",
+            songs, load, init, play, banked, clear_ram);
+
+    Tb tb;
+    tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
+    tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
+    uint32_t base = 0x700000 + (banked ? (load & 0x0FFF) : (uint32_t)(load - 0x8000));
+    tb.wb(8, true, base);
+    for (size_t i = 0x80; i < d.size(); i += 2)
+        tb.wb(9, true, d[i] | (i + 1 < d.size() ? d[i + 1] << 8 : 0));
+
+    int bad = 0;
+    for (uint8_t song = 0; song < (songs < 3 ? songs : 3); song++) {
+        std::vector<uint8_t> stub = nsf_stub(banks, banked, init, play, song, clear_ram);
+        if (stub.size() > 0x100) { fprintf(stderr, "стаб не влез: %zu\n", stub.size()); return 1; }
+        size_t pcm0 = tb.pcm.size();
+        nsf_start(tb, stub, false);
+        uint64_t until = tb.cycle + (uint64_t)(seconds * CLK_HZ);
+        while (tb.cycle < until) tb.step();
+        uint32_t diag = tb.wb(0x1B, false);
+        int16_t peak = 0;
+        for (size_t i = pcm0 + (tb.pcm.size() - pcm0) / 2; i < tb.pcm.size(); i += 2)
+            peak = std::max(peak, (int16_t)abs(tb.pcm[i]));
+        fprintf(stderr, "  песня %u: пик=%5d  p_acks=%u snd_wr=%u  (стаб %zu байт)\n",
+                song + 1, peak, diag & 0xFFFF, diag >> 16, stub.size());
+        if (peak <= 500) bad++;
+    }
+    uint32_t rate = (uint32_t)((double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ) + 0.5);
+    write_wav_file(out, tb.pcm, rate);
+    fprintf(stderr, "nsf-songs: молчащих песен %d -> %s\n", bad, out);
+    return bad ? 1 : 0;
+}
+
 static int nsf_file(const char* path, const char* out, double seconds) {
     std::vector<uint8_t> d = read_maybe_gz(path);
     if (d.size() < 0x81 || memcmp(d.data(), "NESM\x1a", 5)) {
@@ -825,7 +935,7 @@ static int ff_selftest() {
 
 // Прогон НАСТОЯЩЕГО GBS-файла (как фирмварь): данные в PSRAM, стаб,
 // play-тик из заголовка; печатает t/w/f-счётчики и пишет WAV
-static int gbs_file(const char* path, const char* out, double seconds) {
+static int gbs_file(const char* path, const char* out, double seconds, double gb_hz = 8388608.0) {
     FILE* f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "не открыть %s\n", path); return 1; }
     std::vector<uint8_t> d;
@@ -857,7 +967,7 @@ static int gbs_file(const char* path, const char* out, double seconds) {
         play_hz = base / (256 - tma);
     }
     tb.wb(0xF, true, (uint32_t)(play_hz / CLK_HZ * 4294967296.0 + 0.5));
-    tb.wb(0x10, true, (uint32_t)(2000000.0 / CLK_HZ * 4294967296.0 + 0.5)); // gb_clk как в селфтесте (~2 МГц, высота ÷2.1)
+    tb.wb(0x10, true, (uint32_t)(gb_hz / CLK_HZ * 4294967296.0 + 0.5)); // gb_clk: по умолчанию как на железе (8.388608 МГц -> ÷2 = 4.194 МГц)
     tb.wb(6, true, 0);
     tb.wb(0xC, true, 64u << 8);
 
@@ -1038,6 +1148,7 @@ static int play_cmds(const char* path, const char* out) {
 }
 
 int main(int argc, char** argv) {
+    double gb_hz_opt = 8388608.0;
     Verilated::commandArgs(argc, argv);
     const char* in = nullptr; const char* out = "out.wav";
     double max_seconds = 0;
@@ -1058,7 +1169,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--scc-selftest")) { return scc_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--okim-selftest")) { return okim_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--k060-selftest")) { return k060_selftest(out, 1.0); }
-        else if (!strcmp(argv[i], "--gbsfile") && i + 1 < argc) { return gbs_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
+        else if (!strcmp(argv[i], "--gbhz") && i + 1 < argc) { gb_hz_opt = atof(argv[++i]); }
+        else if (!strcmp(argv[i], "--gbsfile") && i + 1 < argc) { return gbs_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0, gb_hz_opt); }
+        else if (!strcmp(argv[i], "--nsf-songs") && i + 1 < argc) { return nsf_songs(argv[++i], out, max_seconds > 0 ? max_seconds : 3.0, true); }
+        else if (!strcmp(argv[i], "--nsf-songs-noclear") && i + 1 < argc) { return nsf_songs(argv[++i], out, max_seconds > 0 ? max_seconds : 3.0, false); }
         else if (!strcmp(argv[i], "--nsffile") && i + 1 < argc) { return nsf_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else if (!strcmp(argv[i], "--sidfile") && i + 1 < argc) { return sid_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
         else in = argv[i];
