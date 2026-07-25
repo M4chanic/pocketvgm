@@ -69,6 +69,23 @@
 //   0x8 W  — адрес загрузки сэмпл-ROM (байтовый, авто-инкремент +2)
 //   0x9 W  — 16 бит данных сэмпл-ROM (little-endian), пишется по адресу
 //            из 0x8; ack удерживается, пока память занята
+// --------------------------------------------------------------------------
+// Варианты битстрима (APF позволяет до 8 .rev в одном пакете ядра, выбор
+// пользователем через variants.json). Кристалл не вмещает все чипы разом:
+//   M4_SIM     — всё сразу (симуляция и селфтесты)
+//   M4_ARCADE  — аркадный вариант: YM2151, SegaPCM, MSM6258, OKIM6295,
+//                K053260 (+ общие YM2612/SN76489/OPL3). Сюда же X68000.
+//   (по умолчанию) — домашний: MD, NES, AY, SID, Game Boy, OPL3, SCC
+// Дальше в коде гейтим по производным M4_HAS_HOME / M4_HAS_ARCADE.
+`ifdef M4_SIM
+  `define M4_HAS_HOME
+  `define M4_HAS_ARCADE
+`elsif M4_ARCADE
+  `define M4_HAS_ARCADE
+`else
+  `define M4_HAS_HOME
+`endif
+
 module chipbox #(
     parameter CLK_HZ = 57_120_000
 ) (
@@ -163,13 +180,17 @@ module chipbox #(
   reg [31:0] nes_phase_inc = DEFAULT_NES_PHASE_INC;
   reg [7:0] apu_gain = 8'd64;
   reg [7:0] gb_gain = 8'd64;
+`ifdef M4_HAS_HOME
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
   reg [7:0] scc_gain = 8'd64;
+`endif
+`ifdef M4_HAS_ARCADE
   reg [31:0] okim_phase_inc = DEFAULT_OKIM_PHASE_INC;
   reg [7:0] okim_gain = 8'd64;
   reg okim_ss = 1;
   reg [31:0] k060_phase_inc = DEFAULT_K060_PHASE_INC;
   reg [7:0] k060_gain = 8'd64;
+`endif
   reg nsf_mode = 0;
   reg gbs_mode = 0;
   reg cpu_run = 0;
@@ -296,13 +317,16 @@ module chipbox #(
 
   // ROM-выборка OKIM6295 (jt6295 в домене clk): следим за rom_addr,
   // подкачиваем байт, rom_ok=1 когда выбранный адрес совпал
+`ifdef M4_HAS_ARCADE
   reg okim_pending = 0;
   reg okim_wait = 0;
   reg okim_req_byte = 0;
   reg [17:0] okim_req_addr = 0;
   reg [17:0] okim_fetched_addr = 18'h3FFFF;
+`endif
 
   // ROM-выборка K053260: один фетчер по кругу для 4 канальных адресов
+`ifdef M4_HAS_ARCADE
   reg k060_pending = 0;
   reg k060_wait = 0;
   reg [1:0] k060_rr = 0;         // указатель round-robin
@@ -311,7 +335,8 @@ module chipbox #(
   reg [20:0] k060_req_addr = 0;
   reg [20:0] k060_fa0 = 21'h1FFFFF, k060_fa1 = 21'h1FFFFF,
              k060_fa2 = 21'h1FFFFF, k060_fa3 = 21'h1FFFFF;
-`ifdef M4_SIM
+`endif
+`ifdef M4_HAS_ARCADE
   wire [20:0] k060_cur = k060_rr == 0 ? roma_addr : k060_rr == 1 ? romb_addr
                        : k060_rr == 2 ? romc_addr : romd_addr;
   wire [20:0] k060_cur_fa = k060_rr == 0 ? k060_fa0 : k060_rr == 1 ? k060_fa1
@@ -370,7 +395,7 @@ module chipbox #(
       gbs_fetch <= gbs_fetch + 1'b1;
     end
 
-`ifdef M4_SIM
+`ifdef M4_HAS_ARCADE
     // ROM-выборка OKIM6295: запрос при рассинхроне адреса
     if (okim_rom_addr != okim_fetched_addr && !okim_pending && !okim_wait) begin
       okim_pending <= 1;
@@ -384,7 +409,7 @@ module chipbox #(
     end
 `endif
 
-`ifdef M4_SIM
+`ifdef M4_HAS_ARCADE
     // ROM-выборка K053260: круговой опрос 4 каналов, устаревший -> фетч
     if (!k060_pending && !k060_wait) begin
       if (k060_cur != k060_cur_fa) begin
@@ -470,13 +495,16 @@ module chipbox #(
     // ROM SegaPCM > DMC > CPU NSF > ADPCM-поток > записи секвенсора > загрузка
     if (!mem_busy && !mem_rd && !mem_wr && !rom_wait_data && !pf_wait_data
         && !dmc_wait_data && !nsf_inflight && !gbs_wait_data && !dbg_wait
-        && !okim_wait && !k060_wait) begin
+`ifdef M4_HAS_ARCADE
+        && !okim_wait && !k060_wait
+`endif
+        ) begin
       if (rom_pending) begin
         mem_rd <= 1;
         mem_addr <= {4'b0, rom_word};
         rom_pending <= 0;
         rom_wait_data <= 1;
-`ifdef M4_SIM
+`ifdef M4_HAS_ARCADE
       end else if (okim_pending) begin
         mem_rd <= 1;
         mem_addr <= OKIM_BASE_WORD + {5'b0, okim_rom_addr[17:1]};
@@ -484,13 +512,13 @@ module chipbox #(
         okim_req_addr <= okim_rom_addr;
         okim_pending <= 0;
         okim_wait <= 1;
-`endif
       end else if (k060_pending) begin
         mem_rd <= 1;
         mem_addr <= K060_BASE_WORD + {2'b0, k060_req_addr[20:1]};
         k060_req_byte <= k060_req_addr[0];
         k060_pending <= 0;
         k060_wait <= 1;
+`endif
       end else if (dmc_pending) begin
         mem_rd <= 1;
         // в NSF-режиме DMC читает через банки, в VGM — плоское окно
@@ -589,12 +617,16 @@ module chipbox #(
           5'h15: {sn_gain, fm_gain} <= data_write[15:0];
           5'h16: fm_phase_inc <= data_write;
           5'h17: sn_phase_inc <= data_write;
+`ifdef M4_HAS_HOME
           6'h21: scc_phase_inc <= data_write;
           6'h22: scc_gain <= data_write[7:0];
+`endif
+`ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
           6'h24: {okim_ss, okim_gain} <= data_write[8:0];
           6'h25: k060_phase_inc <= data_write;
           6'h26: k060_gain <= data_write[7:0];
+`endif
           5'h10: gb_phase_inc <= data_write;
           5'h11: begin
             gb_stub_wr_addr <= data_write[17:8];
@@ -765,6 +797,7 @@ module chipbox #(
     nes_phi2_d <= nes_phi2;
   end
 
+`ifdef M4_HAS_HOME
   // Клок Konami SCC (~1.79 МГц)
   reg [31:0] scc_cen_phase = 0;
   reg cen_scc = 0;
@@ -772,7 +805,9 @@ module chipbox #(
     cen_scc <= 0;
     if (!pause_r) {cen_scc, scc_cen_phase} <= {1'b0, scc_cen_phase} + {1'b0, scc_phase_inc};
   end
+`endif
 
+`ifdef M4_HAS_ARCADE
   // Клок OKIM6295 (~1 МГц)
   reg [31:0] okim_cen_phase = 0;
   reg cen_okim = 0;
@@ -788,6 +823,7 @@ module chipbox #(
     cen_k060 <= 0;
     if (!pause_r) {cen_k060, k060_cen_phase} <= {1'b0, k060_cen_phase} + {1'b0, k060_phase_inc};
   end
+`endif
 
   localparam [31:0] TICK_RATE = 44_100;
   reg [31:0] tick_acc = 0;
@@ -982,12 +1018,14 @@ module chipbox #(
   // Секвенсор гоняет шину MSX: разблокировка BR2=0x3F (ABHI=0x12), затем
   // регистры звука при ABHI=0x13. Строб CS/WR держится счётом cen_scc:
   // write_request в чипе ловит переход (CS|WR) 1->0 по своему клоку.
+`ifdef M4_HAS_HOME
   reg scc_cs_n = 1;
   reg scc_wr_n = 1;
   reg [4:0] scc_abhi = 0;
   reg [7:0] scc_ablo = 0;
   reg [7:0] scc_db = 0;
-`ifdef M4_SIM
+`endif
+`ifdef M4_HAS_HOME
   wire signed [10:0] scc_sound;
 
   IKASCC #(
@@ -1016,9 +1054,11 @@ module chipbox #(
   // OKIM6295 (jt6295): ADPCM с сэмплами из PSRAM. АРКАДНЫЙ чип — вынесен из
   // битстрима под M4_SIM (см. историю площади, docs/chips.md): в железо идут
   // только домашние чипы, аркадные держатся в симуляции как задел.
+`ifdef M4_HAS_ARCADE
   reg okim_wrn = 1;
   reg [7:0] okim_din = 0;
-`ifdef M4_SIM
+`endif
+`ifdef M4_HAS_ARCADE
   wire [17:0] okim_rom_addr;
   reg [7:0] okim_rom_data_r = 0;
   reg okim_rom_ok = 0;
@@ -1047,11 +1087,13 @@ module chipbox #(
   // с SCC+OKIM6295 (99% ALM, slack -3.75) — по решению пользователя дропнут
   // из Quartus-сборки, но остаётся под M4_SIM (симуляция + селфтест). Чтобы
   // вернуть на железе: определить M4_SIM-эквивалент и освободить ~1К ALM.
+`ifdef M4_HAS_ARCADE
   reg k060_cs = 0;
   reg k060_wr_n = 1;
   reg [5:0] k060_addr = 0;
   reg [7:0] k060_din = 0;
-`ifdef M4_SIM
+`endif
+`ifdef M4_HAS_ARCADE
   wire [20:0] roma_addr, romb_addr, romc_addr, romd_addr;
   reg [7:0] roma_data_r = 0, romb_data_r = 0, romc_data_r = 0, romd_data_r = 0;
   wire signed [15:0] k060_l, k060_r;
@@ -1768,10 +1810,12 @@ module chipbox #(
   wire signed [8:0] g_fm = {1'b0, fm_gain};
   wire signed [8:0] g_sn = {1'b0, sn_gain};
   wire signed [15:0] sn_wide = {sn_sound, 5'b00000};
-`ifdef M4_SIM
+`ifdef M4_HAS_HOME
   // SCC моно, знаковый 11 бит -> << 5 (x32) до 16 бит
   wire signed [8:0] g_scc = {1'b0, scc_gain};
   wire signed [15:0] scc_wide = {scc_sound, 5'b00000};
+`endif
+`ifdef M4_HAS_ARCADE
   // OKIM6295 моно, знаковый 14 бит -> << 2 (x4) до 16 бит
   wire signed [8:0] g_okim = {1'b0, okim_gain};
   wire signed [15:0] okim_wide = {okim_sound, 2'b00};
@@ -1806,8 +1850,10 @@ module chipbox #(
     fm_l_g <= (fm_l * g_fm) >>> 6;
     fm_r_g <= (fm_r * g_fm) >>> 6;
     sn_g <= (sn_wide * g_sn) >>> 6;
-`ifdef M4_SIM
+`ifdef M4_HAS_HOME
     scc_g <= (scc_wide * g_scc) >>> 6;
+`endif
+`ifdef M4_HAS_ARCADE
     okim_g <= (okim_wide * g_okim) >>> 6;
     k060_l_g <= (k060_l * g_k060) >>> 6;
     k060_r_g <= (k060_r * g_k060) >>> 6;
@@ -1973,11 +2019,15 @@ module chipbox #(
       str_stop <= 0;
       apu_cs <= 0;
       fsm_wr_req <= 0;
+`ifdef M4_HAS_HOME
       scc_cs_n <= 1;
       scc_wr_n <= 1;
+`endif
+`ifdef M4_HAS_ARCADE
       okim_wrn <= 1;
       k060_cs <= 0;
       k060_wr_n <= 1;
+`endif
       opl_cs_n <= 1;
       opl_wr_n <= 1;
       fm_cs_n <= 1;
@@ -2084,7 +2134,7 @@ module chipbox #(
             end
             OP_EXT: begin
               case (fifo_q[27:24])
-`ifdef M4_SIM
+`ifdef M4_HAS_HOME
                 EXT_SCC: begin
                   // порт 7 = разблокировка BR2 (ABHI=0x12, DB=0x3F)
                   if (fifo_q[18:16] == 3'd7) begin
@@ -2102,7 +2152,7 @@ module chipbox #(
                   state <= S_SCC_A;
                 end
 `endif
-`ifdef M4_SIM
+`ifdef M4_HAS_ARCADE
                 EXT_OKIM: begin
                   // один байт команды в OKIM6295: импульс wrn 1->0
                   okim_din <= fifo_q[7:0];
@@ -2110,7 +2160,7 @@ module chipbox #(
                   state <= S_OKIM;
                 end
 `endif
-`ifdef M4_SIM
+`ifdef M4_HAS_ARCADE
                 EXT_K060: begin
                   // запись регистра K053260: addr[13:8], data[7:0]
                   k060_addr <= fifo_q[13:8];
@@ -2201,7 +2251,7 @@ module chipbox #(
           end
         end
 
-`ifdef M4_SIM
+`ifdef M4_HAS_HOME
         // SCC: держим CS/WR ассерченными 2 такта cen_scc (чип ловит
         // переход 1->0 по своему клоку), затем снимаем и ждём столько же
         S_SCC_A: begin
@@ -2219,7 +2269,7 @@ module chipbox #(
         end
 `endif
 
-`ifdef M4_SIM
+`ifdef M4_HAS_ARCADE
         // OKIM6295: wrn держался 0 один такт (negedge словлен), снимаем
         S_OKIM: begin
           okim_wrn <= 1;
@@ -2227,7 +2277,7 @@ module chipbox #(
         end
 `endif
 
-`ifdef M4_SIM
+`ifdef M4_HAS_ARCADE
         // K053260: держим cs/wr_n 2 такта cen_k060, затем снимаем
         S_K060_A: begin
           if (cen_k060) scc_wait <= scc_wait + 1'b1;
