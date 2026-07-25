@@ -41,6 +41,8 @@ pub enum Chip {
     /// FM-часть регистрово совместима с нашим YM2612, а SSG — это ровно
     /// наш jt49. `port` = банк регистров (0 или 1; у YM2203 всегда 0).
     Opn,
+    /// HuC6280 PSG (PC Engine / TurboGrafx-16)
+    HuC6280,
     /// OPL-семейство (YM3812/YM3526/YMF262) — играется на нашем OPL3.
     /// `port` = банк регистров (0 или 1; у OPL2 всегда 0).
     Opl,
@@ -96,6 +98,8 @@ pub struct Clocks {
     pub k051649: u32,
     pub okim6295: u32,
     pub k053260: u32,
+    /// HuC6280 (PC Engine) — волновая таблица на 6 каналов
+    pub huc6280: u32,
     /// OPL-семейство: YM3812 (OPL2), YM3526 (OPL), YMF262 (OPL3)
     pub ym3812: u32,
     pub ym3526: u32,
@@ -167,6 +171,7 @@ impl Header {
             ym2612: clock_field(d, 0x2C, hdr_end),
             ym2203: clock_field(d, 0x44, hdr_end),
             ym2608: clock_field(d, 0x48, hdr_end),
+            huc6280: clock_field(d, 0xA5, hdr_end),
             ym2151: clock_field(d, 0x30, hdr_end),
             sega_pcm: clock_field(d, 0x38, hdr_end),
             sega_pcm_iface: if version >= 0x151 { clock_field(d, 0x3C, hdr_end) } else { 0 },
@@ -241,6 +246,7 @@ impl<'a> Reader<'a> {
             // YM2203 — один порт; YM2608 — два
             0x55 | 0x56 => self.reg_write(Chip::Opn, 0)?,
             0x57 => self.reg_write(Chip::Opn, 1)?,
+            0xB9 => self.reg_write(Chip::HuC6280, 0)?,
             // OPL-семейство на нашем OPL3: YM3812/YM3526 — один банк,
             // YMF262 — два порта (0x5E/0x5F)
             0x5A | 0x5B | 0x5E => self.reg_write(Chip::Opl, 0)?,
