@@ -987,6 +987,7 @@ module chipbox #(
   reg [4:0] scc_abhi = 0;
   reg [7:0] scc_ablo = 0;
   reg [7:0] scc_db = 0;
+`ifdef M4_SIM
   wire signed [10:0] scc_sound;
 
   IKASCC #(
@@ -1009,6 +1010,7 @@ module chipbox #(
       .o_SOUND(scc_sound),
       .o_TEST()
   );
+`endif
 
   // --------------------------------------------------------------------
   // OKIM6295 (jt6295): ADPCM с сэмплами из PSRAM. АРКАДНЫЙ чип — вынесен из
@@ -1766,10 +1768,10 @@ module chipbox #(
   wire signed [8:0] g_fm = {1'b0, fm_gain};
   wire signed [8:0] g_sn = {1'b0, sn_gain};
   wire signed [15:0] sn_wide = {sn_sound, 5'b00000};
+`ifdef M4_SIM
   // SCC моно, знаковый 11 бит -> << 5 (x32) до 16 бит
   wire signed [8:0] g_scc = {1'b0, scc_gain};
   wire signed [15:0] scc_wide = {scc_sound, 5'b00000};
-`ifdef M4_SIM
   // OKIM6295 моно, знаковый 14 бит -> << 2 (x4) до 16 бит
   wire signed [8:0] g_okim = {1'b0, okim_gain};
   wire signed [15:0] okim_wide = {okim_sound, 2'b00};
@@ -1783,9 +1785,9 @@ module chipbox #(
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ym_l_g, ym_r_g, ay_g, pcm_l_g, pcm_r_g;
   reg signed [25:0] adpcm_l_g, adpcm_r_g, apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
-  reg signed [25:0] fm_l_g, fm_r_g, sn_g, scc_g;
-  // OKIM6295/K053260 — аркадные, только в симуляции; в Quartus = 0
-  reg signed [25:0] okim_g = 0, k060_l_g = 0, k060_r_g = 0;
+  reg signed [25:0] fm_l_g, fm_r_g, sn_g;
+  // SCC/OKIM6295/K053260 — только в симуляции; в Quartus = 0
+  reg signed [25:0] scc_g = 0, okim_g = 0, k060_l_g = 0, k060_r_g = 0;
 
   always @(posedge clk) begin
     ym_l_g <= (ym_l * g_ym) >>> 6;
@@ -1804,8 +1806,8 @@ module chipbox #(
     fm_l_g <= (fm_l * g_fm) >>> 6;
     fm_r_g <= (fm_r * g_fm) >>> 6;
     sn_g <= (sn_wide * g_sn) >>> 6;
-    scc_g <= (scc_wide * g_scc) >>> 6;
 `ifdef M4_SIM
+    scc_g <= (scc_wide * g_scc) >>> 6;
     okim_g <= (okim_wide * g_okim) >>> 6;
     k060_l_g <= (k060_l * g_k060) >>> 6;
     k060_r_g <= (k060_r * g_k060) >>> 6;
@@ -2082,6 +2084,7 @@ module chipbox #(
             end
             OP_EXT: begin
               case (fifo_q[27:24])
+`ifdef M4_SIM
                 EXT_SCC: begin
                   // порт 7 = разблокировка BR2 (ABHI=0x12, DB=0x3F)
                   if (fifo_q[18:16] == 3'd7) begin
@@ -2098,6 +2101,7 @@ module chipbox #(
                   scc_wait <= 0;
                   state <= S_SCC_A;
                 end
+`endif
 `ifdef M4_SIM
                 EXT_OKIM: begin
                   // один байт команды в OKIM6295: импульс wrn 1->0
@@ -2197,6 +2201,7 @@ module chipbox #(
           end
         end
 
+`ifdef M4_SIM
         // SCC: держим CS/WR ассерченными 2 такта cen_scc (чип ловит
         // переход 1->0 по своему клоку), затем снимаем и ждём столько же
         S_SCC_A: begin
@@ -2212,6 +2217,7 @@ module chipbox #(
           if (cen_scc) scc_wait <= scc_wait + 1'b1;
           if (scc_wait >= 4'd2) state <= S_IDLE;
         end
+`endif
 
 `ifdef M4_SIM
         // OKIM6295: wrn держался 0 один такт (negedge словлен), снимаем
