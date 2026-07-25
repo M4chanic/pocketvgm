@@ -12,8 +12,7 @@
         "extensions": [
           "bin"
         ],
-        "address": "0x00000000",
-        "secondary": true
+        "address": "0x00000000"
       },
       {
         "name": "Sega",
