@@ -45,6 +45,55 @@ const CTRL_PAUSE: u32 = 1 << 5;
 /// Бит перемотки (тики секвенсора и play-тик в 8 раз быстрее)
 const CTRL_FF: u32 = 1 << 6;
 
+/// Контрол-регистр chipbox — единственный источник правды.
+///
+/// Регистр один и пишется целиком: любая запись переопределяет и режим
+/// формата, и флаги транспорта. Раньше состояние перемотки дублировалось
+/// в каждом экземпляре Buttons, и записи одного были не видны другому:
+/// транспорт снимал R, а спин CmdSink считал, что менять нечего, — так
+/// перемотка залипала на всю музыку. Теперь состояние здесь, в одном
+/// месте, и слово всегда собирается из режима и актуальных флагов.
+static CTRL_MODE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static CTRL_FLAGS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn ctrl_commit() {
+    use core::sync::atomic::Ordering::Relaxed;
+    chipbox_write(2, CTRL_MODE.load(Relaxed) | CTRL_FLAGS.load(Relaxed));
+}
+
+/// Сменить режим формата (nsf/gbs/sid/cpu_run), сохранив флаги
+fn ctrl_mode(m: u32) {
+    CTRL_MODE.store(m, core::sync::atomic::Ordering::Relaxed);
+    ctrl_commit();
+}
+
+fn ctrl_pause(on: bool) {
+    ctrl_flag(CTRL_PAUSE, on, true);
+}
+
+/// Перемотка: зовётся из горячих циклов, поэтому пишет только при смене
+fn ctrl_ff(on: bool) {
+    ctrl_flag(CTRL_FF, on, false);
+}
+
+fn ctrl_flag(bit: u32, on: bool, always: bool) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let cur = CTRL_FLAGS.load(Relaxed);
+    let new = if on { cur | bit } else { cur & !bit };
+    if new != cur || always {
+        CTRL_FLAGS.store(new, Relaxed);
+        ctrl_commit();
+    }
+}
+
+/// Софт-сброс: чипы и FIFO в тишину, режим и флаги обнуляются
+fn ctrl_reset() {
+    use core::sync::atomic::Ordering::Relaxed;
+    CTRL_MODE.store(0, Relaxed);
+    CTRL_FLAGS.store(0, Relaxed);
+    chipbox_write(2, 1);
+}
+
 /// Опрос кнопок по фронту с накоплением: scan() можно звать из любых
 /// циклов ожидания (backpressure и пр.) — фронты копятся в pending и не
 /// теряются, take() отдаёт накопленное. Иначе короткое нажатие в момент,
@@ -52,13 +101,11 @@ const CTRL_FF: u32 = 1 << 6;
 struct Buttons {
     last: u16,
     pending: u16,
-    /// Текущее состояние перемотки (R удержан)
-    ff_on: bool,
 }
 
 impl Buttons {
     fn new() -> Buttons {
-        Buttons { last: 0xFFFF, pending: 0, ff_on: false }
+        Buttons { last: 0xFFFF, pending: 0 }
     }
     fn scan(&mut self) {
         let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
@@ -72,13 +119,11 @@ impl Buttons {
         self.pending = 0;
         e
     }
-    /// Перемотка уровнем R: пишет контрол при смене состояния
-    fn sync_ff(&mut self, mode: u32) {
-        let ff = self.last & BTN_R != 0;
-        if ff != self.ff_on {
-            self.ff_on = ff;
-            chipbox_write(2, mode | if ff { CTRL_FF } else { 0 });
-        }
+    /// Перемотка уровнем R. Состояние — в общем CTRL_FLAGS, а не в
+    /// экземпляре: два разных Buttons (транспорт и спин CmdSink) обязаны
+    /// видеть записи друг друга, иначе отпускание R теряется.
+    fn sync_ff(&mut self) {
+        ctrl_ff(self.last & BTN_R != 0);
     }
 }
 
@@ -447,11 +492,11 @@ impl CmdSink {
             // события Wait не приходят — отпускание R оставалось
             // незамеченным и перемотка залипала на всю музыку.
             self.btn.scan();
-            self.btn.sync_ff(0);
+            self.btn.sync_ff();
             vu_tick(&mut self.vu_last);
             while chipbox_status() & 0x1FFF > 1900 {
                 self.btn.scan();
-                self.btn.sync_ff(0);
+                self.btn.sync_ff();
                 vu_tick(&mut self.vu_last);
             }
             self.since_check = 64;
@@ -471,7 +516,7 @@ const BTN_RIGHT: u16 = 1 << 3;
 /// Some(_) — покинуть цикл воспроизведения трека.
 fn transport(b: &mut Buttons, mode: u32, pl: &PlayCtx) -> Option<Ctl> {
     let e = b.take();
-    b.sync_ff(mode); // перемотка: пока R удержан (уровень, не фронт)
+    b.sync_ff(); // перемотка: пока R удержан (уровень, не фронт)
     if e & BTN_RIGHT != 0 {
         return Some(Ctl::Next);
     }
@@ -485,9 +530,9 @@ fn transport(b: &mut Buttons, mode: u32, pl: &PlayCtx) -> Option<Ctl> {
         return hold(b, mode, true);
     }
     if e & BTN_SEL != 0 && pl.list.len() > 1 {
-        chipbox_write(2, mode | CTRL_PAUSE); // тишина на время браузера
+        ctrl_pause(true); // тишина на время браузера
         let r = browser(b, pl);
-        chipbox_write(2, mode);
+        ctrl_pause(false);
         return match r {
             Some(i) => Some(Ctl::Jump(i)),
             None => Some(Ctl::Redraw),
@@ -502,10 +547,10 @@ fn transport(b: &mut Buttons, mode: u32, pl: &PlayCtx) -> Option<Ctl> {
 fn hold(b: &mut Buttons, mode: u32, mut stopped: bool) -> Option<Ctl> {
     loop {
         if stopped {
-            chipbox_write(2, 1); // сброс: чипы и FIFO в тишину
+            ctrl_reset(); // сброс: чипы и FIFO в тишину
             ui::status("STOPPED");
         } else {
-            chipbox_write(2, mode | CTRL_PAUSE);
+            ctrl_mode(mode); ctrl_pause(true);
             ui::status("PAUSED");
         }
         if stopped {
@@ -529,7 +574,7 @@ fn hold(b: &mut Buttons, mode: u32, mut stopped: bool) -> Option<Ctl> {
                 if stopped {
                     return Some(Ctl::Restart);
                 }
-                chipbox_write(2, mode); // снять паузу
+                ctrl_pause(false); // снять паузу
                 return None;
             }
             if e & BTN_B != 0 {
@@ -594,9 +639,9 @@ fn song_loop(
                 None => {}
             }
         } else if edge & BTN_SEL != 0 && pl.list.len() > 1 {
-            chipbox_write(2, mode | CTRL_PAUSE);
+            ctrl_mode(mode); ctrl_pause(true);
             let r = browser(&mut b, pl);
-            chipbox_write(2, mode);
+            ctrl_pause(false);
             match r {
                 Some(i) => return Ctl::Jump(i),
                 None => {
@@ -605,7 +650,7 @@ fn song_loop(
                 }
             }
         }
-        b.sync_ff(mode); // перемотка уровнем R
+        b.sync_ff(); // перемотка уровнем R
         // время подпесни + автопереход: длительность из HVSC (SID) или
         // дефолт; после последней подпесни — следующий трек
         let limit = lens.get(song as usize).copied().unwrap_or(AUTO_NEXT_S).max(3);
@@ -727,7 +772,7 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         let rti_at = stub.len() as u8;
         stub.push(0x40); // RTI (NMI/IRQ)
 
-        chipbox_write(2, 0); // остановить CPU
+        ctrl_mode(0); // остановить CPU
         for (i, &b) in stub.iter().enumerate() {
             chipbox_write(0xD, (i as u32) << 8 | b as u32);
         }
@@ -736,12 +781,12 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         for (i, &b) in vecs.iter().enumerate() {
             chipbox_write(0xE, (i as u32) << 8 | b as u32);
         }
-        chipbox_write(2, 1); // сброс чипов
+        ctrl_reset(); // сброс чипов
         // гейны заново: стоп (hold) их глушит
         chipbox_write(6, if has_5b { 64 << 8 } else { 0 });
         chipbox_write(0xC, 64);
         chipbox_write(0x15, 0);
-        chipbox_write(2, mode); // nsf_mode | cpu_run (| vrc6_en)
+        ctrl_mode(mode); // nsf_mode | cpu_run (| vrc6_en)
         println!("NSF: песня {}", s + 1);
     }, draw)
 }
@@ -843,16 +888,16 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         o += 3;
         stub[o..o + 3].copy_from_slice(&[0xC3, loop_at as u8, (loop_at >> 8) as u8]);
 
-        chipbox_write(2, 0); // остановить CPU
+        ctrl_mode(0); // остановить CPU
         for (i, &b) in stub.iter().enumerate() {
             chipbox_write(0x11, (i as u32) << 8 | b as u32);
         }
-        chipbox_write(2, 1);
+        ctrl_reset();
         // гейны заново: стоп (hold) их глушит
         chipbox_write(6, 0);
         chipbox_write(0xC, 64 << 8);
         chipbox_write(0x15, 0);
-        chipbox_write(2, 0xC); // gbs_mode | cpu_run
+        ctrl_mode(0xC); // gbs_mode | cpu_run
         println!("GBS: песня {}", s + 1);
     }, draw)
 }
@@ -989,7 +1034,7 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     };
 
     song_loop(num_songs, start_song, 0x14, pl, &lens, false, move |s| {
-        chipbox_write(2, 0); // остановить CPU
+        ctrl_mode(0); // остановить CPU
 
         // чистый образ: нули + данные + стаб + векторы
         chipbox_write(8, NSF_PSRAM_BASE);
@@ -1034,12 +1079,12 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         let hz = if bit != 0 { 60.0 } else { vblank_hz };
         chipbox_write(0xF, (hz / CHIPBOX_CLK_HZ as f64 * 4294967296.0) as u32);
 
-        chipbox_write(2, 1); // сброс чипов
+        ctrl_reset(); // сброс чипов
         // гейны заново: стоп (hold) их глушит
         chipbox_write(6, 0);
         chipbox_write(0xC, 64 << 16);
         chipbox_write(0x15, 0);
-        chipbox_write(2, 0x14); // sid_mode | cpu_run
+        ctrl_mode(0x14); // sid_mode | cpu_run
         println!("SID: песня {} ({hz:.1} Гц)", s + 1);
     }, draw)
 }
@@ -1074,7 +1119,7 @@ fn midi_play(data: &[u8], pl: &PlayCtx) -> Ctl {
 
     chipbox_write(6, 0);
     chipbox_write(0xC, 64 << 24); // только OPL3
-    chipbox_write(2, 1);
+    ctrl_reset();
 
     let mut sink = CmdSink::new();
     let mut shown_s = u32::MAX;
@@ -1182,7 +1227,7 @@ fn gym_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     chipbox_write(0x15, 32u32 << 8 | 64);
     chipbox_write(6, 0);
     chipbox_write(0xC, 0);
-    chipbox_write(2, 1);
+    ctrl_reset();
 
     let mut sink = CmdSink::new();
     let mut shown_s = u32::MAX;
@@ -1353,19 +1398,14 @@ fn main() -> ! {
     files::set_slot(chosen);
     stash_write3(chosen, &fps);
 
-    // Титул: ждём кнопку, если файл не выбирали явно
+    // Титул: ядро не проигрывает ничего само. Экран информационный —
+    // трек здесь не предлагается и не ищется, музыка включается только
+    // через Load, который перезапускает ядро с выбранным файлом.
     if !picked_by_user {
-        let p = files::slot_path();
-        let name = files::base_of(&p);
-        ui::title(
-            concat!("v", env!("CARGO_PKG_VERSION")),
-            if name.is_empty() { "(nothing)" } else { name },
-            "A     - play",
-        );
+        ui::title(concat!("v", env!("CARGO_PKG_VERSION")));
         let mut b = Buttons::new();
         loop {
-            let e = b.take();
-            if e & (BTN_A | BTN_RIGHT | BTN_SEL) != 0 {
+            if b.take() & (BTN_A | BTN_SEL) != 0 {
                 break;
             }
             for _ in 0..20_000 {
@@ -1452,7 +1492,7 @@ fn main() -> ! {
         // блокирует (APF-запрос + перекачка в staging), а до этого фикса
         // сброс делался только внутри воспроизведения — всё это время
         // предыдущий трек продолжал тянуть последнюю ноту.
-        chipbox_write(2, 1); // софт-сброс: чистит FIFO и глушит чипы
+        ctrl_reset(); // софт-сброс: чистит FIFO и глушит чипы
 
         let opened = if path == in_slot {
             true
@@ -1658,7 +1698,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         0xC,
         if opl_clk != 0 { 16u32 } else { 0 } << 24 | if nes_clk != 0 { 64u32 } else { 0 },
     );
-    chipbox_write(2, 1);
+    ctrl_reset();
 
     let mut sink = CmdSink::new();
     // SCC: разблокировать регистры звука (BR2=0x3F) первой командой FIFO

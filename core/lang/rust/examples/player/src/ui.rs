@@ -171,21 +171,16 @@ pub fn browser(names: &[&str], cursor: usize, playing: usize, title: &str) {
 /// Титульный экран: показывается, когда файл НЕ выбирался пользователем
 /// явно (иначе плеер сразу играет выбранное). Без него ядро молча
 /// начинало проигрывать прошлый или случайный слот.
-pub fn title(version: &str, found: &str, hint: &str) {
+pub fn title(version: &str) {
     clear();
 
-    text(12, 40, "PocketVGM", ACCENT, 2);
-    text(12, 62, version, DIM, 1);
-    hline(80, DIM);
+    text(12, 44, "PocketVGM", ACCENT, 2);
+    text(12, 66, version, DIM, 1);
+    hline(84, DIM);
 
-    let max_chars = (W - 24) / 8;
-    text(12, 96, "found:", DIM, 1);
-    let fb = found.as_bytes();
-    let f1 = core::str::from_utf8(&fb[..fb.len().min(max_chars)]).unwrap_or("");
-    text(12, 110, f1, FG, 1);
-
-    text(12, 142, hint, DIM, 1);
-    text(12, 156, "Load  - pick a file", DIM, 1);
+    text(12, 104, "To play music:", FG, 1);
+    text(12, 124, "open the Pocket menu,", DIM, 1);
+    text(12, 138, "choose Load, pick a file.", DIM, 1);
 }
 
 pub fn screen(
