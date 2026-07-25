@@ -1088,8 +1088,11 @@ int main(int argc, char** argv) {
     uint32_t opl_clk = ymf262_clk ? ymf262_clk
                      : ym3812_clk ? ym3812_clk * 4
                      : ym3526_clk ? ym3526_clk * 4 : 0;
+    uint32_t scc_clk  = hdr_end >= 0xA0 ? rd32(d, 0x9C) & 0x3FFFFFFF : 0;
+    uint32_t k060_clk = hdr_end >= 0xB0 ? rd32(d, 0xAC) & 0x3FFFFFFF : 0;
 
-    if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
+    if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk
+        && !scc_clk && !k060_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
 
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
@@ -1119,6 +1122,14 @@ int main(int argc, char** argv) {
         }
         else if (cmd == 0x5F) {
             cmds.push_back(0xC0000000u | 0x10000u | d[pos] << 8 | d[pos+1]); pos += 2;
+        }
+        // SCC (K051649): 0xD2 порт рег знач -> OP_EXT|EXT_SCC
+        else if (cmd == 0xD2) {
+            cmds.push_back(0xF0000000u | d[pos] << 16 | d[pos+1] << 8 | d[pos+2]); pos += 3;
+        }
+        // K053260: 0xBA рег знач -> OP_EXT|EXT_K060
+        else if (cmd == 0xBA) {
+            cmds.push_back(0xF2000000u | d[pos] << 8 | d[pos+1]); pos += 2;
         }
         else if ((cmd & 0xF0) == 0x80) {
             uint8_t b = dac_ptr < dac_bank.size() ? dac_bank[dac_ptr] : 0;
@@ -1158,6 +1169,13 @@ int main(int argc, char** argv) {
             } else if (kind == 0x04) {
                 adpcm_blocks.push_back({(uint32_t)adpcm_bank.size(), len});
                 adpcm_bank.insert(adpcm_bank.end(), d.begin() + body, d.begin() + body + len);
+            } else if ((kind == 0x8E || kind == 0x8B) && len >= 8) {
+                // ROM сэмплов K053260 (0x8E) / OKIM6295 (0x8B):
+                // [u32 полный размер][u32 смещение][данные]
+                RomBlock b;
+                b.start = (kind == 0x8E ? 0x200000u : 0x100000u) + rd32(d, body + 4);
+                b.bytes.assign(d.begin() + body + 8, d.begin() + body + len);
+                rom_blocks.push_back(std::move(b));
             } else if (kind == 0xC2 && len >= 2) {
                 // DPCM-страница NES: [u16 адрес][данные] — синхронно с потоком
                 uint32_t a = (d[body] | d[body+1] << 8) & 0x7FFF;
@@ -1220,6 +1238,14 @@ int main(int argc, char** argv) {
                  | (ay_clk ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
     tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 64u : 0u));
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
+    if (scc_clk) {
+        tb.wb(0x21, true, (uint32_t)((double)scc_clk / CLK_HZ * 4294967296.0 + 0.5));
+        tb.wb(0x22, true, 64);
+    }
+    if (k060_clk) {
+        tb.wb(0x25, true, (uint32_t)((double)k060_clk / CLK_HZ * 4294967296.0 + 0.5));
+        tb.wb(0x26, true, 64);
+    }
     if (adpcm_clk) {
         double inc = (double)adpcm_clk / CLK_HZ * 4294967296.0;
         tb.wb(7, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));
@@ -1232,7 +1258,9 @@ int main(int argc, char** argv) {
     }
     if (sn_clk) tb.wb(0x17, true, (uint32_t)((double)sn_clk / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0x15, true, (sn_clk ? 32u : 0u) << 8 | (fm_clk ? 64u : 0u));
-    tb.wb(2, true, 1);                       // сброс чипа
+    tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
+    // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
+    if (scc_clk) tb.wb(0, true, 0xF0000000u | (7u << 16));
     for (int i = 0; i < 2048; i++) tb.step(); // дать сбросу пройти
 
     // Загрузка сэмпл-ROM и ADPCM-банка через WB (как это будет делать фирмварь)
