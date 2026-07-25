@@ -77,8 +77,20 @@ implemented chips. Measurements (Quartus 21.1):
   (1962 vs 1848 LABs); they fit only with area optimization, which drops the
   system-clock slack to about −4 ns — worse than a normal build.
 
-So the shipping bitstream keeps **home** chips (SCC included) and leaves the
-**arcade** PCM chips (OKIM6295, K053260) built for simulation only. They stay
-verified and can return as a separate arcade variant later. Home chips being
-smaller — SCC is a wavetable, OPL routing reuses existing silicon, OPLL is
-cheap — a home-focused build has room for healthy timing.
+So the core ships **two bitstreams** in one package (APF allows up to 8, picked
+by the user through `variants.json`):
+
+| Variant | Chips | Covers |
+|---|---|---|
+| **Console** (default) | YM2612, SN76489, AY, NES APU + VRC6, SID, Game Boy, OPL3 (incl. VGM AdLib), SCC | Mega Drive, NES, MSX, C64, Game Boy, PC AdLib |
+| **Arcade + X68k** | YM2151, SegaPCM, MSM6258, OKIM6295, K053260 | arcade boards and the Sharp X68000 |
+
+Measured for the Console variant: 17 190 / 18 480 ALMs (93%) with −0.12 ns
+worst-case slack — the best timing the project has had. Splitting the arcade
+FM/PCM cluster out freed about 1 270 ALMs (YM2151 1 050, SegaPCM 116,
+MSM6258 108), and the gating has to cover each chip's plumbing — clock
+enables, ROM fetchers, sequencer states, mixer terms — not just the instance,
+or the area is not actually freed.
+
+The biggest remaining win is unrelated to sound: the RISC-V FPU costs 2 564
+ALMs and the player only uses floating point when computing clock dividers.

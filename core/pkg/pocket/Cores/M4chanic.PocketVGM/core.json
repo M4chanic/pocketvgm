@@ -27,9 +27,14 @@
     },
     "cores": [
       {
-        "name": "default",
+        "name": "console",
         "id": 0,
         "filename": "pocketvgm.rev"
+      },
+      {
+        "name": "arcade",
+        "id": 1,
+        "filename": "pocketvgm_a.rev"
       }
     ]
   }

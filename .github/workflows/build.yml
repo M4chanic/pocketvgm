@@ -47,6 +47,8 @@ jobs:
         # экономия Actions-минут: обычный пуш — один сид; полная
         # матрица — ручной запуск workflow_dispatch с seeds=true
         seed: ${{ (github.event_name == 'workflow_dispatch' && inputs.seeds) && fromJSON('[1, 7, 23]') || fromJSON('[23]') }}
+        # два битстрима в одном пакете ядра (APF: до 8 .rev + variants.json)
+        variant: [home, arcade]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,11 +60,15 @@ jobs:
           sudo docker image prune -af
           df -h /
 
-      - name: SEED ${{ matrix.seed }}
+      - name: SEED ${{ matrix.seed }}, вариант ${{ matrix.variant }}
         run: |
           sed -i 's/-name SEED .*/-name SEED ${{ matrix.seed }}/' \
             core/projects/openFPGA-RISC-V_pocket.qsf
-          grep 'SEED' core/projects/openFPGA-RISC-V_pocket.qsf
+          if [ "${{ matrix.variant }}" = "arcade" ]; then
+            echo 'set_global_assignment -name VERILOG_MACRO "M4_ARCADE=1"' \
+              >> core/projects/openFPGA-RISC-V_pocket.qsf
+          fi
+          grep -E 'SEED|VERILOG_MACRO' core/projects/openFPGA-RISC-V_pocket.qsf
 
       - name: Компиляция Quartus
         run: |
@@ -99,19 +105,24 @@ jobs:
 
       - name: RBF -> REV (бит-реверс)
         run: |
+          if [ "${{ matrix.variant }}" = "arcade" ]; then
+            REV=pocketvgm_a.rev
+          else
+            REV=pocketvgm.rev
+          fi
           python3 scripts/reverse_bits.py \
-            core/projects/output_files/openFPGA-RISC-V_pocket.rbf pocketvgm.rev
+            core/projects/output_files/openFPGA-RISC-V_pocket.rbf "$REV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bitstream-seed${{ matrix.seed }}
+          name: bitstream-${{ matrix.variant }}-seed${{ matrix.seed }}
           path: |
-            pocketvgm.rev
+            pocketvgm*.rev
             slack.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: reports-seed${{ matrix.seed }}
+          name: reports-${{ matrix.variant }}-seed${{ matrix.seed }}
           path: |
             core/projects/output_files/*.fit.rpt
             core/projects/output_files/*.sta.rpt
@@ -124,30 +135,34 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: bitstream-seed*
+          pattern: bitstream-*-seed*
 
-      - name: Выбор битстрима с лучшим slack
+      - name: Выбор битстрима с лучшим slack (по каждому варианту)
         run: |
-          best=""
-          best_slack=-1000
-          for d in bitstream-seed*; do
-            s=$(cat "$d/slack.txt")
-            echo "$d: slack $s"
-            if awk -v a="$s" -v b="$best_slack" 'BEGIN{exit !(a>b)}'; then
-              best_slack=$s
-              best=$d
-            fi
+          for v in home arcade; do
+            best=""
+            best_slack=-1000
+            for d in bitstream-$v-seed*; do
+              [ -d "$d" ] || continue
+              s=$(cat "$d/slack.txt")
+              echo "$d: slack $s"
+              if awk -v a="$s" -v b="$best_slack" 'BEGIN{exit !(a>b)}'; then
+                best_slack=$s
+                best=$d
+              fi
+            done
+            echo "ЛУЧШИЙ ($v): $best (slack $best_slack)"
+            cp "$best"/pocketvgm*.rev .
+            echo "$best_slack" > slack-$v.txt
           done
-          echo "ЛУЧШИЙ: $best (slack $best_slack)"
-          cp "$best/pocketvgm.rev" pocketvgm.rev
-          cp "$best/slack.txt" slack.txt
+          ls -l pocketvgm*.rev
 
       - uses: actions/upload-artifact@v4
         with:
           name: bitstream
           path: |
-            pocketvgm.rev
-            slack.txt
+            pocketvgm*.rev
+            slack-*.txt
 
   firmware:
     runs-on: ubuntu-latest
@@ -191,7 +206,7 @@ jobs:
         run: |
           mkdir -p dist
           cp -r core/pkg/pocket/* dist/
-          cp pocketvgm.rev dist/Cores/M4chanic.PocketVGM/
+          cp pocketvgm.rev pocketvgm_a.rev dist/Cores/M4chanic.PocketVGM/
           cp boot.bin dist/Assets/pocketvgm/common/
                     install -m 755 scripts/pocketvgm_update.py dist/pocketvgm
           cd dist && zip -r ../m4pocket-core.zip . -x '*.gitkeep'
