@@ -389,6 +389,7 @@ module chipbox #(
       nsf_fetch <= nsf_fetch + 1'b1;
     end
 
+`ifdef M4_HAS_HOME
     // ROM-чтения GBS: запрос по смене toggle (адрес квазистатичен)
     if (gbs_req_sync[2] != gbs_req_sync[1] && !gbs_pending && !gbs_wait_data) begin
       gbs_pending <= 1;
@@ -398,6 +399,7 @@ module chipbox #(
       gbs_wait_data <= 0;
       gbs_fetch <= gbs_fetch + 1'b1;
     end
+`endif
 
 `ifdef M4_HAS_ARCADE
     // ROM-выборка OKIM6295: запрос при рассинхроне адреса
@@ -538,12 +540,14 @@ module chipbox #(
         dmc_lane <= apu_dma_addr[0];
         dmc_pending <= 0;
         dmc_wait_data <= 1;
+`ifdef M4_HAS_HOME
       end else if (gbs_pending) begin
         mem_rd <= 1;
         mem_addr <= NSF_BASE_WORD + {3'b0, gbs_rom_addr[19:1]};
         gbs_lane <= gbs_rom_addr[0];
         gbs_pending <= 0;
         gbs_wait_data <= 1;
+`endif
       end else if (fsm_wr_pending) begin
         mem_wr <= 1;
         mem_addr <= fsm_wr_word;
@@ -782,12 +786,16 @@ module chipbox #(
   end
 
   reg [31:0] sid_cen_phase = 0;
+`ifdef M4_HAS_HOME
   reg cen_sid = 0;
 
   always @(posedge clk) begin
     cen_sid <= 0;
     if (!pause_r) {cen_sid, sid_cen_phase} <= {1'b0, sid_cen_phase} + {1'b0, sid_phase_inc};
   end
+`else
+  wire cen_sid = 0;
+`endif
 
   reg [31:0] adpcm_cen_phase = 0;
   reg cen_adpcm = 0;
@@ -1512,6 +1520,7 @@ module chipbox #(
   // 1 такт (регистры защёлкиваются каждый clk), чтения ($D41B/$D41C) —
   // через sid_read_pend.
   wire [7:0] sid_dout;
+`ifdef M4_HAS_HOME
   wire [17:0] sid_audio;
 
   sid_top #(
@@ -1549,11 +1558,13 @@ module chipbox #(
       .ld_data(16'd0),
       .ld_wr(1'b0)
   );
+`endif
 
   // --------------------------------------------------------------------
   // GBS: SM83 + GB APU (VerilogBoy, немодифицированный) в собственном
   // клоковом домене. gb_clk — регистровый клок ~4.19 МГц (тоггл на
   // переносе фазового аккумулятора 2x частоты).
+`ifdef M4_HAS_HOME
   reg [31:0] gb_half_phase = 0;
   reg gb_half_carry = 0;
   reg gb_clk_r = 0;
@@ -1607,6 +1618,7 @@ module chipbox #(
       .tick_seen_toggle(gbs_tick_seen_t),
       .sndwr_toggle(gbs_sndwr_t)
   );
+`endif
 
   // диагностика GBS: тики, доставленные в gb-домен, и записи SM83 в
   // звуковые реги — тогглы синхронизируются и считаются в sys (WB 0x1E)
@@ -1629,10 +1641,13 @@ module chipbox #(
   end
 
   // синхронизация ROM-запросов в clk-домен
+`ifdef M4_HAS_HOME
   reg [2:0] gbs_req_sync = 0;
   always @(posedge clk) gbs_req_sync <= {gbs_req_sync[1:0], gbs_rom_req_toggle};
+`endif
 
   // выход звука GB в clk-домен (квазистатичен на аудиочастотах)
+`ifdef M4_HAS_HOME
   reg [15:0] gb_left_s1 = 0, gb_left_s = 0;
   reg [15:0] gb_right_s1 = 0, gb_right_s = 0;
   always @(posedge clk) begin
@@ -1641,6 +1656,9 @@ module chipbox #(
     gb_right_s1 <= gb_right;
     gb_right_s <= gb_right_s1;
   end
+`else
+  wire [15:0] gb_left_s = 0, gb_right_s = 0;
+`endif
 
   // --------------------------------------------------------------------
   // YM2612 (jt12) + SN76489 (jt89) — Sega Genesis / Master System
@@ -1848,13 +1866,20 @@ module chipbox #(
   // K053260 стерео, знаковый 16 бит
   wire signed [8:0] g_k060 = {1'b0, k060_gain};
 `endif
+`ifdef M4_HAS_HOME
   wire signed [15:0] sid_wide = sid_audio[17:2];
   wire signed [16:0] sid_wide17 = {sid_wide[15], sid_wide};
+`endif
 
   // Конвейер: произведения регистрируются (разгрузка длинного пути),
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ay_g;
-  reg signed [25:0] apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
+  reg signed [25:0] apu_g, opl_l_g, opl_r_g;
+`ifdef M4_HAS_HOME
+  reg signed [25:0] gbl_g, gbr_g, sid_g;
+`else
+  reg signed [25:0] gbl_g = 0, gbr_g = 0, sid_g = 0;
+`endif
 `ifdef M4_HAS_ARCADE
   reg signed [25:0] ym_l_g, ym_r_g, pcm_l_g, pcm_r_g, adpcm_l_g, adpcm_r_g;
 `else
@@ -1876,9 +1901,13 @@ module chipbox #(
     adpcm_r_g <= (adpcm_r * g_adpcm) >>> 6;
 `endif
     apu_g <= (apu_hp * g_apu) >>> 6;
+`ifdef M4_HAS_HOME
     gbl_g <= (gbl_hp * g_gb) >>> 6;
     gbr_g <= (gbr_hp * g_gb) >>> 6;
+`endif
+`ifdef M4_HAS_HOME
     sid_g <= (sid_hp * g_sid) >>> 6;
+`endif
     opl_l_g <= (opl_l_s * g_opl) >>> 6;
     opl_r_g <= (opl_r_s * g_opl) >>> 6;
     fm_l_g <= (fm_l * g_fm) >>> 6;
@@ -1908,12 +1937,14 @@ module chipbox #(
       ay_hp_x <= ay_wide;
       apu_hp_y <= (apu_wide - apu_hp_x) + (apu_hp_y - hp_leak(apu_hp_y));
       apu_hp_x <= apu_wide;
+`ifdef M4_HAS_HOME
       gbl_hp_y <= (gbl_wide - gbl_hp_x) + (gbl_hp_y - hp_leak(gbl_hp_y));
       gbl_hp_x <= gbl_wide;
       gbr_hp_y <= (gbr_wide - gbr_hp_x) + (gbr_hp_y - hp_leak(gbr_hp_y));
       gbr_hp_x <= gbr_wide;
       sid_hp_y <= (sid_wide17 - sid_hp_x) + (sid_hp_y - hp_leak(sid_hp_y));
       sid_hp_x <= sid_wide17;
+`endif
       chip_left <= sat16(mix_l);
       chip_right <= sat16(mix_r);
       chip_sample_toggle <= ~chip_sample_toggle;

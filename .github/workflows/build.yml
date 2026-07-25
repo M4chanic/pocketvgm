@@ -48,9 +48,7 @@ jobs:
         # матрица — ручной запуск workflow_dispatch с seeds=true
         seed: ${{ (github.event_name == 'workflow_dispatch' && inputs.seeds) && fromJSON('[1, 7, 23]') || fromJSON('[23]') }}
         # два битстрима в одном пакете ядра (APF: до 8 .rev + variants.json)
-        # аркадный вариант ещё не влезает (нужен гейтинг SID/GB) —
-        # схема и код готовы, включить обратно: [home, arcade]
-        variant: [home]
+        variant: [home, arcade]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
