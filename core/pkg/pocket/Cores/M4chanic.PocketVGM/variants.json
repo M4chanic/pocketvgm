@@ -1,21 +1,6 @@
 {
   "variants": {
     "magic": "APF_VER_1",
-    "variant_list": [
-      {
-        "name": "Console",
-        "id": 0,
-        "core_select": {
-          "core_id": 0
-        }
-      },
-      {
-        "name": "Arcade + X68k",
-        "id": 1,
-        "core_select": {
-          "core_id": 1
-        }
-      }
-    ]
+    "variant_list": []
   }
 }

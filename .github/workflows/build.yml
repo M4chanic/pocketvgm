@@ -48,7 +48,9 @@ jobs:
         # матрица — ручной запуск workflow_dispatch с seeds=true
         seed: ${{ (github.event_name == 'workflow_dispatch' && inputs.seeds) && fromJSON('[1, 7, 23]') || fromJSON('[23]') }}
         # два битстрима в одном пакете ядра (APF: до 8 .rev + variants.json)
-        variant: [home, arcade]
+        # аркадный вариант ещё не влезает (нужен гейтинг SID/GB) —
+        # схема и код готовы, включить обратно: [home, arcade]
+        variant: [home]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -206,7 +208,7 @@ jobs:
         run: |
           mkdir -p dist
           cp -r core/pkg/pocket/* dist/
-          cp pocketvgm.rev pocketvgm_a.rev dist/Cores/M4chanic.PocketVGM/
+          cp pocketvgm*.rev dist/Cores/M4chanic.PocketVGM/
           cp boot.bin dist/Assets/pocketvgm/common/
                     install -m 755 scripts/pocketvgm_update.py dist/pocketvgm
           cd dist && zip -r ../m4pocket-core.zip . -x '*.gitkeep'
