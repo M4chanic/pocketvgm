@@ -13,16 +13,15 @@ Three Load menu entries, grouped by platform:
 
 | Menu | Extensions | Content |
 |---|---|---|
-| Sega | `.vgm` `.vgz` `.gym` `.m3u` | register logs (Mega Drive / Master System / arcade), Genesis logs, playlists |
+| Sega | `.m3u` `.vgm` `.vgz` `.gym` | playlists, register logs (Mega Drive / Master System / arcade), Genesis logs |
 | Nintendo | `.vgm` `.vgz` `.nsf` `.gbs` | register logs, NES/Famicom music, Game Boy music |
-| Computer | `.mid` `.mod` `.sid` | General MIDI (OPL synthesis), Amiga modules*, Commodore 64 music |
+| Computer | `.m3u` `.mid` `.sid` | playlists, General MIDI (OPL synthesis), Commodore 64 music |
+
+A playlist opened from any menu can list tracks of any supported format —
+the player reads the `.m3u` and then opens each track by path.
 
 VGM/VGZ appear in both console menus — packs for any platform may come in
 these formats. Multi-song files (NSF/GBS/SID) switch subsongs with the D-pad.
-
-Track switching and playlists (`.m3u` / folder playback) are work in progress.
-
-\* MOD playback is not implemented yet.
 
 ## Simulated chips
 

@@ -22,10 +22,10 @@
         "parameters": "0x249",
         "deferload": true,
         "extensions": [
+          "m3u",
           "vgm",
           "vgz",
-          "gym",
-          "m3u"
+          "gym"
         ],
         "size_maximum": "0x2000000",
         "address": "0x00000000"
@@ -52,10 +52,9 @@
         "parameters": "0x249",
         "deferload": true,
         "extensions": [
+          "m3u",
           "mid",
-          "mod",
-          "sid",
-          "laa"
+          "sid"
         ],
         "size_maximum": "0x2000000",
         "address": "0x00000000"
