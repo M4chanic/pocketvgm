@@ -25,7 +25,25 @@ chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB)
 		-GCLK_HZ=8000000 -DM4_SIM -I$(VB_HDL) \
 		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) main.cpp -CFLAGS "-O2" -LDFLAGS "-lz" -o ../$@
 
+# Verilator собирается с -Wno-fatal — иначе не проходит вендорный код.
+# Из-за этого предупреждения в НАШИХ файлах молча терялись: два драйвера
+# на huc_wr дошли до Quartus и уронили сборку через сорок минут. Здесь
+# те же предупреждения, но по своим путям и только классы, означающие
+# настоящую ошибку синтеза: два драйвера, смесь блокирующих присваиваний,
+# неявные провода, защёлки, выход за границы массива. Ширины операндов
+# сюда не входят — их в проекте давний безобидный шум.
+lint:
+	@verilator --lint-only -Wno-fatal --top-module chipbox \
+		-GCLK_HZ=8000000 -DM4_SIM -I$(VB_HDL) \
+		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) \
+		$(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) 2>&1 \
+		| grep -E "rtl/chipbox|core/target/pocket" \
+		| grep -E "MULTIDRIVEN|BLKANDNBLK|IMPLICIT|LATCH|SELRANGE" > /tmp/m4lint.txt || true
+	@if [ -s /tmp/m4lint.txt ]; then \
+		echo "линт: предупреждения в собственных файлах:"; cat /tmp/m4lint.txt; exit 1; \
+	else echo "линт: собственные файлы чисты"; fi
+
 clean:
 	rm -rf obj_dir chipbox_tb
 
-.PHONY: clean
+.PHONY: clean lint

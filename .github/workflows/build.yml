@@ -21,6 +21,9 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends verilator zlib1g-dev
 
+      - name: Линт собственного RTL
+        run: make -C sim/chipbox_tb lint
+
       - name: Сборка chipbox_tb
         run: make -C sim/chipbox_tb -j"$(nproc)"
 
@@ -35,6 +38,7 @@ jobs:
           ./chipbox_tb --gbs-selftest
           ./chipbox_tb --gbs-int-selftest
           ./chipbox_tb --scc-selftest
+          ./chipbox_tb --huc-selftest
           ./chipbox_tb --okim-selftest
           ./chipbox_tb --k060-selftest
           ./chipbox_tb --sid-selftest

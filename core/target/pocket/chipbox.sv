@@ -353,9 +353,6 @@ module chipbox #(
     soft_reset_req <= 0;
     stub_wr <= 0;
     gb_stub_wr <= 0;
-`ifdef M4_HAS_HOME
-    huc_wr <= 0;
-`endif
     mem_rd <= 0;
     mem_wr <= 0;
 
@@ -2105,6 +2102,9 @@ module chipbox #(
   wire seq_busy = state != S_IDLE || time_pending || !fifo_empty;
 
   always @(posedge clk) begin
+`ifdef M4_HAS_HOME
+    huc_wr <= 0;   // однотактовый строб: гасится там же, где взводится
+`endif
     if (reset || soft_reset_req) begin
       rd_ptr <= 0;
       state <= S_IDLE;
