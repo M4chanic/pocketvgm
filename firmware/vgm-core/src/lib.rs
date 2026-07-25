@@ -37,6 +37,9 @@ pub enum Chip {
     Okim6295,
     K051649,
     K053260,
+    /// OPL-семейство (YM3812/YM3526/YMF262) — играется на нашем OPL3.
+    /// `port` = банк регистров (0 или 1; у OPL2 всегда 0).
+    Opl,
     Unknown(u8),
 }
 
@@ -87,6 +90,10 @@ pub struct Clocks {
     pub k051649: u32,
     pub okim6295: u32,
     pub k053260: u32,
+    /// OPL-семейство: YM3812 (OPL2), YM3526 (OPL), YMF262 (OPL3)
+    pub ym3812: u32,
+    pub ym3526: u32,
+    pub ymf262: u32,
 }
 
 /// Разобранный заголовок VGM. Владение данными остаётся у вызывающего.
@@ -164,6 +171,9 @@ impl Header {
             k051649: clock_field(d, 0x9C, hdr_end),
             okim6295: clock_field(d, 0x98, hdr_end),
             k053260: clock_field(d, 0xAC, hdr_end),
+            ym3812: clock_field(d, 0x50, hdr_end),
+            ym3526: clock_field(d, 0x54, hdr_end),
+            ymf262: clock_field(d, 0x5C, hdr_end),
         };
 
         Ok(Header {
@@ -220,7 +230,11 @@ impl<'a> Reader<'a> {
             0x52 => self.reg_write(Chip::Ym2612, 0)?,
             0x53 => self.reg_write(Chip::Ym2612, 1)?,
             0x54 => self.reg_write(Chip::Ym2151, 0)?,
-            0x55..=0x5F => {
+            // OPL-семейство на нашем OPL3: YM3812/YM3526 — один банк,
+            // YMF262 — два порта (0x5E/0x5F)
+            0x5A | 0x5B | 0x5E => self.reg_write(Chip::Opl, 0)?,
+            0x5F => self.reg_write(Chip::Opl, 1)?,
+            0x55..=0x5D => {
                 // прочие FM-чипы: пропускаем, сохраняя формат
                 self.skip(2)?;
                 Event::Write { chip: Chip::Unknown(cmd), port: 0, addr: 0, data: 0 }
@@ -435,6 +449,24 @@ mod tests {
             r.next_event().unwrap(),
             Event::Write { chip: Chip::K053260, port: 0, addr: 0x0F, data: 0x40 }
         );
+    }
+
+    #[test]
+    fn parses_opl_writes() {
+        // 0x5A (YM3812) и 0x5F (YMF262 порт 1) -> Chip::Opl с нужным банком
+        let body = [0x5A, 0x20, 0x01, 0x5F, 0xA0, 0x44, 0x66];
+        let d = synth_vgm(&body, None);
+        let h = Header::parse(&d).unwrap();
+        let mut r = Reader::new(&d, h.data_offset);
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::Opl, port: 0, addr: 0x20, data: 0x01 }
+        );
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::Opl, port: 1, addr: 0xA0, data: 0x44 }
+        );
+        assert_eq!(r.next_event().unwrap(), Event::End);
     }
 
     #[test]

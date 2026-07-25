@@ -1080,7 +1080,16 @@ int main(int argc, char** argv) {
     uint32_t fm_clk = rd32(d, 0x2C) & 0x3FFFFFFF;
     uint32_t sn_clk = rd32(d, 0x0C) & 0x3FFFFFFF;
     size_t pos = data_off;
-    if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
+    // OPL-семейство: YM3812 (0x50), YM3526 (0x54), YMF262 (0x5C).
+    // OPL2-файлы задают 3.58 МГц — ядро тактуется x4 (как в фирмвари).
+    uint32_t ym3812_clk = hdr_end >= 0x54 ? rd32(d, 0x50) & 0x3FFFFFFF : 0;
+    uint32_t ym3526_clk = hdr_end >= 0x58 ? rd32(d, 0x54) & 0x3FFFFFFF : 0;
+    uint32_t ymf262_clk = hdr_end >= 0x60 ? rd32(d, 0x5C) & 0x3FFFFFFF : 0;
+    uint32_t opl_clk = ymf262_clk ? ymf262_clk
+                     : ym3812_clk ? ym3812_clk * 4
+                     : ym3526_clk ? ym3526_clk * 4 : 0;
+
+    if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
 
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
@@ -1104,6 +1113,13 @@ int main(int argc, char** argv) {
         else if (cmd == 0x52) { cmds.push_back(0xD0000000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x53) { cmds.push_back(0xD0000000u | 0x10000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x4F || cmd == 0x50) { cmds.push_back(0xE0000000u | d[pos]); pos += 1; }
+        // OPL-семейство на OPL3: YM3812/YM3526/YMF262 п0 — банк 0, YMF262 п1 — банк 1
+        else if (cmd == 0x5A || cmd == 0x5B || cmd == 0x5E) {
+            cmds.push_back(0xC0000000u | d[pos] << 8 | d[pos+1]); pos += 2;
+        }
+        else if (cmd == 0x5F) {
+            cmds.push_back(0xC0000000u | 0x10000u | d[pos] << 8 | d[pos+1]); pos += 2;
+        }
         else if ((cmd & 0xF0) == 0x80) {
             uint8_t b = dac_ptr < dac_bank.size() ? dac_bank[dac_ptr] : 0;
             dac_ptr++;
@@ -1202,7 +1218,8 @@ int main(int argc, char** argv) {
     // SegaPCM 34/64 — баланс Out Run по MAME (0.30 FM / 0.70 PCM)
     tb.wb(6, true, (adpcm_clk ? 64u : 0u) << 24 | (pcm_clk ? 34u : 0u) << 16
                  | (ay_clk ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
-    tb.wb(0xC, true, nes_clk ? 64 : 0);
+    tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 64u : 0u));
+    if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (adpcm_clk) {
         double inc = (double)adpcm_clk / CLK_HZ * 4294967296.0;
         tb.wb(7, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));

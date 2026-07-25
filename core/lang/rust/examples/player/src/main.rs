@@ -119,6 +119,9 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.k051649 != 0 { add("SCC"); }
     if c.okim6295 != 0 { add("OKIM6295"); }
     if c.k053260 != 0 { add("K053260"); }
+    if c.ymf262 != 0 { add("OPL3"); }
+    if c.ym3812 != 0 { add("OPL2"); }
+    if c.ym3526 != 0 { add("OPL"); }
     if c.gb_dmg != 0 { add("GB APU"); }
     let system = if c.ym2612 != 0 {
         "Sega Mega Drive"
@@ -128,6 +131,8 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
         "Sharp X68000"
     } else if c.k051649 != 0 {
         "MSX"
+    } else if c.ym3812 != 0 || c.ym3526 != 0 || c.ymf262 != 0 {
+        "PC / AdLib"
     } else if c.nes_apu != 0 {
         "Famicom / NES"
     } else if c.sn76489 != 0 {
@@ -173,6 +178,8 @@ const OP_FM2612: u32 = 0xD000_0000;
 const OP_SN: u32 = 0xE000_0000;
 const OP_NESRAM_PTR: u32 = 0xA000_0000;
 const OP_NESRAM_WR: u32 = 0xB000_0000;
+/// OPL3: bank<<16 | reg<<8 | val (тот же опкод, что шлёт midi-core)
+const OP_OPL3: u32 = 0xC000_0000;
 // Расширенные чипы: опкод 0xF, суб-код в [27:24]. SCC = суб-код 0.
 const OP_EXT: u32 = 0xF000_0000;
 const EXT_SCC: u32 = 0x0000_0000;
@@ -1523,6 +1530,9 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         && header.clocks.k051649 == 0
         && header.clocks.okim6295 == 0
         && header.clocks.k053260 == 0
+        && header.clocks.ym3812 == 0
+        && header.clocks.ym3526 == 0
+        && header.clocks.ymf262 == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
@@ -1563,6 +1573,21 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         chipbox_write(0x21, (((scc_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
         chipbox_write(0x22, 64); // scc_gain
     }
+    // OPL-семейство (YM3812/YM3526/YMF262) играет на нашем OPL3. Клок OPL3
+    // номинально 14.32 МГц, но ядро тактуется master-клоком x2 (25.45 МГц
+    // по умолчанию); OPL2-файлы задают 3.58 МГц — пересчитываем в x4.
+    let opl_clk = if header.clocks.ymf262 != 0 {
+        header.clocks.ymf262
+    } else if header.clocks.ym3812 != 0 {
+        header.clocks.ym3812 * 4
+    } else if header.clocks.ym3526 != 0 {
+        header.clocks.ym3526 * 4
+    } else {
+        0
+    };
+    if opl_clk != 0 {
+        chipbox_write(0x14, (((opl_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+    }
     let okim_clk = header.clocks.okim6295 & 0x7FFF_FFFF; // бит31 = флаг чипа
     if okim_clk != 0 {
         chipbox_write(0x23, (((okim_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
@@ -1585,7 +1610,13 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         | if ay_clk != 0 { 64u32 } else { 0 } << 8
         | if ym_clk != 0 { 64u32 } else { 0 };
     chipbox_write(6, gains);
-    chipbox_write(0xC, if nes_clk != 0 { 64 } else { 0 });
+    // {opl_gain, sid_gain, gb_gain, apu_gain}. У VGM-AdLib регистры громкости
+    // выкручены сильнее, чем у нашего MIDI-конвертера: на 64 выход клиппит
+    // (проверено на Dune в симуляции), поэтому для VGM берём 16.
+    chipbox_write(
+        0xC,
+        if opl_clk != 0 { 16u32 } else { 0 } << 24 | if nes_clk != 0 { 64u32 } else { 0 },
+    );
     chipbox_write(2, 1);
 
     let mut sink = CmdSink::new();
@@ -1615,6 +1646,10 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::Write { chip: Chip::Sn76489, data, .. }) => {
                 sink.push(OP_SN | data as u32);
+            }
+            Ok(Event::Write { chip: Chip::Opl, port, addr, data }) => {
+                // OPL2/OPL3 играем на нашем OPL3: port = банк регистров
+                sink.push(OP_OPL3 | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
             }
             Ok(Event::Write { chip: Chip::K051649, port, addr, data }) => {
                 sink.push(OP_EXT | EXT_SCC | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
