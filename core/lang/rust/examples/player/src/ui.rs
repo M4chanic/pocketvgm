@@ -168,6 +168,26 @@ pub fn browser(names: &[&str], cursor: usize, playing: usize, title: &str) {
 }
 
 /// Полный экран плеера
+/// Титульный экран: показывается, когда файл НЕ выбирался пользователем
+/// явно (иначе плеер сразу играет выбранное). Без него ядро молча
+/// начинало проигрывать прошлый или случайный слот.
+pub fn title(version: &str, found: &str, hint: &str) {
+    clear();
+
+    text(12, 40, "PocketVGM", ACCENT, 2);
+    text(12, 62, version, DIM, 1);
+    hline(80, DIM);
+
+    let max_chars = (W - 24) / 8;
+    text(12, 96, "found:", DIM, 1);
+    let fb = found.as_bytes();
+    let f1 = core::str::from_utf8(&fb[..fb.len().min(max_chars)]).unwrap_or("");
+    text(12, 110, f1, FG, 1);
+
+    text(12, 142, hint, DIM, 1);
+    text(12, 156, "Load  - pick a file", DIM, 1);
+}
+
 pub fn screen(
     format: &str,
     title: &str,

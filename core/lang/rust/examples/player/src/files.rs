@@ -103,6 +103,14 @@ pub fn dir_of(path: &str) -> &str {
     }
 }
 
+/// Имя файла из пути ("a/b/c.vgm" -> "c.vgm")
+pub fn base_of(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[i + 1..],
+        None => path,
+    }
+}
+
 /// Разбор m3u: непустые строки без ведущего '#', пути относительно base
 pub fn parse_m3u(text: &[u8], base: &str) -> Vec<String> {
     // UTF-8 BOM в начале файла — не часть первого пути

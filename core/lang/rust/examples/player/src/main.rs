@@ -1323,9 +1323,14 @@ fn main() -> ! {
     let stash = stash_read();
 
     let mut chosen: u32 = 0;
+    // Явный выбор = Pocket сообщил про обновление слота. Только тогда
+    // играем сразу; иначе показываем титул, чтобы ядро не начинало молча
+    // проигрывать прошлое или случайное.
+    let mut picked_by_user = false;
     // (1) Pocket сообщил обновлённый слот — верим ему, если слот непуст
     if upd_cnt > 0 && (1..=3).contains(&upd_id) && present[(upd_id - 1) as usize] {
         chosen = upd_id;
+        picked_by_user = true;
     }
     // (2) изменившийся отпечаток
     if chosen == 0 {
@@ -1347,6 +1352,28 @@ fn main() -> ! {
     }
     files::set_slot(chosen);
     stash_write3(chosen, &fps);
+
+    // Титул: ждём кнопку, если файл не выбирали явно
+    if !picked_by_user {
+        let p = files::slot_path();
+        let name = files::base_of(&p);
+        ui::title(
+            concat!("v", env!("CARGO_PKG_VERSION")),
+            if name.is_empty() { "(nothing)" } else { name },
+            "A     - play",
+        );
+        let mut b = Buttons::new();
+        loop {
+            let e = b.take();
+            if e & (BTN_A | BTN_RIGHT | BTN_SEL) != 0 {
+                break;
+            }
+            for _ in 0..20_000 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
     let size = File::size(files::slot());
 
     // Плейлист: выбранный .m3u; иначе playlist.m3u рядом с файлом;
