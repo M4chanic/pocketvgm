@@ -283,6 +283,7 @@ module chipbox #(
   reg [15:0] up_data = 0;
   reg up_pending = 0;
 
+`ifdef M4_HAS_ARCADE
   wire [18:0] pcm_rom_addr_w;
   wire pcm_rom_cs;
   reg rom_cs_prev = 0;
@@ -291,6 +292,7 @@ module chipbox #(
   reg [17:0] rom_word = 0;
   reg rom_byte = 0;
   reg [7:0] pcm_rom_data_r = 0;
+`endif
 
   // DMC DMA: чтение DPCM-байтов из окна NES-RAM по запросу APU
   reg dmc_pending = 0;
@@ -351,6 +353,7 @@ module chipbox #(
     mem_rd <= 0;
     mem_wr <= 0;
 
+`ifdef M4_HAS_ARCADE
     // Запросы чтения ROM от SegaPCM: защёлкиваем адрес по фронту cs
     rom_cs_prev <= pcm_rom_cs;
     if (pcm_rom_cs && !rom_cs_prev) begin
@@ -362,6 +365,7 @@ module chipbox #(
       pcm_rom_data_r <= rom_byte ? mem_rdata[15:8] : mem_rdata[7:0];
       rom_wait_data <= 0;
     end
+`endif
 
     // DMC DMA: запрос APU -> чтение окна NES-RAM -> ack одним тактом
     apu_dma_ack <= 0;
@@ -458,18 +462,21 @@ module chipbox #(
       dbg_rd_valid <= 1;
     end
 
-    // ADPCM-поток: команды секвенсора и генерация запросов по drq
+    if (apu_dma_ack) dmc_cnt <= dmc_cnt + 1'b1;
+    if (soft_reset_req) begin
+      dmc_cnt <= 0;
+      nsf_fetch <= 0;
+      gbs_fetch <= 0;
+    end
+`ifdef M4_HAS_ARCADE
+    // ADPCM-поток (MSM6258): команды секвенсора и запросы по drq
     pf_wr <= 0;
     if (pf_wr) pf_cnt <= pf_cnt + 1'b1;
-    if (apu_dma_ack) dmc_cnt <= dmc_cnt + 1'b1;
     if (soft_reset_req) begin
       stream_active <= 0;
       pf_pending <= 0;
       pf_wait_data <= 0;
       pf_cnt <= 0;
-      dmc_cnt <= 0;
-      nsf_fetch <= 0;
-      gbs_fetch <= 0;
     end
     if (str_set_addr) stream_addr <= str_payload[22:0];
     if (str_start) begin
@@ -490,21 +497,22 @@ module chipbox #(
       stream_len <= stream_len - 24'd1;
       if (stream_len == 24'd1) stream_active <= 0;
     end
+`endif
 
     // Арбитр внешней памяти:
     // ROM SegaPCM > DMC > CPU NSF > ADPCM-поток > записи секвенсора > загрузка
-    if (!mem_busy && !mem_rd && !mem_wr && !rom_wait_data && !pf_wait_data
+    if (!mem_busy && !mem_rd && !mem_wr
         && !dmc_wait_data && !nsf_inflight && !gbs_wait_data && !dbg_wait
 `ifdef M4_HAS_ARCADE
-        && !okim_wait && !k060_wait
+        && !rom_wait_data && !pf_wait_data && !okim_wait && !k060_wait
 `endif
         ) begin
+`ifdef M4_HAS_ARCADE
       if (rom_pending) begin
         mem_rd <= 1;
         mem_addr <= {4'b0, rom_word};
         rom_pending <= 0;
         rom_wait_data <= 1;
-`ifdef M4_HAS_ARCADE
       end else if (okim_pending) begin
         mem_rd <= 1;
         mem_addr <= OKIM_BASE_WORD + {5'b0, okim_rom_addr[17:1]};
@@ -518,8 +526,10 @@ module chipbox #(
         k060_req_byte <= k060_req_addr[0];
         k060_pending <= 0;
         k060_wait <= 1;
-`endif
       end else if (dmc_pending) begin
+`else
+      if (dmc_pending) begin
+`endif
         mem_rd <= 1;
         // в NSF-режиме DMC читает через банки, в VGM — плоское окно
         mem_addr <= nsf_mode
@@ -545,12 +555,14 @@ module chipbox #(
         mem_addr <= NSF_BASE_WORD + {3'b0, nsf_rom_byte_addr[19:1]};
         nsf_lane <= nsf_rom_byte_addr[0];
         nsf_inflight <= 1;
+`ifdef M4_HAS_ARCADE
       end else if (pf_pending) begin
         mem_rd <= 1;
         mem_addr <= stream_addr[22:1];
         pf_lane <= stream_addr[0];
         pf_pending <= 0;
         pf_wait_data <= 1;
+`endif
       end else if (dbg_rd_pend) begin
         mem_rd <= 1;
         mem_addr <= dbg_rd_addr[22:1];
@@ -573,12 +585,14 @@ module chipbox #(
       ay_phase_inc <= DEFAULT_AY_PHASE_INC;
       pcm_phase_inc <= DEFAULT_PCM_PHASE_INC;
       up_pending <= 0;
+`ifdef M4_HAS_ARCADE
       rom_pending <= 0;
       rom_wait_data <= 0;
       stream_active <= 0;
       pf_pending <= 0;
       pf_wait_data <= 0;
       pf_wr <= 0;
+`endif
       dmc_pending <= 0;
       dmc_wait_data <= 0;
       dmc_cool <= 0;
@@ -724,6 +738,7 @@ module chipbox #(
   // --------------------------------------------------------------------
   // Clock-enable чипа (дробный делитель) и тики 1/44100 с
   reg [31:0] cen_phase = 0;
+`ifdef M4_HAS_ARCADE
   reg cen = 0;
   reg cen_p1_toggle = 0;
 
@@ -734,6 +749,7 @@ module chipbox #(
   end
 
   wire cen_p1 = cen && cen_p1_toggle;
+`endif
 
   reg [31:0] ay_cen_phase = 0;
   reg cen_ay = 0;
@@ -845,7 +861,8 @@ module chipbox #(
   end
 
   // --------------------------------------------------------------------
-  // YM2151
+  // YM2151 (аркадный вариант; на нём же X68000)
+`ifdef M4_HAS_ARCADE
   reg ym_cs_n = 1;
   reg ym_wr_n = 1;
   reg ym_a0 = 0;
@@ -888,6 +905,7 @@ module chipbox #(
       ym_r <= ym_xright;
     end
   end
+`endif
 
   // --------------------------------------------------------------------
   // AY-3-8910 / YM2149 (jt49)
@@ -934,6 +952,7 @@ module chipbox #(
   // --------------------------------------------------------------------
   // SegaPCM (315-5218, jtoutrun_pcm): 16 каналов 8-бит сэмплов из
   // внешней памяти, стерео. cen = 2 x клок чипа из VGM.
+`ifdef M4_HAS_ARCADE
   reg pcm_cs = 0;
   reg [7:0] pcm_addr = 0;
   reg [7:0] pcm_din = 0;
@@ -964,11 +983,13 @@ module chipbox #(
       .snd_right(pcm_r),
       .sample(pcm_sample)
   );
+`endif
 
   // --------------------------------------------------------------------
   // MSM6258 (ADPCM X68000) + префетчер потока из памяти сэмплов.
   // Секвенсор пишет регистры чипа (опкод 0x4) и управляет потоком
   // (0x5/0x6/0x7); префетчер сам подаёт байты по drq чипа — аналог DMA.
+`ifdef M4_HAS_ARCADE
   reg adpcm_fsm_wr = 0;
   reg [1:0] adpcm_fsm_addr = 0;
   reg [7:0] adpcm_fsm_din = 0;
@@ -1012,6 +1033,7 @@ module chipbox #(
       .playing(),
       .sound(adpcm_sound)
   );
+`endif
 
   // --------------------------------------------------------------------
   // Konami SCC (K051649, IKASCC). Волновая таблица, без внешнего ROM.
@@ -1744,7 +1766,9 @@ module chipbox #(
   reg [OUT_CNT_W-1:0] out_cnt = 0;
 
   wire signed [16:0] ay_wide = {2'b00, ay_sound, 5'b00000};
+`ifdef M4_HAS_ARCADE
   wire signed [15:0] adpcm_wide = {adpcm_sound, 4'b0000};
+`endif
   // VRC6 подмешивается к APU до общего DC-блокера (оба однополярные)
   wire [5:0] vrc6_out;
 
@@ -1795,8 +1819,10 @@ module chipbox #(
   function automatic signed [18:0] hp_leak(input signed [18:0] y);
     hp_leak = (y >>> 10) != 0 ? (y >>> 10) : y > 0 ? 19'sd1 : y < 0 ? -19'sd1 : 19'sd0;
   endfunction
+`ifdef M4_HAS_ARCADE
   wire signed [15:0] adpcm_l = adpcm_pan[0] ? 16'sd0 : adpcm_wide;
   wire signed [15:0] adpcm_r = adpcm_pan[1] ? 16'sd0 : adpcm_wide;
+`endif
 
   // Взвешивание источников: (x * gain) >>> 6, gain в 1/64 долях
   wire signed [8:0] g_ym = {1'b0, mix_gains[7:0]};
@@ -1827,20 +1853,28 @@ module chipbox #(
 
   // Конвейер: произведения регистрируются (разгрузка длинного пути),
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
-  reg signed [25:0] ym_l_g, ym_r_g, ay_g, pcm_l_g, pcm_r_g;
-  reg signed [25:0] adpcm_l_g, adpcm_r_g, apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
+  reg signed [25:0] ay_g;
+  reg signed [25:0] apu_g, gbl_g, gbr_g, sid_g, opl_l_g, opl_r_g;
+`ifdef M4_HAS_ARCADE
+  reg signed [25:0] ym_l_g, ym_r_g, pcm_l_g, pcm_r_g, adpcm_l_g, adpcm_r_g;
+`else
+  reg signed [25:0] ym_l_g = 0, ym_r_g = 0, pcm_l_g = 0, pcm_r_g = 0;
+  reg signed [25:0] adpcm_l_g = 0, adpcm_r_g = 0;
+`endif
   reg signed [25:0] fm_l_g, fm_r_g, sn_g;
   // SCC/OKIM6295/K053260 — только в симуляции; в Quartus = 0
   reg signed [25:0] scc_g = 0, okim_g = 0, k060_l_g = 0, k060_r_g = 0;
 
   always @(posedge clk) begin
+    ay_g <= (ay_hp * g_ay) >>> 6;
+`ifdef M4_HAS_ARCADE
     ym_l_g <= (ym_l * g_ym) >>> 6;
     ym_r_g <= (ym_r * g_ym) >>> 6;
-    ay_g <= (ay_hp * g_ay) >>> 6;
     pcm_l_g <= (pcm_l * g_pcm) >>> 6;
     pcm_r_g <= (pcm_r * g_pcm) >>> 6;
     adpcm_l_g <= (adpcm_l * g_adpcm) >>> 6;
     adpcm_r_g <= (adpcm_r * g_adpcm) >>> 6;
+`endif
     apu_g <= (apu_hp * g_apu) >>> 6;
     gbl_g <= (gbl_hp * g_gb) >>> 6;
     gbr_g <= (gbr_hp * g_gb) >>> 6;
@@ -2007,16 +2041,18 @@ module chipbox #(
       state <= S_IDLE;
       tick_count <= 0;
       tick_target <= 0;
+`ifdef M4_HAS_ARCADE
       ym_cs_n <= 1;
       ym_wr_n <= 1;
-      ay_cs_n <= 1;
-      ay_wr_n <= 1;
       pcm_cs <= 0;
       adpcm_fsm_wr <= 0;
       adpcm_pan <= 0;
       str_set_addr <= 0;
       str_start <= 0;
       str_stop <= 0;
+`endif
+      ay_cs_n <= 1;
+      ay_wr_n <= 1;
       apu_cs <= 0;
       fsm_wr_req <= 0;
 `ifdef M4_HAS_HOME
@@ -2034,16 +2070,20 @@ module chipbox #(
       fm_wr_n <= 1;
       sn_wr_n <= 1;
     end else begin
+`ifdef M4_HAS_ARCADE
       str_set_addr <= 0;
       str_start <= 0;
       str_stop <= 0;
+`endif
       fsm_wr_req <= 0;
       if (tick) tick_count <= tick_count + 1'b1;
 
       case (state)
         S_IDLE: begin
+`ifdef M4_HAS_ARCADE
           ym_cs_n <= 1;
           ym_wr_n <= 1;
+`endif
           if (fifo_empty) begin
             if (!time_pending) tick_target <= tick_count;
           end else if (!time_pending && !chip_reset) begin
@@ -2056,12 +2096,14 @@ module chipbox #(
         S_DECODE: begin
           state <= S_IDLE;
           case (fifo_q[31:28])
+`ifdef M4_HAS_ARCADE
             OP_YM2151: begin
               cur_reg <= fifo_q[15:8];
               cur_val <= fifo_q[7:0];
               poll_guard <= 16'hFFFF;
               state <= S_POLL_A;
             end
+`endif
             OP_AY: begin
               // jt49 защёлкивает на любом такте — один строб без busy
               ay_addr <= fifo_q[11:8];
@@ -2070,6 +2112,7 @@ module chipbox #(
               ay_wr_n <= 0;
               state <= S_AY_WR;
             end
+`ifdef M4_HAS_ARCADE
             OP_PCM: begin
               // регистры SegaPCM — двупортовая RAM, пишется на clk
               pcm_addr <= fifo_q[15:8];
@@ -2095,6 +2138,7 @@ module chipbox #(
               str_start <= 1;
             end
             OP_STR_STOP: str_stop <= 1;
+`endif
             OP_WAIT: tick_target <= tick_target + fifo_q[23:0];
             OP_APU: begin
               apu_addr <= fifo_q[12:8];
@@ -2303,6 +2347,7 @@ module chipbox #(
         end
 
         // Записи в MSM6258: ждём освобождения латча (и байтов префетчера)
+`ifdef M4_HAS_ARCADE
         S_ADPCM_POLL: begin
           if (!adpcm_wr_pending && !pf_wr) begin
             adpcm_fsm_wr <= 1;
@@ -2315,14 +2360,18 @@ module chipbox #(
           state <= S_IDLE;
         end
 
+`endif
         S_AY_WR: begin
           ay_cs_n <= 1;
           ay_wr_n <= 1;
+`ifdef M4_HAS_ARCADE
           pcm_cs <= 0;
+`endif
           state <= S_IDLE;
         end
 
         // Ожидание снятия busy: держим чтение статуса
+`ifdef M4_HAS_ARCADE
         S_POLL_A, S_POLL_D: begin
           ym_cs_n <= 0;
           ym_wr_n <= 1;
@@ -2350,6 +2399,7 @@ module chipbox #(
             end
           end
         end
+`endif
 
         default: state <= S_IDLE;
       endcase

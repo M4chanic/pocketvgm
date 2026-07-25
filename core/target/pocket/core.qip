@@ -149,3 +149,7 @@ set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_p
 set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/jt89/jt89_vol.v"]
 set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/jt12/jt10_adpcm_div.v"]
 # --- партнёрские чипы: SCC (K051649), OKIM6295, K053260 ---
+set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/scc/IKASCC.v"]
+set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/scc/IKASCC_player_s.v"]
+set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/scc/IKASCC_vrc_s.v"]
+set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/scc/IKASCC_primitives.v"]
