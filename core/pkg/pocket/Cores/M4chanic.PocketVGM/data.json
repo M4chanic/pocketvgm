@@ -12,10 +12,11 @@
         "extensions": [
           "bin"
         ],
-        "address": "0x00000000"
+        "address": "0x00000000",
+        "secondary": true
       },
       {
-        "name": "Sega (VGM/VGZ/GYM)",
+        "name": "Sega",
         "id": 1,
         "required": false,
         "parameters": "0x249",
@@ -30,7 +31,7 @@
         "address": "0x00000000"
       },
       {
-        "name": "Nintendo (VGM/NSF/GBS)",
+        "name": "Nintendo",
         "id": 2,
         "required": false,
         "parameters": "0x249",
@@ -45,7 +46,7 @@
         "address": "0x00000000"
       },
       {
-        "name": "Computer (MID/MOD/SID)",
+        "name": "Computer",
         "id": 3,
         "required": false,
         "parameters": "0x249",
