@@ -234,6 +234,7 @@ const OP_OPL3: u32 = 0xC000_0000;
 // Расширенные чипы: опкод 0xF, суб-код в [27:24]. SCC = суб-код 0.
 const OP_EXT: u32 = 0xF000_0000;
 const EXT_SCC: u32 = 0x0000_0000;
+const EXT_HUC: u32 = 0x0300_0000;
 const EXT_OKIM: u32 = 0x0100_0000;
 const EXT_K060: u32 = 0x0200_0000;
 
@@ -1733,6 +1734,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         chipbox_write(0x23, (((okim_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
         chipbox_write(0x24, 1 << 8 | 64); // ss=1, okim_gain=64
     }
+    let huc_clk = header.clocks.huc6280;
+    if huc_clk != 0 {
+        chipbox_write(0x27, (((huc_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+        chipbox_write(0x28, 64); // huc_gain
+    }
     let k060_clk = header.clocks.k053260;
     if k060_clk != 0 {
         chipbox_write(0x25, (((k060_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
@@ -1790,6 +1796,9 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             Ok(Event::Write { chip: Chip::Opl, port, addr, data }) => {
                 // OPL2/OPL3 играем на нашем OPL3: port = банк регистров
                 sink.push(OP_OPL3 | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
+            }
+            Ok(Event::Write { chip: Chip::HuC6280, addr, data, .. }) => {
+                sink.push(OP_EXT | EXT_HUC | ((addr & 0xF) as u32) << 8 | data as u32);
             }
             Ok(Event::Write { chip: Chip::K051649, port, addr, data }) => {
                 sink.push(OP_EXT | EXT_SCC | (port as u32) << 16 | (addr as u32) << 8 | data as u32);

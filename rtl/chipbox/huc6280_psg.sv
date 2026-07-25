@@ -83,7 +83,7 @@ module huc6280_psg (
         4'h4: begin
           // сброс индекса записи волны в момент выключения канала —
           // так рипы заливают таблицу с начала
-          if (ch_on[ch_sel] && !din[7]) wr_idx[ch_sel] <= 0;
+          if (!din[7]) wr_idx[ch_sel] <= 0;
           ch_on[ch_sel]  <= din[7];
           ch_dda[ch_sel] <= din[6];
           vol[ch_sel]    <= din[4:0];
@@ -151,11 +151,11 @@ module huc6280_psg (
 
   // ------------------------------------------------------------------
   // Обход каналов: по одному за такт clk, старт по cen
-  reg  [2:0] scan = 3'd6;   // 6 — простой
+  reg  [2:0] scan = 0;
   reg signed [17:0] acc_l = 0, acc_r = 0;
   reg  [4:0] samp_q = 0;
   reg  [2:0] scan_q = 0;
-  reg  [2:0] scan_q2 = 3'd6;
+  reg  [2:0] scan_q2 = 0;
   wire signed [17:0] term_l = $signed(centred) * $signed({1'b0, vol_tab[vl_i]});
   wire signed [17:0] term_r = $signed(centred) * $signed({1'b0, vol_tab[vr_i]});
 
@@ -176,14 +176,17 @@ module huc6280_psg (
 
   always @(posedge clk) begin
     if (rst) begin
-      scan <= 3'd6;
+      scan <= 0;
       acc_l <= 0;
       acc_r <= 0;
       snd_left <= 0;
       snd_right <= 0;
     end else begin
-      if (cen) scan <= 0;
-      else if (scan != 3'd6) scan <= scan + 1'b1;
+      // Обход свободнобегущий, а не по cen: иначе он зависел бы от
+      // соотношения частот ядра и чипа, и при малом числе тактов на cen
+      // шесть каналов не успевали бы обсчитаться. Счётчики частоты
+      // тикают по cen отдельно — высота тона от этого не зависит.
+      scan <= (scan == 3'd5) ? 3'd0 : scan + 1'b1;
 
       // конвейер: адрес -> отсчёт -> накопление
       samp_q <= wave_ram[{scan, step[scan]}];
@@ -195,15 +198,19 @@ module huc6280_psg (
       if (scan_q == 3'd0) begin
         acc_l <= term_l;
         acc_r <= term_r;
-      end else if (scan_q != 3'd6) begin
+      end else begin
         acc_l <= acc_l + term_l;
         acc_r <= acc_r + term_r;
       end
 
       // шестой канал попадает в acc только на следующем такте
       if (scan_q2 == 3'd5) begin
-        snd_left  <= acc_l[17:2];
-        snd_right <= acc_r[17:2];
+        // шесть каналов на максимуме дают 6*15*191 = 17190 — в 16 бит
+        // укладывается, делить незачем; насыщение на всякий случай
+        snd_left  <= acc_l > 18'sd32767 ? 16'sd32767
+                   : acc_l < -18'sd32768 ? -16'sd32768 : acc_l[15:0];
+        snd_right <= acc_r > 18'sd32767 ? 16'sd32767
+                   : acc_r < -18'sd32768 ? -16'sd32768 : acc_r[15:0];
       end
     end
   end

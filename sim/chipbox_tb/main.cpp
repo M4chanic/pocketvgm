@@ -574,6 +574,53 @@ static int gbs_int_selftest(const char* out, double seconds) {
 // PLAY гоняет верхний байт частоты по кольцу через счётчик в RAM $0300.
 // Селфтест SCC: грузим синус в волновую таблицу ch1, ставим частоту/
 // громкость/keyon и проверяем тон. f = mclock/(32*(freq+1)); freq=0xFD ~ 220 Гц.
+// Селфтест HuC6280: синус в волновую таблицу канала 0, проверяем тон
+// на выходе микшера. Период P даёт 3579545/(32*(P+1)) Гц.
+static int huc_selftest(const char* out, double seconds) {
+    Tb tb;
+    tb.wb(6, true, 0);            // прочие микс-каналы в ноль
+    tb.wb(0xC, true, 0);
+    tb.wb(0x15, true, 0);
+    tb.wb(0x28, true, 64);        // huc_gain
+    tb.wb(0x27, true, (uint32_t)(3579545.0 / CLK_HZ * 4294967296.0 + 0.5));
+
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 2048; i++) tb.step();
+    tb.wb(2, true, 0);
+    for (int i = 0; i < 1200; i++) tb.step();
+
+    auto huc = [&](int reg, int data) {
+        tb.wb(0, true, 0xF3000000u | ((reg & 0xF) << 8) | (data & 0xFF));
+    };
+    huc(0, 0);                    // канал 0
+    huc(1, 0xFF);                 // общая громкость
+    huc(4, 0x00);                 // канал выкл -> индекс волны с нуля
+    for (int i = 0; i < 32; i++)  // синус, 5 бит без знака
+        huc(6, (int)lround(15.5 + 15.0 * sin(2.0 * M_PI * i / 32.0)) & 0x1F);
+    huc(2, 0xFC);                 // период lo
+    huc(3, 0x01);                 // период hi -> 0x1FC = 508
+    huc(5, 0xFF);                 // баланс
+    huc(4, 0x9F);                 // канал вкл, громкость 31
+
+    uint64_t cycles = (uint64_t)(seconds * CLK_HZ);
+    while (tb.cycle < cycles) tb.step();
+
+    uint32_t rate = (uint32_t)((double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ) + 0.5);
+    write_wav_file(out, tb.pcm, rate);
+    size_t n = tb.pcm.size() / 2;
+    int16_t peak = 0;
+    int zc = 0;
+    for (size_t i = n / 2; i < n; i++) {
+        peak = std::max(peak, (int16_t)abs(tb.pcm[2 * i]));
+        if (i > n / 2 && (tb.pcm[2 * i] >= 0) != (tb.pcm[2 * (i - 1)] >= 0)) zc++;
+    }
+    double hz = zc * 1.0 / (n - n / 2) * rate / 2;
+    bool ok = peak > 1000 && hz > 185 && hz < 260;
+    fprintf(stderr, "селфтест HuC6280: peak=%d, тон ~%.0f Гц (ждём ~220) → %s\n",
+            peak, hz, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int scc_selftest(const char* out, double seconds) {
     Tb tb;
     // все прочие микс-каналы в ноль, SCC на полную
@@ -1171,6 +1218,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--reset-selftest")) { return reset_selftest(out); }
         else if (!strcmp(argv[i], "--ff-selftest")) { return ff_selftest(); }
         else if (!strcmp(argv[i], "--vrc6-selftest")) { return vrc6_selftest(out, 1.0); }
+        else if (!strcmp(argv[i], "--huc-selftest")) { return huc_selftest(out, max_seconds > 0 ? max_seconds : 1.0); }
         else if (!strcmp(argv[i], "--scc-selftest")) { return scc_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--okim-selftest")) { return okim_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--k060-selftest")) { return k060_selftest(out, 1.0); }

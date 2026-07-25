@@ -183,6 +183,8 @@ module chipbox #(
 `ifdef M4_HAS_HOME
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
   reg [7:0] scc_gain = 8'd64;
+  reg [31:0] huc_phase_inc = DEFAULT_HUC_PHASE_INC;
+  reg [7:0] huc_gain = 8'd64;
 `endif
 `ifdef M4_HAS_ARCADE
   reg [31:0] okim_phase_inc = DEFAULT_OKIM_PHASE_INC;
@@ -263,6 +265,7 @@ module chipbox #(
   localparam [31:0] DEFAULT_GB_PHASE_INC = 32'((64'd8_388_608 << 32) / CLK_HZ);
   // Konami SCC (K051649): phiM ~1.79 МГц
   localparam [31:0] DEFAULT_SCC_PHASE_INC = 32'((64'd1_789_772 << 32) / CLK_HZ);
+  localparam [31:0] DEFAULT_HUC_PHASE_INC = 32'((64'd3_579_545 << 32) / CLK_HZ);
   // OKIM6295: клок ~1 МГц; ROM сэмплов в PSRAM с байта 0x100000 (окно
   // 0x100000-0x3FFFFF свободно между SegaPCM<=512К и ADPCM_BASE 0x400000)
   localparam [31:0] DEFAULT_OKIM_PHASE_INC = 32'((64'd1_000_000 << 32) / CLK_HZ);
@@ -350,6 +353,9 @@ module chipbox #(
     soft_reset_req <= 0;
     stub_wr <= 0;
     gb_stub_wr <= 0;
+`ifdef M4_HAS_HOME
+    huc_wr <= 0;
+`endif
     mem_rd <= 0;
     mem_wr <= 0;
 
@@ -638,6 +644,8 @@ module chipbox #(
 `ifdef M4_HAS_HOME
           6'h21: scc_phase_inc <= data_write;
           6'h22: scc_gain <= data_write[7:0];
+          6'h27: huc_phase_inc <= data_write;
+          6'h28: huc_gain <= data_write[7:0];
 `endif
 `ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
@@ -828,6 +836,14 @@ module chipbox #(
   always @(posedge clk) begin
     cen_scc <= 0;
     if (!pause_r) {cen_scc, scc_cen_phase} <= {1'b0, scc_cen_phase} + {1'b0, scc_phase_inc};
+  end
+
+  // Клок HuC6280 PSG (3.579545 МГц)
+  reg [31:0] huc_cen_phase = 0;
+  reg cen_huc = 0;
+  always @(posedge clk) begin
+    cen_huc <= 0;
+    if (!pause_r) {cen_huc, huc_cen_phase} <= {1'b0, huc_cen_phase} + {1'b0, huc_phase_inc};
   end
 `endif
 
@@ -1056,6 +1072,22 @@ module chipbox #(
   reg [7:0] scc_db = 0;
 `endif
 `ifdef M4_HAS_HOME
+  // HuC6280 PSG (PC Engine). Запись однотактовая, строб не нужен.
+  reg        huc_wr = 0;
+  reg  [3:0] huc_addr = 0;
+  reg  [7:0] huc_din = 0;
+  wire signed [15:0] huc_left, huc_right;
+  huc6280_psg huc (
+      .clk(clk),
+      .cen(cen_huc),
+      .rst(chip_reset),
+      .wr(huc_wr),
+      .addr(huc_addr),
+      .din(huc_din),
+      .snd_left(huc_left),
+      .snd_right(huc_right)
+  );
+
   wire signed [10:0] scc_sound;
 
   IKASCC #(
@@ -1858,6 +1890,8 @@ module chipbox #(
   // SCC моно, знаковый 11 бит -> << 5 (x32) до 16 бит
   wire signed [8:0] g_scc = {1'b0, scc_gain};
   wire signed [15:0] scc_wide = {scc_sound, 5'b00000};
+  // HuC6280 стерео, знаковый 16 бит
+  wire signed [8:0] g_huc = {1'b0, huc_gain};
 `endif
 `ifdef M4_HAS_ARCADE
   // OKIM6295 моно, знаковый 14 бит -> << 2 (x4) до 16 бит
@@ -1889,6 +1923,7 @@ module chipbox #(
   reg signed [25:0] fm_l_g, fm_r_g, sn_g;
   // SCC/OKIM6295/K053260 — только в симуляции; в Quartus = 0
   reg signed [25:0] scc_g = 0, okim_g = 0, k060_l_g = 0, k060_r_g = 0;
+  reg signed [25:0] huc_l_g = 0, huc_r_g = 0;
 
   always @(posedge clk) begin
     ay_g <= (ay_hp * g_ay) >>> 6;
@@ -1915,6 +1950,8 @@ module chipbox #(
     sn_g <= (sn_wide * g_sn) >>> 6;
 `ifdef M4_HAS_HOME
     scc_g <= (scc_wide * g_scc) >>> 6;
+    huc_l_g <= (huc_left * g_huc) >>> 6;
+    huc_r_g <= (huc_right * g_huc) >>> 6;
 `endif
 `ifdef M4_HAS_ARCADE
     okim_g <= (okim_wide * g_okim) >>> 6;
@@ -1923,8 +1960,8 @@ module chipbox #(
 `endif
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g + okim_g + k060_l_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g + okim_g + k060_r_g;
+  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g + huc_l_g + okim_g + k060_l_g;
+  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g + huc_r_g + okim_g + k060_r_g;
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -2002,6 +2039,7 @@ module chipbox #(
   localparam EXT_SCC = 4'h0;  // Konami SCC/K051649
   localparam EXT_OKIM = 4'h1; // OKIM6295
   localparam EXT_K060 = 4'h2; // Konami K053260
+  localparam EXT_HUC  = 4'h3; // HuC6280 PSG (PC Engine)
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -2210,6 +2248,11 @@ module chipbox #(
             OP_EXT: begin
               case (fifo_q[27:24])
 `ifdef M4_HAS_HOME
+                EXT_HUC: begin
+                  huc_addr <= fifo_q[11:8];
+                  huc_din  <= fifo_q[7:0];
+                  huc_wr   <= 1;
+                end
                 EXT_SCC: begin
                   // порт 7 = разблокировка BR2 (ABHI=0x12, DB=0x3F)
                   if (fifo_q[18:16] == 3'd7) begin

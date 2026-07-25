@@ -11,6 +11,7 @@ GB       := $(addprefix $(VB_HDL)/,cpu.v alu.v control.v regfile.v singlereg.v \
             sound.v sound_channel_mix.v sound_length_ctr.v sound_noise.v \
             sound_square.v sound_vol_env.v sound_wave.v edgedet.v)
 GB       += ../../rtl/chipbox/gbsbox.sv
+HUC      := ../../rtl/chipbox/huc6280_psg.sv
 SID      := $(wildcard ../../rtl/vendor/c64sid/sid_*.sv)
 GEN      := $(wildcard ../../rtl/vendor/jt12/*.v) $(wildcard ../../rtl/vendor/jt89/*.v)
 OPL      := ../../rtl/vendor/opl3/opl3_pkg.sv $(filter-out ../../rtl/vendor/opl3/opl3_pkg.sv,$(wildcard ../../rtl/vendor/opl3/*.sv)) ../../rtl/vendor/opl3/afifo.v
@@ -22,7 +23,7 @@ CHIPBOX  := ../../core/target/pocket/chipbox.sv
 chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB)
 	verilator --cc --exe --build -O3 -Wno-fatal --top-module chipbox \
 		-GCLK_HZ=8000000 -DM4_SIM -I$(VB_HDL) \
-		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(OKIM) $(K060) $(GEN) $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) main.cpp -CFLAGS "-O2" -LDFLAGS "-lz" -o ../$@
+		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) main.cpp -CFLAGS "-O2" -LDFLAGS "-lz" -o ../$@
 
 clean:
 	rm -rf obj_dir chipbox_tb
