@@ -1769,11 +1769,13 @@ module chipbox #(
   // SCC моно, знаковый 11 бит -> << 5 (x32) до 16 бит
   wire signed [8:0] g_scc = {1'b0, scc_gain};
   wire signed [15:0] scc_wide = {scc_sound, 5'b00000};
+`ifdef M4_SIM
   // OKIM6295 моно, знаковый 14 бит -> << 2 (x4) до 16 бит
   wire signed [8:0] g_okim = {1'b0, okim_gain};
   wire signed [15:0] okim_wide = {okim_sound, 2'b00};
   // K053260 стерео, знаковый 16 бит
   wire signed [8:0] g_k060 = {1'b0, k060_gain};
+`endif
   wire signed [15:0] sid_wide = sid_audio[17:2];
   wire signed [16:0] sid_wide17 = {sid_wide[15], sid_wide};
 
