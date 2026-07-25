@@ -144,6 +144,8 @@ jobs:
           for v in home arcade; do
             best=""
             best_slack=-1000
+            # вариант может быть не собран (матрица сужена) — пропускаем
+            ls -d bitstream-$v-seed* >/dev/null 2>&1 || { echo "нет артефактов: $v"; continue; }
             for d in bitstream-$v-seed*; do
               [ -d "$d" ] || continue
               s=$(cat "$d/slack.txt")
@@ -210,6 +212,7 @@ jobs:
           cp -r core/pkg/pocket/* dist/
           cp pocketvgm*.rev dist/Cores/M4chanic.PocketVGM/
           cp boot.bin dist/Assets/pocketvgm/common/
+          cp -r Demo dist/Assets/pocketvgm/common/Demo
                     install -m 755 scripts/pocketvgm_update.py dist/pocketvgm
           cd dist && zip -r ../m4pocket-core.zip . -x '*.gitkeep'
 
