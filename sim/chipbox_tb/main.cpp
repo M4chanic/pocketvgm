@@ -296,7 +296,7 @@ static int nsf_songs(const char* path, const char* out, double seconds, bool cle
         tb.wb(9, true, d[i] | (i + 1 < d.size() ? d[i + 1] << 8 : 0));
 
     int bad = 0;
-    for (uint8_t song = 0; song < (songs < 3 ? songs : 3); song++) {
+    for (uint8_t song = 0; song < (songs < 8 ? songs : 8); song++) {
         std::vector<uint8_t> stub = nsf_stub(banks, banked, init, play, song, clear_ram);
         if (stub.size() > 0x100) { fprintf(stderr, "стаб не влез: %zu\n", stub.size()); return 1; }
         size_t pcm0 = tb.pcm.size();
