@@ -41,16 +41,27 @@ default Console bitstream; the second needs the Arcade one.
 | ZX Spectrum | `.vgm` `.vgz` | AY-3-8910 |
 | PC, General MIDI | `.mid` | YMF262 with Freedoom GENMIDI patches |
 
-| Needs the Arcade bitstream | Formats | Chips used |
+| In the separate Arcade core | Formats | Chips used |
 |---|---|---|
 | Sharp X68000 | `.vgm` `.vgz` | YM2151, MSM6258 |
 | Sega arcade (OutRun and similar) | `.vgm` `.vgz` | YM2151, SegaPCM |
 | Konami arcade | `.vgm` `.vgz` | K053260 (2 of 4 channels) |
 | Arcade boards using OKIM6295 | `.vgm` `.vgz` | OKIM6295 |
 
-Note on the Arcade bitstream: it is built and shipped, but there is
-currently no way to select it on the device. Until that is solved the
-arcade systems above cannot be played.
+These live in a second core, **PocketVGM Arcade**, installed alongside the
+first and listed separately in the Pocket menu. Both share the same
+platform and the same music folder, so nothing needs copying twice.
+
+Two sets rather than one because they do not fit on the device together —
+the chip logic of both exceeds what the FPGA holds. They were originally
+meant to be two variants of one core, selected from a menu, but that
+mechanism is documented as upcoming and no shipping core uses it: of 260
+repositories carrying a `variants.json`, every one has an empty list. Two
+cores is what works today.
+
+A recording written for the console chips is silent in the Arcade core and
+the reverse is also true, and nothing yet tells you which one a file
+needs.
 
 Two parts of the YM2608 are not modelled: the rhythm section, whose samples
 live in a ROM inside the original chip, and ADPCM-B. Melodic FM and SSG

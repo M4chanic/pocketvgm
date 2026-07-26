@@ -1,0 +1,15 @@
+PocketVGM Arcade
+
+Companion core to PocketVGM, carrying the chips that do not fit alongside
+the console set: YM2151, SegaPCM, MSM6258, OKIM6295 and K053260. Between
+them they cover Sharp X68000, Sega arcade boards such as OutRun, and
+Konami arcade.
+
+Music lives in the same place as for PocketVGM, Assets/pocketvgm/common,
+and the two cores share it. Load a .vgm or .vgz from any of the menu
+entries; the file itself says which chips it needs.
+
+A file written for the console chips will be silent here, and the reverse
+is also true. Which core a recording needs is not shown anywhere yet.
+
+Source and releases: https://github.com/M4chanic/pocketvgm

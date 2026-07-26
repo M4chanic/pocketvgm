@@ -1,0 +1,36 @@
+{
+  "core": {
+    "magic": "APF_VER_1",
+    "metadata": {
+      "platform_ids": [
+        "pocketvgm"
+      ],
+      "shortname": "PocketVGM Arcade",
+      "description": "Chiptune jukebox, arcade set: YM2151, SegaPCM, MSM6258, OKIM6295, K053260. Companion to PocketVGM — same platform and music folder, separate bitstream because both sets do not fit one device.",
+      "author": "M4chanic",
+      "url": "https://github.com/M4chanic/pocketvgm",
+      "version": "0.1.18",
+      "date_release": "2026-07-25"
+    },
+    "framework": {
+      "target_product": "Analogue Pocket",
+      "version_required": "1.1",
+      "sleep_supported": false,
+      "dock": {
+        "supported": true,
+        "analog_output": false
+      },
+      "hardware": {
+        "link_port": false,
+        "cartridge_adapter": -1
+      }
+    },
+    "cores": [
+      {
+        "name": "arcade",
+        "id": 0,
+        "filename": "pocketvgm_a.rev"
+      }
+    ]
+  }
+}
