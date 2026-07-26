@@ -1474,8 +1474,16 @@ module chipbox #(
               sid_addr <= cpu_ab_l[4:0];
               sid_read_pend <= 1;
             end
+          end else if (cpu_ab_l[15:9] == 7'b0000000) begin
+            // Нулевая страница и стек ($0000-$01FF) — из BRAM, а не из
+            // PSRAM: в режиме SID туда уходило всё адресное пространство,
+            // включая две страницы, по которым 6502 бьёт чаще всего.
+            // Записи сюда и так шли в nsf_ram — правится только чтение.
+            // Шире брать нельзя: стаб лежит по $0334 и живёт в PSRAM.
+            cpu_di <= nsf_ram_q;
+            cpu_di_ready <= 1;
           end else begin
-            nsf_req <= 1;  // RAM из PSRAM
+            nsf_req <= 1;  // остальная память — из PSRAM
           end
         end
       end else if (cpu_step_d) begin

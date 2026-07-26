@@ -1120,6 +1120,17 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
 
         let mut stub: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         stub.push(0x78); // SEI
+        stub.extend_from_slice(&[0xD8, 0xA2, 0xFF, 0x9A]); // CLD, LDX #$FF, TXS
+        // Нулевая страница и стек теперь читаются из BRAM ядра, а её
+        // содержимое переживает смену трека — чистим сами. Образ в PSRAM
+        // обнуляется выше, но на эти две страницы он больше не влияет.
+        stub.extend_from_slice(&[0xA9, 0x00, 0xAA]); // LDA #0 : TAX
+        let zp = 0x0334u16 + stub.len() as u16;
+        stub.extend_from_slice(&[0x9D, 0x00, 0x00]); // STA $0000,X
+        stub.extend_from_slice(&[0x9D, 0x00, 0x01]); // STA $0100,X
+        stub.push(0xE8); // INX
+        let back = (zp as i32 - (0x0334 + stub.len() as i32 + 2)) as i8 as u8;
+        stub.extend_from_slice(&[0xD0, back]); // BNE zp
         stub.extend_from_slice(&[0xA9, s]); // LDA #песня
         stub.extend_from_slice(&[0x20, init as u8, (init >> 8) as u8]);
         let loop_at = 0x0334 + stub.len() as u16;
