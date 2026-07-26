@@ -1524,7 +1524,7 @@ int main(int argc, char** argv) {
     }
     if (huc_clk) {
         tb.wb(0x27, true, (uint32_t)((double)huc_clk / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(0x28, true, 64);
+        tb.wb(0x28, true, 128);
     }
     if (opn_clk) {
         // мастер-клок в FM как есть, вчетверо меньший — в SSG

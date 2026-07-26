@@ -140,20 +140,36 @@ module huc6280_psg (
   end
 
   // ------------------------------------------------------------------
-  // Таблица громкости: шаг 1.5 дБ, индекс 0 — тишина
-  reg [7:0] vol_tab[0:31];
+  // Громкость. Модель снята с эталонной реализации: 48 дБ на 32 шага по
+  // 1.5 дБ, и складываются ЗАТУХАНИЯ, а не громкости. Индекс 0 —
+  // максимум, 31 — тишина.
+  //
+  // Раньше здесь складывались сами громкости с ограничением на 31 как на
+  // максимуме, и любая комбинация выше порога звучала одинаково громко:
+  // при общей громкости 15 и балансе 15 громкость канала не значила
+  // ничего, 16 и 31 давали одно и то же. Тихие голоса шли в полную силу,
+  // отсюда неверная пропорция между ударными и мелодией.
+  //
+  // Четырёхбитные общая громкость и баланс переводятся в пятибитную
+  // шкалу отдельной таблицей — шаг у неё неравномерный.
+  reg [7:0] att_tab[0:31];
+  reg [4:0] scale4[0:15];
   initial begin
-    vol_tab[ 0] = 8'd0;   vol_tab[ 1] = 8'd1;   vol_tab[ 2] = 8'd1;
-    vol_tab[ 3] = 8'd1;   vol_tab[ 4] = 8'd2;   vol_tab[ 5] = 8'd2;
-    vol_tab[ 6] = 8'd2;   vol_tab[ 7] = 8'd3;   vol_tab[ 8] = 8'd3;
-    vol_tab[ 9] = 8'd4;   vol_tab[10] = 8'd5;   vol_tab[11] = 8'd6;
-    vol_tab[12] = 8'd7;   vol_tab[13] = 8'd8;   vol_tab[14] = 8'd10;
-    vol_tab[15] = 8'd12;  vol_tab[16] = 8'd14;  vol_tab[17] = 8'd17;
-    vol_tab[18] = 8'd20;  vol_tab[19] = 8'd24;  vol_tab[20] = 8'd28;
-    vol_tab[21] = 8'd34;  vol_tab[22] = 8'd40;  vol_tab[23] = 8'd48;
-    vol_tab[24] = 8'd57;  vol_tab[25] = 8'd68;  vol_tab[26] = 8'd80;
-    vol_tab[27] = 8'd96;  vol_tab[28] = 8'd114; vol_tab[29] = 8'd135;
-    vol_tab[30] = 8'd161; vol_tab[31] = 8'd191;
+    att_tab[ 0] = 8'd255;  att_tab[ 1] = 8'd215;  att_tab[ 2] = 8'd181;
+    att_tab[ 3] = 8'd152;  att_tab[ 4] = 8'd128;  att_tab[ 5] = 8'd108;
+    att_tab[ 6] = 8'd 90;  att_tab[ 7] = 8'd 76;  att_tab[ 8] = 8'd 64;
+    att_tab[ 9] = 8'd 54;  att_tab[10] = 8'd 45;  att_tab[11] = 8'd 38;
+    att_tab[12] = 8'd 32;  att_tab[13] = 8'd 27;  att_tab[14] = 8'd 23;
+    att_tab[15] = 8'd 19;  att_tab[16] = 8'd 16;  att_tab[17] = 8'd 14;
+    att_tab[18] = 8'd 11;  att_tab[19] = 8'd 10;  att_tab[20] = 8'd  8;
+    att_tab[21] = 8'd  7;  att_tab[22] = 8'd  6;  att_tab[23] = 8'd  5;
+    att_tab[24] = 8'd  4;  att_tab[25] = 8'd  3;  att_tab[26] = 8'd  3;
+    att_tab[27] = 8'd  2;  att_tab[28] = 8'd  2;  att_tab[29] = 8'd  2;
+    att_tab[30] = 8'd  1;  att_tab[31] = 8'd  0;
+    scale4[ 0] = 5'd 0;  scale4[ 1] = 5'd 3;  scale4[ 2] = 5'd 5;  scale4[ 3] = 5'd 7;
+    scale4[ 4] = 5'd 9;  scale4[ 5] = 5'd11;  scale4[ 6] = 5'd13;  scale4[ 7] = 5'd15;
+    scale4[ 8] = 5'd16;  scale4[ 9] = 5'd19;  scale4[10] = 5'd21;  scale4[11] = 5'd23;
+    scale4[12] = 5'd25;  scale4[13] = 5'd27;  scale4[14] = 5'd29;  scale4[15] = 5'd31;
   end
 
   // ------------------------------------------------------------------
@@ -163,16 +179,19 @@ module huc6280_psg (
   reg  [4:0] samp_q = 0;
   reg  [2:0] scan_q = 0;
   reg  [2:0] scan_q2 = 0;
-  wire signed [17:0] term_l = $signed(centred) * $signed({1'b0, vol_tab[vl_i]});
-  wire signed [17:0] term_r = $signed(centred) * $signed({1'b0, vol_tab[vr_i]});
+  wire signed [17:0] term_l = $signed(centred) * $signed({1'b0, att_tab[vl_i]});
+  wire signed [17:0] term_r = $signed(centred) * $signed({1'b0, att_tab[vr_i]});
 
-  wire [5:0] vl_raw = {1'b0, main_l, 1'b0} + {1'b0, bal_l[scan_q], 1'b0}
-                    + {1'b0, vol[scan_q]};
-  wire [5:0] vr_raw = {1'b0, main_r, 1'b0} + {1'b0, bal_r[scan_q], 1'b0}
-                    + {1'b0, vol[scan_q]};
-  // индекс — насыщение до 31; выключенный канал молчит
-  wire [4:0] vl_i = !ch_on[scan_q] ? 5'd0 : (vl_raw > 6'd31 ? 5'd31 : vl_raw[4:0]);
-  wire [4:0] vr_i = !ch_on[scan_q] ? 5'd0 : (vr_raw > 6'd31 ? 5'd31 : vr_raw[4:0]);
+  // Затухание = сумма трёх слагаемых, каждое (31 - значение)
+  wire [6:0] al_raw = (7'd31 - {2'b0, scale4[main_l]})
+                    + (7'd31 - {2'b0, vol[scan_q]})
+                    + (7'd31 - {2'b0, scale4[bal_l[scan_q]]});
+  wire [6:0] ar_raw = (7'd31 - {2'b0, scale4[main_r]})
+                    + (7'd31 - {2'b0, vol[scan_q]})
+                    + (7'd31 - {2'b0, scale4[bal_r[scan_q]]});
+  // насыщение на 31 = тишина; выключенный канал тоже молчит
+  wire [4:0] vl_i = !ch_on[scan_q] ? 5'd31 : (al_raw > 7'd31 ? 5'd31 : al_raw[4:0]);
+  wire [4:0] vr_i = !ch_on[scan_q] ? 5'd31 : (ar_raw > 7'd31 ? 5'd31 : ar_raw[4:0]);
 
   // шум подменяет волну на каналах 4-5
   wire noisy = (scan_q >= 3'd4) && noise_en[scan_q];

@@ -1861,7 +1861,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     let huc_clk = header.clocks.huc6280;
     if huc_clk != 0 {
         chipbox_write(0x27, (((huc_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
-        chipbox_write(0x28, 64); // huc_gain
+        chipbox_write(0x28, 128); // huc_gain: модель громкости приведена к эталонной, остаток ~6 дБ добираем здесь
     }
     let k060_clk = header.clocks.k053260;
     if k060_clk != 0 {
