@@ -13,7 +13,28 @@
 #include "verilated.h"
 
 // Должно совпадать с параметром CLK_HZ при верилировании (-GCLK_HZ)
-static const double CLK_HZ = 8000000.0;
+#ifndef M4_CLK_HZ
+#define M4_CLK_HZ 8000000.0
+#endif
+static const double CLK_HZ = M4_CLK_HZ;
+
+// Инкремент фазы для регистров частоты чипов. Аккумулятор 32-битный, и
+// если частота чипа выше тактовой ядра, значение переполняется и молча
+// становится дробной частью — домен уезжает в разы. Так и вышло с Game
+// Boy: 8.388608 МГц при тактовой стенда 8 МГц давали долю 0.049 вместо
+// 1.049, то есть домен работал в 21 раз медленнее, и все замеры GBS в
+// симуляции были недействительны. Лучше упасть, чем измерять не то.
+static uint32_t phase_inc(double hz, const char* what) {
+    double v = hz / CLK_HZ * 4294967296.0;
+    if (v >= 4294967296.0) {
+        fprintf(stderr, "ОШИБКА: %s требует %.0f Гц при тактовой стенда %.0f Гц — "
+                "инкремент фазы переполнится. Соберите с большей -GCLK_HZ.\n",
+                what, hz, CLK_HZ);
+        exit(2);
+    }
+    return (uint32_t)(v + 0.5);
+}
+
 
 static std::vector<uint8_t> read_maybe_gz(const char* path) {
     gzFile f = gzopen(path, "rb");
@@ -1065,7 +1086,7 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
         play_hz = base / (256 - tma);
     }
     tb.wb(0xF, true, (uint32_t)(play_hz / CLK_HZ * 4294967296.0 + 0.5));
-    tb.wb(0x10, true, (uint32_t)(gb_hz / CLK_HZ * 4294967296.0 + 0.5)); // gb_clk: по умолчанию как на железе (8.388608 МГц -> ÷2 = 4.194 МГц)
+    tb.wb(0x10, true, phase_inc(gb_hz, "клок Game Boy")); // gb_clk: по умолчанию как на железе (8.388608 МГц -> ÷2 = 4.194 МГц)
     tb.wb(6, true, 0);
     tb.wb(0xC, true, 64u << 8);
 

@@ -20,9 +20,15 @@ OKIM     := $(wildcard ../../rtl/vendor/jt6295/*.v)
 K060     := $(wildcard ../../rtl/vendor/jt053260/*.v)
 CHIPBOX  := ../../core/target/pocket/chipbox.sv
 
+# Тактовая стенда. По умолчанию 8 МГц — так быстрее считается. Но чипы,
+# чья частота выше, при ней переполняют инкремент фазы: Game Boy требует
+# 8.388608 МГц, и на 8 МГц домен уезжает в 21 раз. Для таких проверок
+# собирать с CLK=57120000, как на железе: make CLK=57120000
+CLK ?= 8000000
+
 chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB) $(HUC) $(SCC) $(SID) $(OPL)
 	verilator --cc --exe --build -O3 -Wno-fatal --top-module chipbox \
-		-GCLK_HZ=8000000 -DM4_SIM -I$(VB_HDL) \
+		-GCLK_HZ=$(CLK) -DM4_SIM -DM4_CLK_HZ=$(CLK).0 -CFLAGS "-DM4_CLK_HZ=$(CLK).0" -I$(VB_HDL) \
 		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) main.cpp -CFLAGS "-O2" -LDFLAGS "-lz" -o ../$@
 
 # Verilator собирается с -Wno-fatal — иначе не проходит вендорный код.
@@ -35,7 +41,7 @@ chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB)
 lint:
 	@python3 ../../scripts/check_multidriver.py
 	@verilator --lint-only -Wno-fatal --top-module chipbox \
-		-GCLK_HZ=8000000 -DM4_SIM -I$(VB_HDL) \
+		-GCLK_HZ=$(CLK) -DM4_SIM -DM4_CLK_HZ=$(CLK).0 -CFLAGS "-DM4_CLK_HZ=$(CLK).0" -I$(VB_HDL) \
 		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) \
 		$(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) 2>&1 \
 		| grep -E "rtl/chipbox|core/target/pocket" \
