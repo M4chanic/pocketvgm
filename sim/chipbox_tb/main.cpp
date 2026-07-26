@@ -1045,6 +1045,10 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     size_t o = 0xA0;
     stub[o++] = 0xF3;
     stub[o++] = 0x31; stub[o++] = (uint8_t)sp; stub[o++] = (uint8_t)(sp >> 8);
+    // APU до INIT: NR52 вкл, NR51 панорама, NR50 громкость — как в фирмвари
+    stub[o++] = 0x3E; stub[o++] = 0x80; stub[o++] = 0xE0; stub[o++] = 0x26;
+    stub[o++] = 0x3E; stub[o++] = 0xFF; stub[o++] = 0xE0; stub[o++] = 0x25;
+    stub[o++] = 0x3E; stub[o++] = 0x77; stub[o++] = 0xE0; stub[o++] = 0x24;
     stub[o++] = 0x3E; stub[o++] = song;
     stub[o++] = 0xCD; stub[o++] = (uint8_t)init; stub[o++] = (uint8_t)(init >> 8);
     uint16_t loop_at = (uint16_t)o;
@@ -1068,6 +1072,23 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     uint32_t gb = tb.wb(0x1C, false);
     fprintf(stderr, "t=%04x w=%04x f=%04x g=%04x\n",
             tw >> 16, tw & 0xFFFF, ff >> 16, gb >> 16);
+    {
+        // Карта затронутых регистров $FF10-$FF3F — по одной строке на
+        // канал, чтобы видеть, чем два рипа отличаются
+        uint64_t m = (uint64_t)tb.wb(0x2A, false) | ((uint64_t)tb.wb(0x2B, false) << 32);
+        static const char* grp[5] = {"CH1 $FF10-14", "CH2 $FF15-19", "CH3 $FF1A-1E",
+                                     "CH4 $FF1F-23", "упр $FF24-26"};
+        static const int lo[5] = {0x10, 0x15, 0x1A, 0x1F, 0x24}, hi[5] = {0x14, 0x19, 0x1E, 0x23, 0x26};
+        for (int g = 0; g < 5; g++) {
+            fprintf(stderr, "  %-14s", grp[g]);
+            for (int a = lo[g]; a <= hi[g]; a++)
+                fprintf(stderr, " %02X:%c", a, (m >> (a - 0x10)) & 1 ? '+' : '.');
+            fprintf(stderr, "\n");
+        }
+        int wave = 0;
+        for (int a = 0x30; a <= 0x3F; a++) wave += (m >> (a - 0x10)) & 1;
+        fprintf(stderr, "  волновая таблица $FF30-3F: %d из 16 записано\n", wave);
+    }
     // гистограмма горячих адресов фетчей (собрана в цикле выше)
     {
         std::vector<std::pair<uint64_t,uint32_t>> hot;

@@ -42,6 +42,10 @@ module gbsbox (
     // в вопрос «а что там вообще лежит» — проверить было нечем.
     input  wire [14:0] rom_dbg_addr,
     output reg  [7:0]  rom_dbg_data = 0,
+    // Карта затронутых звуковых регистров $FF10-$FF3F: бит на регистр.
+    // Нужна, чтобы сравнить рип, который играет, с тем, который молчит,
+    // — счётчик записей у обоих большой, а звук только у одного.
+    output reg [47:0] snd_touched = 0,
     output reg tick_seen_toggle = 0,
     output reg sndwr_toggle = 0
 );
@@ -173,7 +177,10 @@ module gbsbox (
       tick_pending <= 1;
       tick_seen_toggle <= ~tick_seen_toggle;
     end
-    if (cpu_wr && cpu_a >= 16'hFF10 && cpu_a < 16'hFF40) sndwr_toggle <= ~sndwr_toggle;
+    if (cpu_wr && cpu_a >= 16'hFF10 && cpu_a < 16'hFF40) begin
+      sndwr_toggle <= ~sndwr_toggle;
+      snd_touched[cpu_a[5:0] - 6'd16] <= 1'b1;
+    end
 
     // защёлкиваем адрес и BRAM-чтения каждый такт
     a_d <= cpu_a;
@@ -196,6 +203,7 @@ module gbsbox (
     if (a_d == 16'h00A0) booted <= 1;
 
     if (rst) begin
+      snd_touched <= 0;
       rom_bank <= 1;
       tick_pending <= 0;
       booted <= 0;

@@ -963,6 +963,18 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         o += 1;
         stub[o..o + 3].copy_from_slice(&[0x31, sp as u8, (sp >> 8) as u8]);
         o += 3;
+        // Включаем APU до вызова INIT. Драйверы рипов рассчитывают, что
+        // звук уже поднят: на настоящем Game Boy это делает загрузочное
+        // ПЗУ или код игры. Часть драйверов настраивает всё сама и потому
+        // играла, а те, что полагаются на готовое железо (Tetris), молчали
+        // — NR52 и NR50 не писал никто.
+        stub[o..o + 2].copy_from_slice(&[0x3E, 0x80]); // LD A,$80
+        stub[o + 2..o + 4].copy_from_slice(&[0xE0, 0x26]); // LDH ($26),A — звук вкл
+        stub[o + 4..o + 6].copy_from_slice(&[0x3E, 0xFF]); // LD A,$FF
+        stub[o + 6..o + 8].copy_from_slice(&[0xE0, 0x25]); // LDH ($25),A — панорама
+        stub[o + 8..o + 10].copy_from_slice(&[0x3E, 0x77]); // LD A,$77
+        stub[o + 10..o + 12].copy_from_slice(&[0xE0, 0x24]); // LDH ($24),A — громкость
+        o += 12;
         stub[o..o + 2].copy_from_slice(&[0x3E, s]);
         o += 2;
         stub[o..o + 3].copy_from_slice(&[0xCD, init as u8, (init >> 8) as u8]);

@@ -280,6 +280,7 @@ module chipbox #(
 `ifdef M4_HAS_HOME
   reg [14:0] gb_rom_dbg_addr = 0;
   wire [7:0] gb_rom_dbg_data;
+  wire [47:0] gb_snd_touched;
 `endif
   reg [7:0] gb_stub_wr_data = 0;
 
@@ -719,6 +720,8 @@ module chipbox #(
           5'h10: data_read <= gb_phase_inc;
 `ifdef M4_HAS_HOME
           6'h29: data_read <= {24'b0, gb_rom_dbg_data};
+          6'h2A: data_read <= gb_snd_touched[31:0];
+          6'h2B: data_read <= {16'b0, gb_snd_touched[47:32]};
 `endif
           5'h18: data_read <= tick_count;
           5'h19: data_read <= {dmc_cnt, pf_cnt};
@@ -1665,6 +1668,7 @@ module chipbox #(
       .stub_wr_addr(gb_stub_wr_addr),
       .stub_wr_data(gb_stub_wr_data),
 
+      .snd_touched(gb_snd_touched),
       .rom_dbg_addr(gb_rom_dbg_addr),
       .rom_dbg_data(gb_rom_dbg_data),
       .play_tick_toggle(play_toggle),
