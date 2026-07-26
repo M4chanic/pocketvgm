@@ -17,6 +17,10 @@ Three Load menu entries, grouped by platform:
 | Nintendo | `.vgm` `.vgz` `.nsf` `.gbs` | register logs, NES/Famicom music, Game Boy music |
 | Computer | `.m3u` `.mid` `.sid` | playlists, General MIDI (OPL synthesis), Commodore 64 music |
 
+The Arcade core has a single entry, **Load Arcade**, taking `.vgm` `.vgz`
+`.m3u` — the arcade chips are only ever logged in those formats, so there
+is nothing to group.
+
 A playlist opened from any menu can list tracks of any supported format —
 the player reads the `.m3u` and then opens each track by path.
 

@@ -15,7 +15,7 @@
         "address": "0x00000000"
       },
       {
-        "name": "Sega",
+        "name": "Arcade",
         "id": 1,
         "required": false,
         "parameters": "0x249",
@@ -23,36 +23,6 @@
         "extensions": [
           "vgm",
           "vgz",
-          "gym",
-          "m3u"
-        ],
-        "size_maximum": "0x2000000",
-        "address": "0x00000000"
-      },
-      {
-        "name": "Nintendo",
-        "id": 2,
-        "required": false,
-        "parameters": "0x249",
-        "deferload": true,
-        "extensions": [
-          "vgm",
-          "vgz",
-          "nsf",
-          "gbs"
-        ],
-        "size_maximum": "0x2000000",
-        "address": "0x00000000"
-      },
-      {
-        "name": "Computer",
-        "id": 3,
-        "required": false,
-        "parameters": "0x249",
-        "deferload": true,
-        "extensions": [
-          "mid",
-          "sid",
           "m3u"
         ],
         "size_maximum": "0x2000000",
