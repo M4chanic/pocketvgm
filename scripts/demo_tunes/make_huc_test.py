@@ -39,6 +39,37 @@ def make_noise(nfreq=0x10, seconds=4):
     return out[:4] + struct.pack("<I", len(out) - 4) + out[8:]
 
 
+def make_dda(rate_div=4, seconds=4):
+    """Режим прямого вывода: поток отсчётов с известной частотой.
+
+    Ударные на этом чипе играются именно так, и именно на них слышен шум.
+    Ни один прежний изолированный тест DDA не затрагивал.
+
+    Пишем синус из 32 точек, между записями пауза rate_div отсчётов при
+    44100 Гц: частота тона = 44100 / (rate_div * 32).
+    """
+    import math as _m
+    body = bytearray()
+    body += huc(0, 0)                 # канал 0
+    body += huc(1, 0xFF)              # общая громкость
+    body += huc(5, 0xFF)              # баланс
+    body += huc(4, 0xDF)              # включён + DDA (бит 6), громкость 31
+    n = int(44100 / rate_div * seconds)
+    wait = bytes([0x70 | (rate_div - 1)])   # 0x7n = пауза n+1 отсчётов
+    for i in range(n):
+        v = int(round(15.5 + 15.0 * _m.sin(2 * _m.pi * (i % 32) / 32))) & 0x1F
+        body += huc(6, v) + wait
+    body += b"\x66"
+    hdr = bytearray(0x100)
+    hdr[0x00:0x04] = b"Vgm "
+    hdr[0x08:0x0C] = struct.pack("<I", 0x161)
+    hdr[0x34:0x38] = struct.pack("<I", 0x100 - 0x34)
+    hdr[0xA4:0xA8] = struct.pack("<I", CLK)
+    hdr[0x18:0x1C] = struct.pack("<I", 44100 * seconds)
+    out = bytes(hdr) + bytes(body)
+    return out[:4] + struct.pack("<I", len(out) - 4) + out[8:]
+
+
 def make_bare(period=0x0FE, seconds=4):
     """Канал включён, таблица волны НЕ записана.
 
@@ -92,7 +123,11 @@ def make(period=0x0FE, seconds=4):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--bare":
+    if len(sys.argv) > 1 and sys.argv[1] == "--dda":
+        path = sys.argv[2] if len(sys.argv) > 2 else "huc_dda.vgm"
+        open(path, "wb").write(make_dda())
+        print(f"{path}: прямой вывод, ожидаемый тон {44100 / (4 * 32):.1f} Гц")
+    elif len(sys.argv) > 1 and sys.argv[1] == "--bare":
         path = sys.argv[2] if len(sys.argv) > 2 else "huc_bare.vgm"
         open(path, "wb").write(make_bare())
         print(f"{path}: канал включён без записи волновой таблицы")
