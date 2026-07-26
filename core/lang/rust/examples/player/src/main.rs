@@ -1659,6 +1659,9 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         && header.clocks.ym3812 == 0
         && header.clocks.ym3526 == 0
         && header.clocks.ymf262 == 0
+        && header.clocks.huc6280 == 0
+        && header.clocks.ym2203 == 0
+        && header.clocks.ym2608 == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
