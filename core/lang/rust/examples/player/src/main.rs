@@ -1839,19 +1839,22 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         chipbox_write(0x14, (((opl_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
     }
     // OPN (YM2203/YM2608): своего RTL нет, но FM-часть регистрово
-    // совместима с нашим YM2612, а SSG — это jt49. Делители по умолчанию
-    // у обоих чипов FM 1/6 и SSG 1/4 — те же, что закладывает jt12,
-    // поэтому мастер-клок уходит в FM как есть, а в SSG вчетверо меньше
-    // (7.987 МГц OPNA -> ~2 МГц, типовая частота AY). ADPCM и ритм-часть
-    // мы не умеем: они молчат.
-    let opn_clk = if header.clocks.ym2608 != 0 {
-        header.clocks.ym2608 & 0x3FFF_FFFF
+    // совместима с нашим YM2612, а SSG — это jt49. Делители сняты с
+    // эталона (libvgm, fmopn.c): частота FM равна clock/(72*pre), SSG
+    // получает clock*2/(4*pre), где pre = 1 у YM2203 и 2 у YM2608. Наш
+    // jt12 считает по-YM2612 и делит на 144, поэтому в него уходит
+    // clock*2/pre. Раньше в FM шёл мастер-клок, а в SSG его четверть для
+    // обоих чипов — у YM2203 это давало октаву вниз на всём чипе.
+    // ADPCM и ритм-часть мы не умеем: они молчат.
+    let (opn_clk, opn_pre) = if header.clocks.ym2608 != 0 {
+        (header.clocks.ym2608 & 0x3FFF_FFFF, 2u64)
     } else {
-        header.clocks.ym2203 & 0x3FFF_FFFF
+        (header.clocks.ym2203 & 0x3FFF_FFFF, 1u64)
     };
     if opn_clk != 0 {
-        chipbox_write(0x16, (((opn_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
-        chipbox_write(4, (((opn_clk as u64 / 4) << 32) / CHIPBOX_CLK_HZ) as u32);
+        let fm = opn_clk as u64 * 2 / opn_pre;
+        chipbox_write(0x16, ((fm << 32) / CHIPBOX_CLK_HZ) as u32);
+        chipbox_write(4, (((opn_clk as u64 / (2 * opn_pre)) << 32) / CHIPBOX_CLK_HZ) as u32);
     }
     let okim_clk = header.clocks.okim6295 & 0x7FFF_FFFF; // бит31 = флаг чипа
     if okim_clk != 0 {

@@ -1527,9 +1527,14 @@ int main(int argc, char** argv) {
         tb.wb(0x28, true, 128);
     }
     if (opn_clk) {
-        // мастер-клок в FM как есть, вчетверо меньший — в SSG
-        tb.wb(0x16, true, (uint32_t)((double)opn_clk / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(4, true, (uint32_t)((double)(opn_clk / 4) / CLK_HZ * 4294967296.0 + 0.5));
+        // Делители сняты с эталона (libvgm, fmopn.c): FM идёт с частотой
+        // clock/(72*pre), SSG получает clock*2/(4*pre), где pre = 1 у
+        // YM2203 и 2 у YM2608. Наш jt12 делит по-YM2612, на 144, поэтому
+        // в него уходит clock*2/pre. Раньше в FM шёл мастер-клок, а в SSG
+        // его четверть всегда — у YM2203 обе части играли октавой ниже.
+        uint32_t pre = ym2608_clk ? 2 : 1;
+        tb.wb(0x16, true, (uint32_t)((double)opn_clk * 2 / pre / CLK_HZ * 4294967296.0 + 0.5));
+        tb.wb(4, true, (uint32_t)((double)opn_clk / (2 * pre) / CLK_HZ * 4294967296.0 + 0.5));
     }
     if (adpcm_clk) {
         double inc = (double)adpcm_clk / CLK_HZ * 4294967296.0;
