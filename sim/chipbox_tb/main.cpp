@@ -1542,7 +1542,7 @@ int main(int argc, char** argv) {
         tb.wb(0x16, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));
     }
     if (sn_clk) tb.wb(0x17, true, (uint32_t)((double)sn_clk / CLK_HZ * 4294967296.0 + 0.5));
-    tb.wb(0x15, true, (sn_clk ? 32u : 0u) << 8 | ((fm_clk || opn_clk) ? 64u : 0u));
+    tb.wb(0x15, true, (sn_clk ? 51u : 0u) << 8 | ((fm_clk || opn_clk) ? 102u : 0u));
     tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
     // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
     if (scc_clk) tb.wb(0, true, 0xF0000000u | (7u << 16));
