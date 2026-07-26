@@ -448,12 +448,15 @@ module chipbox #(
       fsm_wr_word <= NES_BASE_WORD + {8'b0, fsm_wr_addr[14:1]};
       fsm_wr_lane <= fsm_wr_addr[0];
       fsm_wr_byte_l <= fsm_wr_data;
-    end else if (sid_wr_req && !fsm_wr_pending) begin
+    end
+`ifdef M4_HAS_HOME
+    else if (sid_wr_req && !fsm_wr_pending) begin
       fsm_wr_pending <= 1;
       fsm_wr_word <= NSF_BASE_WORD + {7'b0, sid_wr_addr[15:1]};
       fsm_wr_lane <= sid_wr_addr[0];
       fsm_wr_byte_l <= sid_wr_data;
     end
+`endif
 
     // отладочное чтение PSRAM: тоггл-запрос от WB-блока
     dbg_req_t_d <= dbg_req_t;
@@ -1347,10 +1350,12 @@ module chipbox #(
   reg cpu_step_d = 0;
   reg apu_cs_cpu = 0;
   reg cpu_we_hold = 0;
+`ifdef M4_HAS_HOME
   reg sid_wr_hold = 0;
   reg sid_wr_req = 0;
   reg [15:0] sid_wr_addr = 0;
   reg [7:0] sid_wr_data = 0;
+`endif
   reg sid_read_pend = 0;
   reg sid_cs = 0;
   reg sid_we = 0;
@@ -1388,8 +1393,10 @@ module chipbox #(
       nsf_req <= 0;
       ay_cs_cpu_n <= 1;
       ay_wr_cpu_n <= 1;
+`ifdef M4_HAS_HOME
       sid_wr_hold <= 0;
       sid_wr_req <= 0;
+`endif
       sid_read_pend <= 0;
       sid_cs <= 0;
       nsf_banks[0] <= 8'd0;
@@ -1426,6 +1433,7 @@ module chipbox #(
         cpu_do_l <= cpu_do;
       end
 
+`ifdef M4_HAS_HOME
       // отложенная запись RAM (sid): ждём свободный канал
       if (sid_wr_hold && !fsm_wr_pending && !fsm_wr_req && !sid_wr_req) begin
         sid_wr_req <= 1;
@@ -1433,6 +1441,7 @@ module chipbox #(
         cpu_di_ready <= 1;
       end
       if (sid_wr_req) sid_wr_req <= 0;
+`endif
 
       if (sid_read_pend && !cpu_di_ready) begin
         cpu_di <= sid_dout;
@@ -1441,6 +1450,7 @@ module chipbox #(
       end
       sid_cs <= 0;
 
+`ifdef M4_HAS_HOME
       if (cpu_step_d && sid_mode) begin
         // Карта памяти PSID: SID @$D400-$D7EF, тик @$D7F0, всё
         // остальное — RAM в PSRAM (включая векторы)
@@ -1486,7 +1496,9 @@ module chipbox #(
             nsf_req <= 1;  // остальная память — из PSRAM
           end
         end
-      end else if (cpu_step_d) begin
+      end else
+`endif
+      if (cpu_step_d) begin
         // декодируем адрес цикла, завершившегося прошлым step-фронтом
         cpu_di_ready <= 0;
 

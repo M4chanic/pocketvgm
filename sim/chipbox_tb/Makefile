@@ -40,6 +40,15 @@ lint:
 		$(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) 2>&1 \
 		| grep -E "rtl/chipbox|core/target/pocket" \
 		| grep -E "MULTIDRIVEN|BLKANDNBLK|IMPLICIT|LATCH|SELRANGE" > /tmp/m4lint.txt || true
+	@# Аркадный вариант собирается без домашних чипов: ссылка на
+	@# загейченный регистр видна только здесь. Дважды такое доезжало
+	@# до Quartus и роняло сборку через сорок минут.
+	@verilator --lint-only -Wno-fatal --top-module chipbox -DM4_ARCADE \
+		-GCLK_HZ=57120000 -I$(VB_HDL) ../../rtl/chipbox/*.sv $(CHIPBOX) 2>&1 \
+		| grep "Can.t find definition of variable" > /tmp/m4arc.txt || true
+	@if [ -s /tmp/m4arc.txt ]; then \
+		echo "линт: в аркадном варианте остались негейченые ссылки:"; \
+		cat /tmp/m4arc.txt; exit 1; fi
 	@if [ -s /tmp/m4lint.txt ]; then \
 		echo "линт: предупреждения в собственных файлах:"; cat /tmp/m4lint.txt; exit 1; \
 	else echo "линт: собственные файлы чисты"; fi
