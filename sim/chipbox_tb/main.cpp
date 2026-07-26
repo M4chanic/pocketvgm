@@ -962,6 +962,42 @@ static int reset_selftest(const char* out) {
 
 // Селфтест перемотки (контрол бит 6): 8 с WAIT'ов при ff должны
 // съесться за ~1 с; без ff секвенсор остался бы занят
+// Отпускание перемотки: держим FF при НЕПУСТОМ FIFO (только так копится
+// отставание цели), отпускаем и проверяем, что следующая пауза длится
+// столько, сколько записано. Старый тест ff проверял лишь ускорение и
+// эту ошибку не видел: музыка неслась ещё секунду-две после снятия бита.
+static int ff_release_selftest() {
+    Tb tb;
+    tb.wb(0x17, true, (uint32_t)(3579545.0 / CLK_HZ * 4294967296.0));
+    tb.wb(6, true, 0); tb.wb(0xC, true, 0); tb.wb(0x15, true, 32u << 8);
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 4096; i++) tb.step();
+
+    const uint32_t W = 147;              // 1/300 c на паузу
+    // Перемотка при НЕПУСТОМ FIFO: только так копится отставание цели.
+    // Стоит FIFO опустеть — срабатывает штатный ресинк и стирает его.
+    tb.wb(2, true, 0x40);
+    uint64_t until = tb.cycle + (uint64_t)(1.0 * CLK_HZ);
+    while (tb.cycle < until) {
+        if ((tb.wb(1, false) & 0x1FFF) < 400)
+            for (int i = 0; i < 200; i++) tb.wb(0, true, 0x80000000u | W);
+        tb.step();
+    }
+    uint32_t left = tb.wb(1, false) & 0x1FFF;   // очередь на момент отпускания
+    tb.wb(2, true, 0);
+
+    double nominal = (double)left * W / 44100.0;
+    uint64_t t0 = tb.cycle, cap = t0 + (uint64_t)((nominal * 3 + 1.0) * CLK_HZ);
+    while (tb.seq_busy() && tb.cycle < cap) tb.step();
+    double took = (double)(tb.cycle - t0) / CLK_HZ;
+
+    // без ограничения отставания очередь слетает почти мгновенно
+    bool ok = took > nominal * 0.7;
+    fprintf(stderr, "селфтест ff-release: в очереди %u пауз (%.2f c), слились за %.2f c → %s\n",
+            left, nominal, took, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 static int ff_selftest() {
     Tb tb;
     tb.wb(0x17, true, (uint32_t)(3579545.0 / CLK_HZ * 4294967296.0));
@@ -1248,6 +1284,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--cmds") && i + 1 < argc) { return play_cmds(argv[i+1], out); }
         else if (!strcmp(argv[i], "--pause-selftest")) { return pause_selftest(out); }
         else if (!strcmp(argv[i], "--reset-selftest")) { return reset_selftest(out); }
+        else if (!strcmp(argv[i], "--ff-release-selftest")) { return ff_release_selftest(); }
         else if (!strcmp(argv[i], "--ff-selftest")) { return ff_selftest(); }
         else if (!strcmp(argv[i], "--vrc6-selftest")) { return vrc6_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--huc-selftest")) { return huc_selftest(out, max_seconds > 0 ? max_seconds : 1.0); }
