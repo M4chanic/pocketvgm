@@ -19,6 +19,26 @@ def huc(reg, val):
     return bytes([0xB9, reg & 0x0F, val & 0xFF])
 
 
+def make_noise(nfreq=0x10, seconds=4):
+    """Только шумовой канал 4 — для проверки шумовой части отдельно."""
+    body = bytearray()
+    body += huc(0, 4)            # канал 4 (первый с шумом)
+    body += huc(1, 0xFF)         # общая громкость
+    body += huc(5, 0xFF)         # баланс
+    body += huc(7, 0x80 | (nfreq & 0x1F))  # шум включён, частота
+    body += huc(4, 0x9F)         # канал включён, громкость 31
+    body += WAIT_60 * (60 * seconds)
+    body += b"\x66"
+    hdr = bytearray(0x100)
+    hdr[0x00:0x04] = b"Vgm "
+    hdr[0x08:0x0C] = struct.pack("<I", 0x161)
+    hdr[0x34:0x38] = struct.pack("<I", 0x100 - 0x34)
+    hdr[0xA4:0xA8] = struct.pack("<I", CLK)
+    hdr[0x18:0x1C] = struct.pack("<I", 60 * 60 * seconds)
+    out = bytes(hdr) + bytes(body)
+    return out[:4] + struct.pack("<I", len(out) - 4) + out[8:]
+
+
 def make(period=0x0FE, seconds=4):
     body = bytearray()
     body += huc(0, 0)        # канал 0
@@ -46,8 +66,14 @@ def make(period=0x0FE, seconds=4):
 
 
 if __name__ == "__main__":
-    period = int(sys.argv[1], 0) if len(sys.argv) > 1 else 0x0FE
-    path = sys.argv[2] if len(sys.argv) > 2 else "huc_test.vgm"
-    open(path, "wb").write(make(period))
-    print(f"{path}: период {period} (={period}), ожидаемая частота "
-          f"{CLK / (32 * (period + 1)):.1f} Гц")
+    if len(sys.argv) > 1 and sys.argv[1] == "--noise":
+        nf = int(sys.argv[2], 0) if len(sys.argv) > 2 else 0x10
+        path = sys.argv[3] if len(sys.argv) > 3 else "huc_noise.vgm"
+        open(path, "wb").write(make_noise(nf))
+        print(f"{path}: шум, регистр частоты {nf:#04x}")
+    else:
+        period = int(sys.argv[1], 0) if len(sys.argv) > 1 else 0x0FE
+        path = sys.argv[2] if len(sys.argv) > 2 else "huc_test.vgm"
+        open(path, "wb").write(make(period))
+        print(f"{path}: период {period}, ожидаемая частота "
+              f"{CLK / (32 * (period + 1)):.1f} Гц")

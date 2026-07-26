@@ -124,7 +124,7 @@ module huc6280_psg (
       end
       for (i = 4; i < 6; i = i + 1) begin
         if (noise_cnt[i] == 12'd0) begin
-          noise_cnt[i] <= {~noise_fq[i], 6'd0} + 12'd1;
+          noise_cnt[i] <= {~noise_fq[i], 7'd0} + 12'd1;
           lfsr[i] <= {lfsr[i][0] ^ lfsr[i][1] ^ lfsr[i][11] ^ lfsr[i][12]
                       ^ lfsr[i][17], lfsr[i][17:1]};
         end else begin

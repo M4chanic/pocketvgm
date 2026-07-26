@@ -20,7 +20,7 @@ OKIM     := $(wildcard ../../rtl/vendor/jt6295/*.v)
 K060     := $(wildcard ../../rtl/vendor/jt053260/*.v)
 CHIPBOX  := ../../core/target/pocket/chipbox.sv
 
-chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB)
+chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB) $(HUC) $(SCC) $(SID) $(OPL)
 	verilator --cc --exe --build -O3 -Wno-fatal --top-module chipbox \
 		-GCLK_HZ=8000000 -DM4_SIM -I$(VB_HDL) \
 		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) main.cpp -CFLAGS "-O2" -LDFLAGS "-lz" -o ../$@
