@@ -78,7 +78,14 @@ def render_ours(track, out, seconds):
     ext = track.suffix.lower()
     # ключи -t и -o обязаны идти ДО --gbsfile: дальше разбор не доходит
     cmd = [str(TB), "-t", str(seconds), "-o", str(out)]
-    cmd += ["--gbsfile", str(track)] if ext == ".gbs" else [str(track)]
+    if ext == ".gbs":
+        cmd += ["--gbsfile", str(track)]
+    elif ext == ".nsf":
+        cmd += ["--nsffile", str(track)]   # стенду нужен свой ключ, не VGM
+    elif ext == ".sid":
+        cmd += ["--sidfile", str(track)]
+    else:
+        cmd += [str(track)]
     try:
         subprocess.run(cmd, capture_output=True, timeout=TRACK_TIMEOUT)
     except subprocess.TimeoutExpired:
