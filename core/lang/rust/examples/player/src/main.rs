@@ -2074,12 +2074,23 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             Ok(Event::End) => {
                 loops += 1;
                 if loops >= 2 || header.loop_offset.is_none() {
-                    // дать хвосту FIFO дозвучать
+                    // Дать хвосту FIFO дозвучать. Время здесь обязано
+                    // идти: короткий трек уходит в FIFO целиком за
+                    // миллисекунды, и почти всё звучание проходит внутри
+                    // этого цикла — раньше счётчик и полоса в нём стояли,
+                    // хотя музыка играла.
                     while chipbox_status() & 0x1FFF != 0 {
                         match transport(&mut sink.btn, 0, pl) {
                             Some(Ctl::Redraw) => draw(),
                             Some(ctl) => return ctl,
                             None => {}
+                        }
+                        vu_tick(&mut vu_last);
+                        let el = elapsed_s();
+                        if el != shown_s {
+                            shown_s = el;
+                            let mut fbuf = [0u8; 16];
+                            ui::progress(el.min(total_s), total_s, diag_ff(&mut fbuf));
                         }
                         core::hint::spin_loop();
                     }
