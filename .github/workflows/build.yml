@@ -213,10 +213,18 @@ jobs:
           mkdir -p dist
           cp -r core/pkg/pocket/* dist/
           cp pocketvgm*.rev dist/Cores/M4chanic.PocketVGM/
+          # аркады — отдельное ядро, и свой битстрим ему нужен у себя:
+          # без него Pocket отвечает Load error in "core"
+          cp pocketvgm_a.rev dist/Cores/M4chanic.PocketVGMArcade/arcade.rev
           cp boot.bin dist/Assets/pocketvgm/common/
           cp -r Demo dist/Assets/pocketvgm/common/Demo
-                    install -m 755 scripts/pocketvgm_update.py dist/pocketvgm
-          cd dist && zip -r ../m4pocket-core.zip . -x '*.gitkeep'
+          install -m 755 scripts/pocketvgm_update.py dist/pocketvgm
+
+      - name: Проверка пакета по спецификации openFPGA
+        run: python3 scripts/check_package.py dist
+
+      - name: Архив
+        run: cd dist && zip -r ../m4pocket-core.zip . -x '*.gitkeep'
 
       - uses: actions/upload-artifact@v4
         with:

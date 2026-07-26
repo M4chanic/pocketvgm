@@ -6,7 +6,7 @@
         "pocketvgm"
       ],
       "shortname": "PocketVGM",
-      "description": "Chiptune jukebox: two bitstream variants — Console (Mega Drive, NES, MSX/SCC, C64, Game Boy, PC AdLib) and Arcade + X68000 (YM2151, SegaPCM, MSM6258, OKIM6295, K053260)",
+      "description": "Chiptune jukebox for consoles and home computers",
       "author": "M4chanic",
       "url": "https://github.com/M4chanic/pocketvgm",
       "version": "0.2.0",

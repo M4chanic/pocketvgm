@@ -125,10 +125,12 @@ just picked through Load — then it plays straight away.
 - `sim/` — Verilator harnesses: `vgmplay` (VGM→WAV on a PC), `chipbox_tb`
   (self-tests of the whole path, including real NSF/GBS/SID files)
 - `scripts/` — updater, artwork generation, demo tune generators,
-  VGM→GYM converter, and the sound comparison tools: `ab_compare.py` and
-  `ab_suite.py` measure our rendering against a reference emulator by
-  level, band balance and envelope, `tone_check.py` calibrates pitch on a
-  single synthetic note, `corpus.py` fetches the test material
+  VGM→GYM converter; `check_package.py` validates a built package against
+  the openFPGA spec and `make_release.py` assembles one from CI artifacts;
+  the sound comparison tools are `ab_compare.py` and `ab_suite.py`, which
+  measure our rendering against a reference emulator by level, band
+  balance and envelope, `tone_check.py`, which calibrates pitch on a
+  single synthetic note, and `corpus.py`, which fetches test material
 - `.github/workflows/` — CI: simulation + self-tests on every push, Quartus
   21.1 bitstream in Docker (seed matrix with best-slack pick on
   workflow_dispatch)
@@ -147,6 +149,12 @@ cd sim/chipbox_tb && make && ./chipbox_tb      # path self-tests
 Bitstream — Quartus 21.1 (Docker image `raetro/quartus:21.1`); firmware —
 Rust nightly for `riscv32imac` (soft float: the FPU was removed to free
 logic). The easiest reference is [`.github/workflows/build.yml`](.github/workflows/build.yml).
+
+Released packages are assembled from CI artifacts by
+`scripts/make_release.py`, not from a local build. A local firmware build
+does not reproduce the released `boot.bin` byte for byte — the toolchain
+nightly differs and the code lays out differently — so mixing the two is
+how a release ends up carrying a firmware nobody chose.
 
 ## Code sources and acknowledgements
 
