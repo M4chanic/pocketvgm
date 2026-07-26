@@ -34,6 +34,10 @@ ROOT = Path(__file__).resolve().parent.parent
 TB = ROOT / "sim" / "chipbox_tb" / "chipbox_tb"
 SCRATCH = Path(tempfile.gettempdir()) / "m4_absuite"
 
+# Потолок счёта на трек. Был полчаса — и один тяжёлый файл вешал всю
+# таблицу, ради ничего. Лучше пометить трек и идти дальше.
+TRACK_TIMEOUT = 240
+
 # Чем рендерить эталон. Для NSF и SID подходящего рендерера пока нет —
 # такие чипы прогоняются только на «не молчит», без сравнения.
 VGM2WAV = None
@@ -76,7 +80,7 @@ def render_ours(track, out, seconds):
     cmd = [str(TB), "-t", str(seconds), "-o", str(out)]
     cmd += ["--gbsfile", str(track)] if ext == ".gbs" else [str(track)]
     try:
-        subprocess.run(cmd, capture_output=True, timeout=1800)
+        subprocess.run(cmd, capture_output=True, timeout=TRACK_TIMEOUT)
     except subprocess.TimeoutExpired:
         return False
     return out.exists()
@@ -106,8 +110,11 @@ def main():
     ap.add_argument("chip", nargs="?", help="только этот чип")
     ap.add_argument("-n", type=int, default=2, help="треков на чип")
     ap.add_argument("-t", type=float, default=3.0, help="секунд на трек")
+    ap.add_argument("--timeout", type=int, default=240, help="потолок счёта на трек")
     a = ap.parse_args()
 
+    global TRACK_TIMEOUT
+    TRACK_TIMEOUT = a.timeout
     find_tools()
     if not TB.exists():
         sys.exit(f"нет стенда: {TB} — соберите sim/chipbox_tb")
@@ -130,13 +137,16 @@ def main():
                 f.unlink(missing_ok=True)
             has_ref = render_ref(t, ref, a.t)
             if not render_ours(t, our, a.t):
-                print(f"{chip:10} {t.name[:30]:30} наше ядро не отработало")
+                hint = ""
+                if t.suffix.lower() == ".gbs":
+                    hint = " — стенд собран на быстрой тактовой, для GBS нужен make CLK=57120000"
+                print(f"{chip:10} {t.name[:30]:30} не уложилось в потолок{hint}", flush=True)
                 continue
             ours, orate = ab.read_wav(str(our), a.t)
             o_rms = ab.rms(ours)
             if not has_ref:
                 print(f"{chip:10} {t.name[:30]:30} {'—':>8} {'—':>16} {'—':>6}  "
-                      f"{'нет эталона' if o_rms else 'ТИШИНА'}")
+                      f"{'нет эталона' if o_rms else 'ТИШИНА'}", flush=True)
                 continue
             refs, rrate = ab.read_wav(str(ref), a.t)
             r_rms = ab.rms(refs)
@@ -153,7 +163,7 @@ def main():
                     worst, wband, wshare = d, f"{lo}-{hi}", max(rp, op)
             corr = ab.correlation(ab.envelope(refs, rrate), ab.envelope(ours, orate))
             print(f"{chip:10} {t.name[:30]:30} {lvl:+7.1f}д {wband:>9} {worst:+5.1f}д "
-                  f"{corr:+6.2f}  {verdict(lvl, worst, corr, wshare)}")
+                  f"{corr:+6.2f}  {verdict(lvl, worst, corr, wshare)}", flush=True)
     return 0
 
 
