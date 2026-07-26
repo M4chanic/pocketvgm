@@ -723,9 +723,14 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
 
     // Клок NES и play-тик
     chipbox_write(0xB, ((1_789_773u64 << 32) / CHIPBOX_CLK_HZ) as u32);
-    let period = if period_us == 0 { 16666.0 } else { period_us as f64 };
-    let play_hz = 1_000_000.0 / period;
-    chipbox_write(0xF, (play_hz / CHIPBOX_CLK_HZ as f64 * 4294967296.0) as u32);
+    // Инкремент фазы play-тика — целочисленно, как у всех клоков чипов:
+    // inc = (1e6/period)/CLK * 2^32 = (1e6 << 32) / (period * CLK).
+    // В f64 это считалось программно (FPU выброшен в 0.2.2) и давало
+    // неверную частоту: тик приходил единицами герц вместо шестидесяти,
+    // отсюда молчащие NSF, редкие звуки в GBS и тишина в SID.
+    let period = if period_us == 0 { 16_666u64 } else { period_us as u64 };
+    chipbox_write(0xF, ((1_000_000u64 << 32) / (period * CHIPBOX_CLK_HZ)) as u32);
+    let play_hz = 1_000_000u64 / period;
 
     // APU в миксе; при 5B — ещё и AY на клоке NES
     if has_5b {
@@ -735,7 +740,7 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     chipbox_write(0xC, 64);
     chipbox_write(0x15, 0);
 
-    println!("NSF: {num_songs} песен, rate {play_hz:.1} Гц; D-pad влево/вправо — переключение");
+    println!("NSF: {num_songs} песен, rate {play_hz} Гц; D-pad влево/вправо — переключение");
     let artist = core::str::from_utf8(&data[0x2E..0x4E]).unwrap_or("");
     // VRC6 включается битом 7 контрол-регистра (декод $9xxx-$Bxxx в chipbox)
     let mode: u32 = 6 | if has_vrc6 { 0x80 } else { 0 };
@@ -867,25 +872,27 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     }
 
     // Темп: таймер из заголовка или VBlank 59.73 Гц
-    let play_hz = if tac & 0x04 != 0 {
-        let base = match tac & 3 {
-            0 => 4096.0,
-            1 => 262144.0,
-            2 => 65536.0,
-            _ => 16384.0,
+    // Целочисленно (см. NSF): дробь num/den, а не f64
+    let (num, den): (u64, u64) = if tac & 0x04 != 0 {
+        let base: u64 = match tac & 3 {
+            0 => 4096,
+            1 => 262_144,
+            2 => 65_536,
+            _ => 16_384,
         };
-        base / (256 - tma as u32) as f64
+        (base, 256 - tma as u64)
     } else {
-        59.73
+        (4_194_304, 70_224) // точный vblank Game Boy — 59.727 Гц
     };
-    chipbox_write(0xF, (play_hz / CHIPBOX_CLK_HZ as f64 * 4294967296.0) as u32);
+    chipbox_write(0xF, ((num << 32) / (den * CHIPBOX_CLK_HZ)) as u32);
+    let play_hz = num / den;
 
     // Только GB в миксе
     chipbox_write(6, 0);
     chipbox_write(0xC, 64 << 8);
 
     let num_songs = data[0x04].max(1);
-    println!("GBS: {num_songs} песен, rate {play_hz:.2} Гц; D-pad влево/вправо — переключение");
+    println!("GBS: {num_songs} песен, rate {play_hz} Гц; D-pad влево/вправо — переключение");
     let author = core::str::from_utf8(&data[0x30..0x50]).unwrap_or("");
     let draw = |s: u8| {
         ui::screen(
@@ -1053,7 +1060,8 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     chipbox_write(6, 0);
     chipbox_write(0xC, 32 << 16);
 
-    let vblank_hz = if ntsc { 59.83 } else { 50.12 };
+    // vblank как дробь: NTSC 59.83 Гц, PAL 50.12 Гц
+    let (vb_num, vb_den): (u64, u64) = if ntsc { (5983, 100) } else { (5012, 100) };
     let body_vec: alloc::vec::Vec<u8> = body.into();
     let load_c = load;
     let author: String = core::str::from_utf8(&data[0x36..0x56])
@@ -1122,8 +1130,8 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
 
         // темп песни: бит в speed-маске: 1 = CIA ~60 Гц, 0 = VBlank
         let bit = speed >> core::cmp::min(s as u32, 31) & 1;
-        let hz = if bit != 0 { 60.0 } else { vblank_hz };
-        chipbox_write(0xF, (hz / CHIPBOX_CLK_HZ as f64 * 4294967296.0) as u32);
+        let (num, den) = if bit != 0 { (60u64, 1u64) } else { (vb_num, vb_den) };
+        chipbox_write(0xF, ((num << 32) / (den * CHIPBOX_CLK_HZ)) as u32);
 
         ctrl_reset(); // сброс чипов
         // гейны заново: стоп (hold) их глушит
@@ -1131,7 +1139,7 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         chipbox_write(0xC, 32 << 16);
         chipbox_write(0x15, 0);
         ctrl_mode(0x14); // sid_mode | cpu_run
-        println!("SID: песня {} ({hz:.1} Гц)", s + 1);
+        println!("SID: песня {} ({num}/{den} Гц)", s + 1);
     }, draw)
 }
 
