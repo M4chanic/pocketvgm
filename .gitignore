@@ -10,3 +10,4 @@ sim/sid_tb/sid_tb
 Test/
 CLAUDE.md
 screenshots/
+__pycache__/
