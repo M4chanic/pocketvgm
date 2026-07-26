@@ -125,7 +125,10 @@ just picked through Load — then it plays straight away.
 - `sim/` — Verilator harnesses: `vgmplay` (VGM→WAV on a PC), `chipbox_tb`
   (self-tests of the whole path, including real NSF/GBS/SID files)
 - `scripts/` — updater, artwork generation, demo tune generators,
-  VGM→GYM converter
+  VGM→GYM converter, and the sound comparison tools: `ab_compare.py` and
+  `ab_suite.py` measure our rendering against a reference emulator by
+  level, band balance and envelope, `tone_check.py` calibrates pitch on a
+  single synthetic note, `corpus.py` fetches the test material
 - `.github/workflows/` — CI: simulation + self-tests on every push, Quartus
   21.1 bitstream in Docker (seed matrix with best-slack pick on
   workflow_dispatch)
