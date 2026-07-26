@@ -23,11 +23,45 @@ the player reads the `.m3u` and then opens each track by path.
 VGM/VGZ appear in both console menus — packs for any platform may come in
 these formats. Multi-song files (NSF/GBS/SID) switch subsongs with the D-pad.
 
+## Supported systems
+
+What the core plays, by machine. Everything in the first group works in the
+default Console bitstream; the second needs the Arcade one.
+
+| System | Formats | Chips used |
+|---|---|---|
+| Sega Mega Drive / Genesis | `.vgm` `.vgz` `.gym` | YM2612 + SN76489 |
+| Sega Master System, Game Gear | `.vgm` `.vgz` | SN76489 |
+| NES / Famicom | `.nsf` `.vgm` | NES APU + DMC, VRC6, Sunsoft 5B |
+| Game Boy | `.gbs` | SM83 + Game Boy APU |
+| Commodore 64 | `.sid` | SID 6581/8580 + 6502 |
+| PC Engine / TurboGrafx-16 | `.vgm` `.vgz` | HuC6280 |
+| MSX | `.vgm` `.vgz` | AY-3-8910, Konami SCC |
+| NEC PC-88, PC-98 | `.vgm` `.vgz` | YM2203, YM2608 (melodic part) |
+| ZX Spectrum | `.vgm` `.vgz` | AY-3-8910 |
+| PC, General MIDI | `.mid` | YMF262 with Freedoom GENMIDI patches |
+
+| Needs the Arcade bitstream | Formats | Chips used |
+|---|---|---|
+| Sharp X68000 | `.vgm` `.vgz` | YM2151, MSM6258 |
+| Sega arcade (OutRun and similar) | `.vgm` `.vgz` | YM2151, SegaPCM |
+| Konami arcade | `.vgm` `.vgz` | K053260 (2 of 4 channels) |
+| Arcade boards using OKIM6295 | `.vgm` `.vgz` | OKIM6295 |
+
+Note on the Arcade bitstream: it is built and shipped, but there is
+currently no way to select it on the device. Until that is solved the
+arcade systems above cannot be played.
+
+Two parts of the YM2608 are not modelled: the rhythm section, whose samples
+live in a ROM inside the original chip, and ADPCM-B. Melodic FM and SSG
+play in full.
+
 ## Simulated chips
 
 | Chip | Found in | RTL |
 |---|---|---|
 | YM2612 (OPN2) | Sega Mega Drive / Genesis | [jt12](https://github.com/jotego/jt12) |
+| YM2203 (OPN), YM2608 (OPNA) | NEC PC-88 / PC-98 | routed onto the YM2612 and AY above |
 | SN76489 (PSG) | Master System, Game Gear, Mega Drive | [jt89](https://github.com/jotego/jt89) |
 | YM2151 (OPM) | Sega/Konami arcade, Sharp X68000 | [jt51](https://github.com/jotego/jt51) |
 | SegaPCM, MSM6258 | Sega arcade (OutRun etc.), X68000 | jtoutrun / custom |
@@ -35,6 +69,10 @@ these formats. Multi-song files (NSF/GBS/SID) switch subsongs with the D-pad.
 | NES APU + DMC, VRC6 | NES / Famicom | [NES_MiSTer](https://github.com/MiSTer-devel/NES_MiSTer) / custom |
 | Game Boy APU (+ SM83 CPU) | Game Boy (GBS) | [VerilogBoy](https://github.com/zephray/VerilogBoy) |
 | SID 6581/8580 (+ 6502 CPU) | Commodore 64 | [C64_MiSTer](https://github.com/MiSTer-devel/C64_MiSTer) (reSID) |
+| HuC6280 PSG | PC Engine / TurboGrafx-16 | custom, written for this project |
+| Konami SCC (K051649) | MSX cartridges | [IKASCC](https://github.com/ika-musume/IKASCC) |
+| OKIM6295 | arcade | [jt6295](https://github.com/jotego/jt6295) |
+| K053260 | Konami arcade | [jtcores](https://github.com/jotego/jtcores) (2 of 4 channels, for area) |
 | YMF262 (OPL3, OPL2 subset) | General MIDI synthesis (GENMIDI patches from Freedoom) | [opl3_fpga](https://github.com/gtaylormb/opl3_fpga) |
 
 Upstream sources and commits of the vendored RTL are listed in
