@@ -277,6 +277,10 @@ module chipbox #(
   reg [31:0] gb_phase_inc = DEFAULT_GB_PHASE_INC;
   reg gb_stub_wr = 0;
   reg [14:0] gb_stub_wr_addr = 0;
+`ifdef M4_HAS_HOME
+  reg [14:0] gb_rom_dbg_addr = 0;
+  wire [7:0] gb_rom_dbg_data;
+`endif
   reg [7:0] gb_stub_wr_data = 0;
 
   // Загрузка сэмпл-ROM и мост чтения SegaPCM -> внешняя память.
@@ -644,6 +648,9 @@ module chipbox #(
 `ifdef M4_HAS_HOME
           6'h21: scc_phase_inc <= data_write;
           6'h22: scc_gain <= data_write[7:0];
+`ifdef M4_HAS_HOME
+          6'h29: gb_rom_dbg_addr <= data_write[14:0];
+`endif
           6'h27: huc_phase_inc <= data_write;
           6'h28: huc_gain <= data_write[7:0];
 `endif
@@ -710,6 +717,9 @@ module chipbox #(
           5'h17: data_read <= sn_phase_inc;
           5'h12: data_read <= sid_phase_inc;
           5'h10: data_read <= gb_phase_inc;
+`ifdef M4_HAS_HOME
+          6'h29: data_read <= {24'b0, gb_rom_dbg_data};
+`endif
           5'h18: data_read <= tick_count;
           5'h19: data_read <= {dmc_cnt, pf_cnt};
           5'h1B: data_read <= {p_acks, snd_wr};
@@ -1655,6 +1665,8 @@ module chipbox #(
       .stub_wr_addr(gb_stub_wr_addr),
       .stub_wr_data(gb_stub_wr_data),
 
+      .rom_dbg_addr(gb_rom_dbg_addr),
+      .rom_dbg_data(gb_rom_dbg_data),
       .play_tick_toggle(play_toggle),
 
       .rom_addr(gbs_rom_addr),

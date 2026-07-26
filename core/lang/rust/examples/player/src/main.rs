@@ -295,6 +295,9 @@ fn diag_ff(buf: &mut [u8; 16]) -> &str {
 /// Диагностика GBS: t — play-тики, ДОСТАВЛЕННЫЕ в gb-домен, w — записи
 /// SM83 в звуковые реги, f — фетчи из PSRAM. t=0 -> CDC тика мёртв;
 /// t>0, w=0 -> PLAY не пишет в звук; всё растёт -> тракт вывода
+/// Сколько байт ROM не совпало при обратном чтении из BRAM ядра
+static GB_ROM_BAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 fn diag_gb(buf: &mut [u8; 16]) -> &str {
     let tw = chipbox_read(0x1E);
     let f = chipbox_read(0x1D) >> 16;
@@ -313,7 +316,11 @@ fn diag_gb(buf: &mut [u8; 16]) -> &str {
     for i in 0..4 {
         buf[9 + i] = HEX[(f >> (12 - 4 * i) & 0xF) as usize];
     }
-    core::str::from_utf8(&buf[..13]).unwrap_or("?")
+    let bad = GB_ROM_BAD.load(core::sync::atomic::Ordering::Relaxed);
+    buf[13] = b'b';
+    buf[14] = HEX[(bad >> 4 & 0xF) as usize];
+    buf[15] = HEX[(bad & 0xF) as usize];
+    core::str::from_utf8(&buf[..16]).unwrap_or("?")
 }
 
 /// Пульс домена OPL (рег 0x1C, младшая половина)
@@ -887,6 +894,21 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     if body.len() > fits {
         println!("GBS: {} байт за $7FFF читаются из PSRAM (банки >1)", body.len() - fits);
     }
+    // Сверяем, что в BRAM легло именно то, что мы туда писали. Тишина
+    // GBS на железе дошла до вопроса «а что там вообще лежит», и ответить
+    // было нечем: обратного чтения не существовало. Выборочно, через
+    // простое число, чтобы не растягивать загрузку.
+    let mut bad = 0u32;
+    let mut i = 0usize;
+    while i < fits {
+        chipbox_write(0x29, (load as u32 + i as u32) & 0x7FFF);
+        if (chipbox_read(0x29) & 0xFF) as u8 != body[i] {
+            bad = bad.saturating_add(1);
+        }
+        i += 61;
+    }
+    GB_ROM_BAD.store(bad.min(0xFF), core::sync::atomic::Ordering::Relaxed);
+    println!("GBS: сверка BRAM — расхождений {bad} из {}", fits / 61 + 1);
 
     // Темп: таймер из заголовка или VBlank 59.73 Гц
     // Целочисленно (см. NSF): дробь num/den, а не f64

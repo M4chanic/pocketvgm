@@ -37,6 +37,11 @@ module gbsbox (
 
     // диагностика (тогглы gb-домена, синхронизируются снаружи):
     // тик доставлен в мейлбокс / SM83 записал звуковой регистр
+    // Обратное чтение ROM: фирмварь сверяет, что реально легло в BRAM.
+    // Понадобилось после того, как перебор гипотез по тишине GBS упёрся
+    // в вопрос «а что там вообще лежит» — проверить было нечем.
+    input  wire [14:0] rom_dbg_addr,
+    output reg  [7:0]  rom_dbg_data = 0,
     output reg tick_seen_toggle = 0,
     output reg sndwr_toggle = 0
 );
@@ -102,6 +107,7 @@ module gbsbox (
 
   always @(posedge sys_clk) begin
     if (stub_wr) rom_ram[stub_wr_addr] <= stub_wr_data;
+    rom_dbg_data <= rom_ram[rom_dbg_addr];
   end
 
   // банк ROM (MBC-подобный)

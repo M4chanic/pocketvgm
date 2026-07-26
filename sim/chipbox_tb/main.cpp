@@ -984,7 +984,7 @@ static int ff_selftest() {
 
 // Прогон НАСТОЯЩЕГО GBS-файла (как фирмварь): данные в PSRAM, стаб,
 // play-тик из заголовка; печатает t/w/f-счётчики и пишет WAV
-static int gbs_file(const char* path, const char* out, double seconds, double gb_hz = 8388608.0) {
+static int gbs_file(const char* path, const char* out, double seconds, double gb_hz = 8388608.0, int song_opt = -1) {
     FILE* f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "не открыть %s\n", path); return 1; }
     std::vector<uint8_t> d;
@@ -994,7 +994,7 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     fclose(f);
     if (d.size() < 0x70 || memcmp(d.data(), "GBS", 3)) { fprintf(stderr, "не GBS\n"); return 1; }
 
-    uint8_t song = d[0x05] ? d[0x05] - 1 : 0;
+    uint8_t song = song_opt >= 0 ? (uint8_t)song_opt : (d[0x05] ? d[0x05] - 1 : 0);
     uint16_t load = d[0x06] | d[0x07] << 8;
     uint16_t init = d[0x08] | d[0x09] << 8;
     uint16_t play = d[0x0A] | d[0x0B] << 8;
@@ -1011,6 +1011,16 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     // тело так же в BRAM ядра: ROM теперь читается оттуда
     for (size_t i = 0x70; i < d.size() && load + (i - 0x70) < 0x8000; i++)
         tb.wb(0x11, true, (uint32_t)(load + (i - 0x70)) << 8 | d[i]);
+    // и сверка обратным чтением — тем же путём, каким это делает фирмварь
+    {
+        int bad = 0, checked = 0;
+        for (size_t i = 0x70; i < d.size() && load + (i - 0x70) < 0x8000; i += 61) {
+            tb.wb(0x29, true, (uint32_t)(load + (i - 0x70)) & 0x7FFF);
+            if ((tb.wb(0x29, false) & 0xFF) != d[i]) bad++;
+            checked++;
+        }
+        fprintf(stderr, "сверка BRAM: расхождений %d из %d\n", bad, checked);
+    }
 
     double play_hz = 59.73;
     if (tac & 4) {
@@ -1201,6 +1211,7 @@ static int play_cmds(const char* path, const char* out) {
 
 int main(int argc, char** argv) {
     double gb_hz_opt = 8388608.0;
+    int gbs_song_opt = -1;
     Verilated::commandArgs(argc, argv);
     const char* in = nullptr; const char* out = "out.wav";
     double max_seconds = 0;
@@ -1223,7 +1234,8 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--okim-selftest")) { return okim_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--k060-selftest")) { return k060_selftest(out, 1.0); }
         else if (!strcmp(argv[i], "--gbhz") && i + 1 < argc) { gb_hz_opt = atof(argv[++i]); }
-        else if (!strcmp(argv[i], "--gbsfile") && i + 1 < argc) { return gbs_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0, gb_hz_opt); }
+        else if (!strcmp(argv[i], "--gbsong") && i + 1 < argc) { gbs_song_opt = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--gbsfile") && i + 1 < argc) { return gbs_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0, gb_hz_opt, gbs_song_opt); }
         else if (!strcmp(argv[i], "--nsf-songs") && i + 1 < argc) { return nsf_songs(argv[++i], out, max_seconds > 0 ? max_seconds : 3.0, true); }
         else if (!strcmp(argv[i], "--nsf-songs-noclear") && i + 1 < argc) { return nsf_songs(argv[++i], out, max_seconds > 0 ? max_seconds : 3.0, false); }
         else if (!strcmp(argv[i], "--nsffile") && i + 1 < argc) { return nsf_file(argv[++i], out, max_seconds > 0 ? max_seconds : 4.0); }
