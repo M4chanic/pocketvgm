@@ -295,6 +295,55 @@ fn diag_ff(buf: &mut [u8; 16]) -> &str {
 /// Диагностика GBS: t — play-тики, ДОСТАВЛЕННЫЕ в gb-домен, w — записи
 /// SM83 в звуковые реги, f — фетчи из PSRAM. t=0 -> CDC тика мёртв;
 /// t>0, w=0 -> PLAY не пишет в звук; всё растёт -> тракт вывода
+
+/// Сколько раз заливку в PSRAM пришлось повторять из-за расхождения
+static PSRAM_RETRY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Байт из PSRAM отладочным чтением: бит 8 — готовность
+fn psram_byte(addr: u32) -> Option<u8> {
+    chipbox_write(0x1F, addr & 0x7F_FFFF);
+    for _ in 0..4000 {
+        let v = chipbox_read(0x1F);
+        if v & 0x100 != 0 {
+            return Some((v & 0xFF) as u8);
+        }
+    }
+    None
+}
+
+/// Заливка образа в PSRAM с проверкой и повтором.
+///
+/// Первое воспроизведение после загрузки файла срывалось у NSF, GBS и SID
+/// одинаково, а повторное открытие лечило — то есть тот же код срабатывал
+/// со второго раза. Разбор пути заливки исправной ошибки не нашёл
+/// (торможение шины на регистре 9 работает, софт-сброс заливку не рвёт),
+/// поэтому заливка теперь сверяет себя сама и повторяет при расхождении.
+/// Счётчик повторов виден на экране: если он растёт, причина всё-таки в
+/// заливке, если нет — искать надо в другом месте.
+fn upload_psram(base: u32, bytes: &[u8]) {
+    for attempt in 0..3u32 {
+        chipbox_write(8, base);
+        for pair in bytes.chunks(2) {
+            let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
+            chipbox_write(9, w);
+        }
+        let mut bad = 0u32;
+        let mut i = 0usize;
+        while i < bytes.len() {
+            match psram_byte(base + i as u32) {
+                Some(b) if b == bytes[i] => {}
+                _ => bad += 1,
+            }
+            i += 251;
+        }
+        if bad == 0 {
+            return;
+        }
+        PSRAM_RETRY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        println!("PSRAM: попытка {} — расхождений {bad}, повтор", attempt + 1);
+    }
+}
+
 /// Сколько байт ROM не совпало при обратном чтении из BRAM ядра
 static GB_ROM_BAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
@@ -356,7 +405,14 @@ fn diag_str(buf: &mut [u8; 16]) -> &str {
     for i in 0..4 {
         buf[9 + i] = HEX[(f >> (12 - 4 * i) & 0xF) as usize];
     }
-    core::str::from_utf8(&buf[..13]).unwrap_or("?")
+    // r — сколько раз заливку в PSRAM пришлось повторить. Растёт — причина
+    // срыва первого воспроизведения в заливке; стоит на нуле — искать надо
+    // в другом месте.
+    let r = PSRAM_RETRY.load(core::sync::atomic::Ordering::Relaxed);
+    buf[13] = b'r';
+    buf[14] = HEX[(r >> 4 & 0xF) as usize];
+    buf[15] = HEX[(r & 0xF) as usize];
+    core::str::from_utf8(&buf[..16]).unwrap_or("?")
 }
 
 /// Чтение байта PSRAM через отладочный канал 0x1F
@@ -739,11 +795,7 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     // без — линейно от load-адреса (identity-банки по сбросу)
     let payload = &data[0x80..];
     let base_off = if banked { (load & 0x0FFF) as u32 } else { (load - 0x8000) as u32 };
-    chipbox_write(8, NSF_PSRAM_BASE + base_off);
-    for pair in payload.chunks(2) {
-        let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
-        chipbox_write(9, w);
-    }
+    upload_psram(NSF_PSRAM_BASE + base_off, payload);
 
     // Клок NES и play-тик
     chipbox_write(0xB, ((1_789_773u64 << 32) / CHIPBOX_CLK_HZ) as u32);
@@ -881,11 +933,7 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     // в BRAM ядра ($0000-$7FFF) — для всего остального: оттуда SM83
     // читает байт за такт. Через PSRAM фетч не успевал на штатных
     // 4.19 МГц, и процессор исполнял мусор вместо кода.
-    chipbox_write(8, NSF_PSRAM_BASE + load as u32);
-    for pair in data[0x70..].chunks(2) {
-        let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
-        chipbox_write(9, w);
-    }
+    upload_psram(NSF_PSRAM_BASE + load as u32, &data[0x70..]);
     let body = &data[0x70..];
     let fits = body.len().min(0x8000 - load as usize);
     for (i, &b) in body[..fits].iter().enumerate() {
@@ -1146,11 +1194,7 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         for _ in 0..0x8000 {
             chipbox_write(9, 0);
         }
-        chipbox_write(8, NSF_PSRAM_BASE + load_c as u32);
-        for pair in body_vec.chunks(2) {
-            let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
-            chipbox_write(9, w);
-        }
+        upload_psram(NSF_PSRAM_BASE + load_c as u32, &body_vec);
 
         let mut stub: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         stub.push(0x78); // SEI
