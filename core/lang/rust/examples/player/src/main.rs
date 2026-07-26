@@ -275,6 +275,23 @@ fn vu_tick(last: &mut u32) {
     }
 }
 
+/// Диагностика перемотки: f — бит FF в контрол-слове, которое фирмварь
+/// послала последней; r — состояние кнопки R прямо сейчас. Если музыка
+/// идёт ускоренно при f0 r0, значит железо держит ff_r само, и дело не в
+/// фирмвари. Два прошлых захода правились вслепую — больше не гадаем.
+fn diag_ff(buf: &mut [u8; 16]) -> &str {
+    use core::sync::atomic::Ordering::Relaxed;
+    let f = (CTRL_FLAGS.load(Relaxed) >> 6) & 1;
+    let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
+    let r = (unsafe { p.APF_INPUT.cont1_key.read().bits() } as u16 & BTN_R != 0) as u32;
+    buf[0] = b'f';
+    buf[1] = b'0' + f as u8;
+    buf[2] = b' ';
+    buf[3] = b'r';
+    buf[4] = b'0' + r as u8;
+    core::str::from_utf8(&buf[..5]).unwrap_or("")
+}
+
 /// Диагностика GBS: t — play-тики, ДОСТАВЛЕННЫЕ в gb-домен, w — записи
 /// SM83 в звуковые реги, f — фетчи из PSRAM. t=0 -> CDC тика мёртв;
 /// t>0, w=0 -> PLAY не пишет в звук; всё растёт -> тракт вывода
@@ -1954,7 +1971,8 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 let el = elapsed_s();
                 if el != shown_s {
                     shown_s = el;
-                    ui::progress(el.min(total_s), total_s, "");
+                    let mut fbuf = [0u8; 16];
+                    ui::progress(el.min(total_s), total_s, diag_ff(&mut fbuf));
                 }
             }
             Ok(Event::End) => {

@@ -1854,12 +1854,22 @@ module chipbox #(
 
   reg signed [16:0] sid_hp_x = 0;
   reg signed [18:0] sid_hp_y = 0;
+  // HuC6280 стерео: без блокера постоянная составляющая (канал с
+  // ненаписанной таблицей даёт -16 на отсчёт) смещает сигнал от нуля,
+  // съедает запас и упирается в потолок на громких местах — на тихих
+  // при этом чисто. Остальные чипы через блокер шли с самого начала.
+  reg signed [16:0] hucl_hp_x = 0;
+  reg signed [18:0] hucl_hp_y = 0;
+  reg signed [16:0] hucr_hp_x = 0;
+  reg signed [18:0] hucr_hp_y = 0;
 
   wire signed [15:0] ay_hp = sat16_19(ay_hp_y);
   wire signed [15:0] apu_hp = sat16_19(apu_hp_y);
   wire signed [15:0] gbl_hp = sat16_19(gbl_hp_y);
   wire signed [15:0] gbr_hp = sat16_19(gbr_hp_y);
   wire signed [15:0] sid_hp = sat16_19(sid_hp_y);
+  wire signed [15:0] hucl_hp = sat16_19(hucl_hp_y);
+  wire signed [15:0] hucr_hp = sat16_19(hucr_hp_y);
 
   // Утечка фильтра: y>>>10, но не меньше +-1, иначе целочисленный хвост
   // «прилипает» и остаётся постоянный DC
@@ -1947,8 +1957,8 @@ module chipbox #(
     sn_g <= (sn_wide * g_sn) >>> 6;
 `ifdef M4_HAS_HOME
     scc_g <= (scc_wide * g_scc) >>> 6;
-    huc_l_g <= (huc_left * g_huc) >>> 6;
-    huc_r_g <= (huc_right * g_huc) >>> 6;
+    huc_l_g <= (hucl_hp * g_huc) >>> 6;
+    huc_r_g <= (hucr_hp * g_huc) >>> 6;
 `endif
 `ifdef M4_HAS_ARCADE
     okim_g <= (okim_wide * g_okim) >>> 6;
@@ -1978,6 +1988,10 @@ module chipbox #(
       gbr_hp_x <= gbr_wide;
       sid_hp_y <= (sid_wide17 - sid_hp_x) + (sid_hp_y - hp_leak(sid_hp_y));
       sid_hp_x <= sid_wide17;
+      hucl_hp_y <= (huc_left - hucl_hp_x) + (hucl_hp_y - hp_leak(hucl_hp_y));
+      hucl_hp_x <= huc_left;
+      hucr_hp_y <= (huc_right - hucr_hp_x) + (hucr_hp_y - hp_leak(hucr_hp_y));
+      hucr_hp_x <= huc_right;
 `endif
       chip_left <= sat16(mix_l);
       chip_right <= sat16(mix_r);
