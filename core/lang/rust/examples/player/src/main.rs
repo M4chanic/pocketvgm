@@ -936,27 +936,34 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     upload_psram(NSF_PSRAM_BASE + load as u32, &data[0x70..]);
     let body = &data[0x70..];
     let fits = body.len().min(0x8000 - load as usize);
-    for (i, &b) in body[..fits].iter().enumerate() {
-        chipbox_write(0x11, (load as u32 + i as u32) << 8 | b as u32);
-    }
     if body.len() > fits {
         println!("GBS: {} байт за $7FFF читаются из PSRAM (банки >1)", body.len() - fits);
     }
-    // Сверяем, что в BRAM легло именно то, что мы туда писали. Тишина
-    // GBS на железе дошла до вопроса «а что там вообще лежит», и ответить
-    // было нечем: обратного чтения не существовало. Выборочно, через
-    // простое число, чтобы не растягивать загрузку.
+    // Заливка в BRAM с полной сверкой и повтором. Раньше сверка была
+    // выборочной и без повтора: NSF после такой же правки для PSRAM
+    // починился, а GBS нет — потому что код он читает как раз отсюда, а
+    // не из PSRAM. Чтение из BRAM дешёвое, поэтому сверяем каждый байт,
+    // а не через один: редкое повреждение выборка могла и пропустить.
     let mut bad = 0u32;
-    let mut i = 0usize;
-    while i < fits {
-        chipbox_write(0x29, (load as u32 + i as u32) & 0x7FFF);
-        if (chipbox_read(0x29) & 0xFF) as u8 != body[i] {
-            bad = bad.saturating_add(1);
+    for attempt in 0..3u32 {
+        for (k, &b) in body[..fits].iter().enumerate() {
+            chipbox_write(0x11, (load as u32 + k as u32) << 8 | b as u32);
         }
-        i += 61;
+        bad = 0;
+        for (k, &b) in body[..fits].iter().enumerate() {
+            chipbox_write(0x29, (load as u32 + k as u32) & 0x7FFF);
+            if (chipbox_read(0x29) & 0xFF) as u8 != b {
+                bad = bad.saturating_add(1);
+            }
+        }
+        if bad == 0 {
+            break;
+        }
+        PSRAM_RETRY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        println!("GBS: попытка {} — расхождений {bad} из {fits}, повтор", attempt + 1);
     }
     GB_ROM_BAD.store(bad.min(0xFF), core::sync::atomic::Ordering::Relaxed);
-    println!("GBS: сверка BRAM — расхождений {bad} из {}", fits / 61 + 1);
+    println!("GBS: сверка BRAM — расхождений {bad} из {fits}");
 
     // Темп: таймер из заголовка или VBlank 59.73 Гц
     // Целочисленно (см. NSF): дробь num/den, а не f64
