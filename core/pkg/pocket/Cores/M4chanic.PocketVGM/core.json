@@ -9,7 +9,7 @@
       "description": "Chiptune jukebox: two bitstream variants — Console (Mega Drive, NES, MSX/SCC, C64, Game Boy, PC AdLib) and Arcade + X68000 (YM2151, SegaPCM, MSM6258, OKIM6295, K053260)",
       "author": "M4chanic",
       "url": "https://github.com/M4chanic/pocketvgm",
-      "version": "0.1.18",
+      "version": "0.1.19",
       "date_release": "2026-07-25"
     },
     "framework": {
