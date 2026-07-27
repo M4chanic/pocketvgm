@@ -1051,7 +1051,11 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     fclose(f);
     if (d.size() < 0x70 || memcmp(d.data(), "GBS", 3)) { fprintf(stderr, "не GBS\n"); return 1; }
 
-    uint8_t song = song_opt >= 0 ? (uint8_t)song_opt : (d[0x05] ? d[0x05] - 1 : 0);
+    // --gbsong считается с единицы, как в заголовке GBS и в gbsplay.
+    // Раньше ключ был с нуля, и сравнение с эталоном шло по разным
+    // мелодиям: уровни похожи, огибающая не совпадает ни при какой
+    // задержке, и это легко принять за дефект звука.
+    uint8_t song = song_opt > 0 ? (uint8_t)(song_opt - 1) : (d[0x05] ? d[0x05] - 1 : 0);
     uint16_t load = d[0x06] | d[0x07] << 8;
     uint16_t init = d[0x08] | d[0x09] << 8;
     uint16_t play = d[0x0A] | d[0x0B] << 8;
