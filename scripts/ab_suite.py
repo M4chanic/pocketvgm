@@ -8,6 +8,7 @@
 Что нужно рядом (собирается локально, см. шапку ab_compare.py):
   vgm2wav из libvgm — эталон для VGM/VGZ
   gbsplay           — эталон для GBS
+  gme2wav           — эталон для NSF (обёртка вокруг libgme)
   sim/chipbox_tb    — наше ядро
 
 ВАЖНО про тактовую стенда: домен Game Boy требует 8.388608 МГц, а стенд по
@@ -38,25 +39,26 @@ SCRATCH = Path(tempfile.gettempdir()) / "m4_absuite"
 # таблицу, ради ничего. Лучше пометить трек и идти дальше.
 TRACK_TIMEOUT = 240
 
-# Чем рендерить эталон. Для NSF и SID подходящего рендерера пока нет —
-# такие чипы прогоняются только на «не молчит», без сравнения.
+# Чем рендерить эталон. Для SID подходящего рендерера пока нет — такие
+# файлы прогоняются только на «не молчит», без сравнения.
 VGM2WAV = None
 GBSPLAY = None
+GME2WAV = None
+
+
+def _find(name):
+    for base in (Path("/tmp"), Path.home(), ROOT.parent):
+        for p in base.rglob(name):
+            if p.is_file() and p.stat().st_mode & 0o111:
+                return p
+    return None
 
 
 def find_tools():
-    global VGM2WAV, GBSPLAY
-    for base in (Path("/tmp"), Path.home(), ROOT.parent):
-        for p in base.rglob("vgm2wav"):
-            if p.is_file() and p.stat().st_mode & 0o111:
-                VGM2WAV = p
-                break
-        for p in base.rglob("gbsplay"):
-            if p.is_file() and p.stat().st_mode & 0o111:
-                GBSPLAY = p
-                break
-        if VGM2WAV and GBSPLAY:
-            break
+    global VGM2WAV, GBSPLAY, GME2WAV
+    VGM2WAV = VGM2WAV or _find("vgm2wav")
+    GBSPLAY = GBSPLAY or _find("gbsplay")
+    GME2WAV = GME2WAV or _find("gme2wav")
 
 
 def render_ref(track, out, seconds):
@@ -70,6 +72,12 @@ def render_ref(track, out, seconds):
         subprocess.run([str(GBSPLAY), "-o", "wav", "-O", str(out), "-r", "44100",
                         "-t", str(seconds), "-f", "0", "-g", "0", "-q",
                         str(track), "1", "1"], capture_output=True, timeout=300)
+        return out.exists()
+    if ext == ".nsf" and GME2WAV:
+        # Подпесня 1: стенд в nsf_file всегда заводит первую (LDA #0 в
+        # стабе), и номер здесь считается с единицы — как у gbsplay.
+        subprocess.run([str(GME2WAV), str(track), "1", str(seconds), str(out)],
+                       capture_output=True, timeout=300)
         return out.exists()
     return False
 
@@ -127,7 +135,8 @@ def main():
         sys.exit(f"нет стенда: {TB} — соберите sim/chipbox_tb")
     SCRATCH.mkdir(exist_ok=True)
     print(f"эталоны: vgm2wav {'найден' if VGM2WAV else 'НЕТ'}, "
-          f"gbsplay {'найден' if GBSPLAY else 'НЕТ'}\n")
+          f"gbsplay {'найден' if GBSPLAY else 'НЕТ'}, "
+          f"gme2wav {'найден' if GME2WAV else 'НЕТ'}\n")
 
     chips = [a.chip] if a.chip else list(corpus.CORPUS)
     print(f"{'чип':10} {'трек':30} {'уровень':>8} {'худшая полоса':>16} {'огиб':>6}  вывод")
