@@ -327,6 +327,11 @@ fn upload_psram(base: u32, bytes: &[u8]) {
             let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
             chipbox_write(9, w);
         }
+        // Мелкие куски сверяем целиком. Выборка через 251 байт годится
+        // для образа в десятки килобайт, но стаб и таблица векторов у SID
+        // короче шага — от неё проверялся ровно один байт, а испорченный
+        // вектор сброса это тишина при живом на вид воспроизведении.
+        let step = if bytes.len() <= 1024 { 1 } else { 251 };
         let mut bad = 0u32;
         let mut i = 0usize;
         while i < bytes.len() {
@@ -334,7 +339,7 @@ fn upload_psram(base: u32, bytes: &[u8]) {
                 Some(b) if b == bytes[i] => {}
                 _ => bad += 1,
             }
-            i += 251;
+            i += step;
         }
         if bad == 0 {
             return;
@@ -1226,20 +1231,16 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         stub.extend_from_slice(&[0x4C, loop_at as u8, (loop_at >> 8) as u8]);
         let rti_at = 0x0334 + stub.len() as u16;
         stub.push(0x40); // RTI
-        chipbox_write(8, NSF_PSRAM_BASE + 0x334);
-        for pair in stub.chunks(2) {
-            let w = pair[0] as u32 | if pair.len() > 1 { (pair[1] as u32) << 8 } else { 0 };
-            chipbox_write(9, w);
-        }
+        // Стаб и векторы — через сверяемую заливку. Раньше они писались
+        // вслепую, и первое включение SID молчало, а «вправо» лечило:
+        // сам образ песни сверялся, а эти три десятка байт нет.
+        upload_psram(NSF_PSRAM_BASE + 0x334, &stub);
         let vecs = [
             rti_at as u8, (rti_at >> 8) as u8,
             0x34, 0x03,
             rti_at as u8, (rti_at >> 8) as u8,
         ];
-        chipbox_write(8, NSF_PSRAM_BASE + 0xFFFA);
-        for pair in vecs.chunks(2) {
-            chipbox_write(9, pair[0] as u32 | (pair[1] as u32) << 8);
-        }
+        upload_psram(NSF_PSRAM_BASE + 0xFFFA, &vecs);
 
         // темп песни: бит в speed-маске: 1 = CIA ~60 Гц, 0 = VBlank
         let bit = speed >> core::cmp::min(s as u32, 31) & 1;
