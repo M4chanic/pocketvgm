@@ -166,6 +166,58 @@ def migrate_old_core():
     print("Migration done: music in Assets/pocketvgm/common, old core removed.")
 
 
+MUSIC_DIR = os.path.join(ROOT, "Assets", "pocketvgm", "common")
+PLAYABLE = (".vgm", ".vgz", ".gym", ".nsf", ".gbs", ".sid", ".mid")
+
+
+def _natural(name):
+    """Sort key that puts 9 before 10 even without zero padding."""
+    out, digits = [], ""
+    for ch in name.lower():
+        if ch.isdigit():
+            digits += ch
+        else:
+            if digits:
+                out.append((1, int(digits), ""))
+                digits = ""
+            out.append((0, 0, ch))
+    if digits:
+        out.append((1, int(digits), ""))
+    return out
+
+
+def make_playlists(quiet=False):
+    """Write playlist.m3u into every music folder that has none.
+
+    The core cannot do this itself: APF gives a core nine commands and
+    none of them lists a directory, so a core only ever learns the one
+    path the user picked. It does look for playlist.m3u next to an
+    opened track, so writing that file here is what makes left/right and
+    the Select browser work on a folder of loose files.
+
+    A folder that already holds any .m3u is left alone — that playlist
+    is someone's own ordering and outranks a generated one.
+    """
+    if not os.path.isdir(MUSIC_DIR):
+        return 0
+    written = 0
+    for folder, _dirs, files in os.walk(MUSIC_DIR):
+        if any(f.lower().endswith(".m3u") for f in files):
+            continue
+        tunes = sorted((f for f in files if f.lower().endswith(PLAYABLE)),
+                       key=_natural)
+        if len(tunes) < 2:
+            continue          # одиночному файлу список ни к чему
+        path = os.path.join(folder, "playlist.m3u")
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(tunes) + "\n")
+        written += 1
+        if not quiet:
+            rel = os.path.relpath(path, ROOT)
+            print("  playlist: %s (%d tracks)" % (rel, len(tunes)))
+    return written
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
@@ -175,7 +227,14 @@ def main():
     ap.add_argument("--tag", help="specific release (vX.Y.Z) instead of the latest")
     ap.add_argument("--insecure", action="store_true",
                     help="skip TLS certificate verification (when macOS CAs are not set up)")
+    ap.add_argument("--playlists", action="store_true",
+                    help="only write playlist.m3u into music folders, do not update")
     args = ap.parse_args()
+    if args.playlists:
+        n = make_playlists()
+        print("Playlists written: %d" % n if n else
+              "Nothing to do: every folder already has a playlist or one tune.")
+        return
     set_opener(args.insecure)
 
     token, source = get_token()
@@ -219,7 +278,11 @@ def main():
     except OSError:
         pass
     migrate_old_core()
+    made = make_playlists()
     print("Done: %s, files extracted: %d, card: %s" % (tag, n, ROOT))
+    if made:
+        print("Playlists written: %d — open any tune and D-pad left/right "
+              "walks its folder." % made)
     print("Insert the SD card into the Pocket — core M4chanic.PocketVGM, "
           "music in Assets/pocketvgm/common.")
 
