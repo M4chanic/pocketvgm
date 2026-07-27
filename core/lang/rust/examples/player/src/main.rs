@@ -100,6 +100,25 @@ fn ctrl_reset() {
     chipbox_write(2, 1);
 }
 
+/// Глушит в микшере все чипы разом.
+///
+/// Каждый формат раньше обнулял только те гейны, о которых знал сам, а
+/// у остальных оставался сброс — 64. Незанятый чип при этом подмешивал
+/// в сумму свой холостой уровень: на NSF, где играть должен один APU, в
+/// выходе стояла постоянная -51 при том, что эталон даёт ровный ноль.
+/// Заметно это стало на тихих местах, где такая добавка перевешивала
+/// саму музыку. Теперь путь один: сначала замолчали все, потом каждый
+/// формат включает своё.
+fn mute_all_chips() {
+    chipbox_write(6, 0); // ADPCM, SegaPCM, AY, YM2151
+    chipbox_write(0xC, 0); // OPL, SID, Game Boy, NES APU
+    chipbox_write(0x15, 0); // SN76489, YM2612
+    chipbox_write(0x22, 0); // SCC
+    chipbox_write(0x24, 0); // OKIM6295 (вместе с признаком ss)
+    chipbox_write(0x26, 0); // K053260
+    chipbox_write(0x28, 0); // HuC6280
+}
+
 /// Опрос кнопок по фронту с накоплением: scan() можно звать из любых
 /// циклов ожидания (backpressure и пр.) — фронты копятся в pending и не
 /// теряются, take() отдаёт накопленное. Иначе короткое нажатие в момент,
@@ -647,9 +666,7 @@ fn hold(b: &mut Buttons, mode: u32, mut stopped: bool) -> Option<Ctl> {
         }
         if stopped {
             // сброс не чистит канальные RAM (SegaPCM и пр.) — глушим микс
-            chipbox_write(6, 0);
-            chipbox_write(0xC, 0);
-            chipbox_write(0x15, 0);
+            mute_all_chips();
         }
         loop {
             let e = b.take();
@@ -817,8 +834,13 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     if has_5b {
         chipbox_write(4, ((1_789_773u64 << 32) / CHIPBOX_CLK_HZ) as u32);
     }
+    mute_all_chips();
     chipbox_write(6, if has_5b { 64 << 8 } else { 0 });
-    chipbox_write(0xC, 64);
+    // 120, не 64: на ступенчатом тесте громкости наш APU шёл ровно на
+    // 4.6-5.8 дБ ниже эталона по всей шкале. Наклон внутри этого
+    // разброса — разница линейного микширования у эталона и настоящего
+    // нелинейного у нас, одним множителем он не убирается.
+    chipbox_write(0xC, 120);
     chipbox_write(0x15, 0);
 
     println!("NSF: {num_songs} песен, rate {play_hz} Гц; D-pad влево/вправо — переключение");
@@ -987,7 +1009,7 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     let play_hz = num / den;
 
     // Только GB в миксе
-    chipbox_write(6, 0);
+    mute_all_chips();
     chipbox_write(0xC, 64 << 8);
 
     let num_songs = data[0x04].max(1);
@@ -1058,9 +1080,8 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         }
         ctrl_reset();
         // гейны заново: стоп (hold) их глушит
-        chipbox_write(6, 0);
+        mute_all_chips();
         chipbox_write(0xC, 64 << 8);
-        chipbox_write(0x15, 0);
         ctrl_mode(0xC); // gbs_mode | cpu_run
         println!("GBS: песня {}", s + 1);
     }, draw)
@@ -1168,7 +1189,7 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     println!("load {load:#06x}, init {init:#06x}, play {play:#06x}, песен {num_songs}");
 
     // Только SID в миксе
-    chipbox_write(6, 0);
+    mute_all_chips();
     chipbox_write(0xC, 32 << 16);
 
     // vblank как дробь: NTSC 59.83 Гц, PAL 50.12 Гц
@@ -1249,9 +1270,8 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
 
         ctrl_reset(); // сброс чипов
         // гейны заново: стоп (hold) их глушит
-        chipbox_write(6, 0);
+        mute_all_chips();
         chipbox_write(0xC, 32 << 16);
-        chipbox_write(0x15, 0);
         ctrl_mode(0x14); // sid_mode | cpu_run
         println!("SID: песня {} ({num}/{den} Гц)", s + 1);
     }, draw)
@@ -1285,7 +1305,7 @@ fn midi_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         .sum();
     let total_s = pass_ticks / 44_100 * 2;
 
-    chipbox_write(6, 0);
+    mute_all_chips();
     chipbox_write(0xC, 16 << 24); // только OPL3; 64 клиппинговало (как в VGM-пути)
     ctrl_reset();
 
@@ -1392,9 +1412,8 @@ fn gym_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // клоки/гейны Genesis (как VGM)
     chipbox_write(0x16, ((7_670_453u64 << 32) / CHIPBOX_CLK_HZ) as u32);
     chipbox_write(0x17, ((3_579_545u64 << 32) / CHIPBOX_CLK_HZ) as u32);
+    mute_all_chips();
     chipbox_write(0x15, 32u32 << 8 | 64);
-    chipbox_write(6, 0);
-    chipbox_write(0xC, 0);
     ctrl_reset();
 
     let mut sink = CmdSink::new();
@@ -1797,6 +1816,9 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     if ym_clk != 0 {
         chipbox_write(3, (((ym_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
     }
+    // Глушим всё до того, как расставим гейны этого файла: иначе чип,
+    // которого в файле нет, подмешивает свой холостой уровень.
+    mute_all_chips();
     if ay_clk != 0 {
         chipbox_write(4, (((ay_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
     }
@@ -1905,7 +1927,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // (проверено на Dune в симуляции), поэтому для VGM берём 16.
     chipbox_write(
         0xC,
-        if opl_clk != 0 { 16u32 } else { 0 } << 24 | if nes_clk != 0 { 64u32 } else { 0 },
+        if opl_clk != 0 { 16u32 } else { 0 } << 24 | if nes_clk != 0 { 120u32 } else { 0 },
     );
     ctrl_reset();
 

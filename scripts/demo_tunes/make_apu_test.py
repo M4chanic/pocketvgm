@@ -17,6 +17,8 @@
       напрямую показывает частоту кадрового счётчика APU;
   apu_volume.nsf   — 15 ступеней постоянной громкости по полсекунды:
       один рендер даёт весь закон громкости;
+  apu_triangle.nsf — треугольник включается и выключается каждые
+      полсекунды: ловит канал, который не замолкает по счётчикам;
   apu_silence.nsf  — $4015=0 и больше ничего: проверка на то, что при
       выключенном звуке на выходе действительно ноль.
 """
@@ -91,6 +93,41 @@ def volume_test():
     return a
 
 
+def triangle_test():
+    """Треугольник включается и выключается через $4015, по полсекунды.
+
+    Канал известен тем, что при неверной реализации счётчиков (длины и
+    линейного) продолжает гудеть после выключения. На музыке это видно
+    как лишний голос в нижней середине и как перевёрнутые акценты.
+    """
+    a = Asm(LOAD)
+    a.label("init")
+    a.op("LDA", "imm", 0x04); a.op("STA", "abs", 0x4015)   # только треугольник
+    a.op("LDA", "imm", 0xFF); a.op("STA", "abs", 0x4008)   # линейный счётчик, halt
+    a.op("LDA", "imm", 0x54); a.op("STA", "abs", 0x400A)   # период
+    a.op("LDA", "imm", 0x00); a.op("STA", "abs", 0x400B)   # старт
+    a.op("LDA", "imm", 30); a.op("STA", "zp", CNT)
+    a.op("LDA", "imm", 0x04); a.op("STA", "zp", VOL)       # текущее значение $4015
+    a.op("RTS")
+    a.label("play")
+    a.op("DEC", "zp", CNT)
+    a.op("LDA", "zp", CNT)
+    a.op("BNE", "rel", "done")
+    a.op("LDA", "imm", 30); a.op("STA", "zp", CNT)
+    a.op("LDA", "zp", VOL)
+    a.op("BEQ", "rel", "turnon")
+    a.op("LDA", "imm", 0x00)                                # выключаем
+    a.op("STA", "abs", 0x4015); a.op("STA", "zp", VOL)
+    a.op("RTS")
+    a.label("turnon")
+    a.op("LDA", "imm", 0x04); a.op("STA", "abs", 0x4015); a.op("STA", "zp", VOL)
+    a.op("LDA", "imm", 0xFF); a.op("STA", "abs", 0x4008)
+    a.op("LDA", "imm", 0x00); a.op("STA", "abs", 0x400B)
+    a.label("done")
+    a.op("RTS")
+    return a
+
+
 def silence_test():
     """Ничего не включаем: на выходе обязан быть ноль."""
     a = Asm(LOAD)
@@ -107,6 +144,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     for name, build in (("apu_envelope", envelope_test),
                         ("apu_volume", volume_test),
+                        ("apu_triangle", triangle_test),
                         ("apu_silence", silence_test)):
         a = build()
         code = a.assemble()

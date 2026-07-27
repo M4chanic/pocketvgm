@@ -116,6 +116,22 @@ struct Tb {
 
 static void write_wav_file(const char* out, const std::vector<int16_t>& pcm, uint32_t rate);
 
+// Глушит в микшере все чипы разом.
+//
+// Каждый путь обнулял только те гейны, о которых знал, а у остальных
+// оставался сброс 64 — и незанятый чип подмешивал в сумму свой холостой
+// уровень. На NSF это давало постоянную -51 там, где эталон выдаёт
+// ровный ноль: на тихих местах такая добавка перевешивала музыку.
+static void mute_all(Tb& tb) {
+    tb.wb(6, true, 0);      // ADPCM, SegaPCM, AY, YM2151
+    tb.wb(0xC, true, 0);    // OPL, SID, Game Boy, NES APU
+    tb.wb(0x15, true, 0);   // SN76489, YM2612
+    tb.wb(0x22, true, 0);   // SCC
+    tb.wb(0x24, true, 0);   // OKIM6295 (вместе с признаком ss)
+    tb.wb(0x26, true, 0);   // K053260
+    tb.wb(0x28, true, 0);   // HuC6280
+}
+
 // Изолирующий тест: те же регистры APU, но через VGM-путь (FIFO), без CPU
 static int apu_selftest(const char* out, double seconds) {
     Tb tb;
@@ -370,8 +386,8 @@ static int nsf_file(const char* path, const char* out, double seconds) {
     static const uint8_t vecs[6] = {0x14, 0x50, 0x00, 0x50, 0x14, 0x50};
 
     Tb tb;
-    tb.wb(6, true, 0);
-    tb.wb(0xC, true, 64);
+    mute_all(tb);
+    tb.wb(0xC, true, 120);   // см. комментарий в фирмвари: APU шёл на ~5 дБ ниже эталона
     tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
 
@@ -417,8 +433,8 @@ static int vrc6_selftest(const char* out, double seconds) {
     static const uint8_t vecs[6] = {0x07, 0x50, 0x00, 0x50, 0x07, 0x50};
 
     Tb tb;
-    tb.wb(6, true, 0);
-    tb.wb(0xC, true, 64); // канал APU (VRC6 подмешан в него)
+    mute_all(tb);
+    tb.wb(0xC, true, 120);   // канал APU (VRC6 подмешан в него), уровень см. в фирмвари
     tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
 
@@ -1091,7 +1107,7 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     }
     tb.wb(0xF, true, (uint32_t)(play_hz / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0x10, true, phase_inc(gb_hz, "клок Game Boy")); // gb_clk: по умолчанию как на железе (8.388608 МГц -> ÷2 = 4.194 МГц)
-    tb.wb(6, true, 0);
+    mute_all(tb);
     tb.wb(0xC, true, 64u << 8);
 
     // стаб как в фирмвари: RST/IRQ-трамплины JP LOAD+n ($00-$60),
@@ -1197,7 +1213,7 @@ static int sid_file(const char* path, const char* out, double seconds) {
     // SID-клок PAL с учётом замедления x4 (конвейеру sid_top нужно >=14 clk)
     tb.wb(0x12, true, (uint32_t)(985248.0 / 4 / CLK_HZ * 4294967296.0));
     tb.wb(0x13, true, 0); // 6581
-    tb.wb(6, true, 0);
+    mute_all(tb);
     tb.wb(0xC, true, 64u << 16);
 
     // чистый образ: нули + данные + стаб + векторы
@@ -1512,11 +1528,14 @@ int main(int argc, char** argv) {
         double inc = (double)pcm_clk * 2.0 / CLK_HZ * 4294967296.0;
         tb.wb(5, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));
     }
+    // Глушим всё до того, как расставим гейны этого файла: иначе чип,
+    // которого в файле нет, подмешивает свой холостой уровень.
+    mute_all(tb);
     // Гейны: неиспользуемые чипы глушим (idle-DC/шум не попадает в микс);
     // SegaPCM 34/64 — баланс Out Run по MAME (0.30 FM / 0.70 PCM)
     tb.wb(6, true, (adpcm_clk ? 64u : 0u) << 24 | (pcm_clk ? 34u : 0u) << 16
                  | ((ay_clk || opn_clk) ? 128u : 0u) << 8 | (ym_clk ? 64u : 0u));
-    tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 64u : 0u));
+    tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 120u : 0u));
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (scc_clk) {
         // Заголовок VGM несёт половину шинной частоты MSX: у эталона
