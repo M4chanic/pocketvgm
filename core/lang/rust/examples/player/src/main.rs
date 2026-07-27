@@ -1820,7 +1820,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     }
     let scc_clk = header.clocks.k051649;
     if scc_clk != 0 {
-        chipbox_write(0x21, (((scc_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+        // Заголовок VGM несёт половину шинной частоты MSX. У эталона
+        // (libvgm, k051649.c) шаг фазы считается от clock*2, и нота
+        // выходит f = clock/(16*(N+1)) — вдвое выше расхожей формулы с
+        // 32. Отдаём чипу полную частоту, иначе SCC играет октавой ниже.
+        chipbox_write(0x21, (((scc_clk as u64 * 2) << 32) / CHIPBOX_CLK_HZ) as u32);
         chipbox_write(0x22, 64); // scc_gain
     }
     // OPL-семейство (YM3812/YM3526/YMF262) играет на нашем OPL3. Клок OPL3

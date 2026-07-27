@@ -57,7 +57,13 @@ def read_wav(path, seconds):
     data = struct.unpack("<%dh" % (len(raw) // 2), raw)
     mono = [(data[i * ch] + data[i * ch + 1]) / 2 if ch > 1 else data[i]
             for i in range(len(data) // ch)]
-    return mono, rate
+    # Постоянная составляющая вычитается: она не слышна, а в сравнении
+    # врёт вдвойне. У эталонного рендера SCC смещение было 1689 при RMS
+    # 3186 — больше половины сигнала; оно текло в нижнюю полосу и
+    # забирало 86% «энергии», из-за чего чип выглядел басовитым, а все
+    # остальные полосы сравнивались на остатках. RMS оно тоже завышает.
+    dc = sum(mono) / len(mono) if mono else 0.0
+    return [x - dc for x in mono], rate
 
 
 def rms(xs):

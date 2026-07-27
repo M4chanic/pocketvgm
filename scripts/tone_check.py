@@ -38,6 +38,7 @@ CHIPS = {
     "ym2203": (0x55, 0x44, 3_993_600),
     "ym2608": (0x56, 0x48, 7_987_200),
     "ay8910": (0xA0, 0x74, 1_789_772),
+    "scc": (0xD2, 0x9C, 1_789_772),
 }
 
 
@@ -87,6 +88,27 @@ def ssg_note(path, chip, period, secs=2.0):
     w = bytearray()
     for a, d in ((0, period & 0xFF), (1, period >> 8), (7, 0x3E), (8, 0x0F)):
         w += bytes([cmd, a, d])
+    open(path, "wb").write(bytes(header(off, clk, secs)) + bytes(w + tail(secs)))
+
+
+def scc_note(path, period, secs=2.0):
+    """Синус в волновой таблице первого канала SCC.
+
+    Порты команды 0xD2: 0 — волновая таблица, 1 — частота, 2 —
+    громкость, 3 — включение каналов.
+    """
+    cmd, off, clk = CHIPS["scc"]
+    w = bytearray()
+
+    def scc(port, reg, val):
+        w.extend([cmd, port, reg, val & 0xFF])
+
+    for i in range(32):
+        scc(0, i, int(round(127 * math.sin(2 * math.pi * i / 32))))
+    scc(1, 0, period & 0xFF)
+    scc(1, 1, (period >> 8) & 0x0F)
+    scc(2, 0, 0x0F)
+    scc(3, 0, 0x01)
     open(path, "wb").write(bytes(header(off, clk, secs)) + bytes(w + tail(secs)))
 
 
@@ -149,6 +171,10 @@ def main():
         for period in (200, 400):
             ssg_note(src, chip, period)
             compare(v, f"{chip} SSG период={period}")
+    if not only or only == "scc":
+        for period in (256, 512):
+            scc_note(src, period)
+            compare(v, f"scc период={period}")
     return 0
 
 

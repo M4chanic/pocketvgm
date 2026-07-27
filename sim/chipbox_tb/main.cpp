@@ -1515,7 +1515,11 @@ int main(int argc, char** argv) {
     tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 64u : 0u));
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (scc_clk) {
-        tb.wb(0x21, true, (uint32_t)((double)scc_clk / CLK_HZ * 4294967296.0 + 0.5));
+        // Заголовок VGM несёт половину шинной частоты MSX: у эталона
+        // (libvgm, k051649.c) шаг считается от clock*2, и нота выходит
+        // f = clock/(16*(N+1)) — вдвое выше расхожей формулы с 32. Чипу
+        // отдаём полную частоту, иначе весь SCC играет октавой ниже.
+        tb.wb(0x21, true, (uint32_t)((double)scc_clk * 2 / CLK_HZ * 4294967296.0 + 0.5));
         tb.wb(0x22, true, 64);
     }
     if (k060_clk) {
