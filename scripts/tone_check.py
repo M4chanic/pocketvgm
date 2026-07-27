@@ -91,6 +91,21 @@ def ssg_note(path, chip, period, secs=2.0):
     open(path, "wb").write(bytes(header(off, clk, secs)) + bytes(w + tail(secs)))
 
 
+def ay_env_note(path, chip, period, shape=0x08, secs=2.0):
+    """Огибающая AY как волна: тон и шум выключены, громкость из огибающей.
+
+    Классический приём MSX — короткий период огибающей сам становится
+    слышимым тоном. Проверяет делитель огибающей, до которого обычный
+    тоновый тест не достаёт.
+    """
+    cmd, off, clk = CHIPS[chip]
+    w = bytearray()
+    for a, d in ((7, 0x3F), (8, 0x10), (11, period & 0xFF), (12, period >> 8),
+                 (13, shape)):
+        w += bytes([cmd, a, d])
+    open(path, "wb").write(bytes(header(off, clk, secs)) + bytes(w + tail(secs)))
+
+
 def scc_note(path, period, secs=2.0):
     """Синус в волновой таблице первого канала SCC.
 
@@ -171,6 +186,12 @@ def main():
         for period in (200, 400):
             ssg_note(src, chip, period)
             compare(v, f"{chip} SSG период={period}")
+    for chip in ("ay8910", "ym2203", "ym2608"):
+        if only and chip != only:
+            continue
+        for period in (16, 32):
+            ay_env_note(src, chip, period)
+            compare(v, f"{chip} огибающая период={period}")
     if not only or only == "scc":
         for period in (256, 512):
             scc_note(src, period)
