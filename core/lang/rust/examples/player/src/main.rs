@@ -1825,7 +1825,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         // выходит f = clock/(16*(N+1)) — вдвое выше расхожей формулы с
         // 32. Отдаём чипу полную частоту, иначе SCC играет октавой ниже.
         chipbox_write(0x21, (((scc_clk as u64 * 2) << 32) / CHIPBOX_CLK_HZ) as u32);
-        chipbox_write(0x22, 64); // scc_gain
+        chipbox_write(0x22, 50); // scc_gain
     }
     // OPL-семейство (YM3812/YM3526/YMF262) играет на нашем OPL3. Клок OPL3
     // номинально 14.32 МГц, но ядро тактуется master-клоком x2 (25.45 МГц
@@ -1893,7 +1893,10 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // по MAME (0.30 FM / 0.70 PCM с учётом нативных амплитуд ядер)
     let gains = if adpcm_clk != 0 { 64u32 } else { 0 } << 24
         | if pcm_clk != 0 { 34u32 } else { 0 } << 16
-        | if ay_clk != 0 || opn_clk != 0 { 64u32 } else { 0 } << 8
+        // AY на 128: на музыке MSX наш AY отставал от эталона на 6.3 дБ
+        // при огибающей 0.99 — частота и шкала громкости совпадают точно,
+        // не хватало только усиления. Гейн общий с SSG у OPN.
+        | if ay_clk != 0 || opn_clk != 0 { 128u32 } else { 0 } << 8
         | if ym_clk != 0 { 64u32 } else { 0 };
     chipbox_write(6, gains);
     // {opl_gain, sid_gain, gb_gain, apu_gain}. У VGM-AdLib регистры громкости
