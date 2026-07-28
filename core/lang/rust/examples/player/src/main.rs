@@ -193,6 +193,31 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.ym3812 != 0 { add("OPL2"); }
     if c.ym3526 != 0 { add("OPL"); }
     if c.gb_dmg != 0 { add("GB APU"); }
+    if c.huc6280 != 0 { add("HuC6280"); }
+    if c.ym2608 != 0 { add("YM2608"); }
+    if c.ym2203 != 0 { add("YM2203"); }
+    // Объявленное, но не звучащее — с пометкой. Пустая строка чипов у
+    // всего PC Engine была именно из-за пропущенных выше трёх, а про
+    // эти лучше сказать прямо, чем сделать вид, что их нет.
+    let mut silent = String::new();
+    let mut off = |name: &str| {
+        if !silent.is_empty() {
+            silent.push('/');
+        }
+        silent.push_str(name);
+    };
+    if c.pwm != 0 { off("PWM"); }
+    if c.upd7759 != 0 { off("uPD7759"); }
+    if c.wonderswan != 0 { off("WonderSwan"); }
+    if c.fds { off("FDS"); }
+    if !silent.is_empty() {
+        if !chips.is_empty() {
+            chips.push(' ');
+        }
+        chips.push_str("(no ");
+        chips.push_str(&silent);
+        chips.push(')');
+    }
     let system = if c.ym2612 != 0 {
         "Sega Mega Drive"
     } else if c.ym2151 != 0 && c.sega_pcm != 0 {
@@ -205,10 +230,16 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
         "PC / AdLib"
     } else if c.nes_apu != 0 {
         "Famicom / NES"
+    } else if c.huc6280 != 0 {
+        "PC Engine"
+    } else if c.ym2608 != 0 || c.ym2203 != 0 {
+        "NEC PC-88 / PC-98"
     } else if c.sn76489 != 0 {
         "Sega Master System"
     } else if c.gb_dmg != 0 {
         "Game Boy"
+    } else if c.wonderswan != 0 {
+        "Bandai WonderSwan"
     } else if c.ym2151 != 0 {
         "Arcade"
     } else {
@@ -1772,9 +1803,18 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     };
 
     let (title, sub) = gd3_lines(data, &header);
-    let (system, chips) = vgm_desc(&header.clocks);
+    let (guessed, chips) = vgm_desc(&header.clocks);
+    // Имя системы у файла обычно написано в GD3 (строка 4), и оно точнее
+    // вывода по набору чипов: Pico и SG-1000 несут тот же SN76489, что и
+    // Master System, и подписывались им же. Вывод по чипам оставлен
+    // запасным — у части рипов тег пуст.
+    let system = header
+        .gd3_offset
+        .and_then(|o| Gd3::parse(data, o))
+        .and_then(|g| gd3_field(&g, 4))
+        .unwrap_or_else(|| guessed.into());
     let draw = || {
-        ui::screen("VGM", title.as_deref().unwrap_or(""), &sub, system, &chips, None, pl.track());
+        ui::screen("VGM", title.as_deref().unwrap_or(""), &sub, &system, &chips, None, pl.track());
     };
     draw();
     if let Some(t) = &title {

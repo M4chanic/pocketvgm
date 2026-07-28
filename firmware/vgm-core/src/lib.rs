@@ -104,6 +104,14 @@ pub struct Clocks {
     pub ym3812: u32,
     pub ym3526: u32,
     pub ymf262: u32,
+    /// Чипы, которые мы не играем, но обязаны опознать: молчать о них
+    /// хуже, чем честно сказать, что часть звука не воспроизводится.
+    /// Адреса полей сняты с настоящих файлов, а не со спецификации.
+    pub pwm: u32,
+    pub upd7759: u32,
+    pub wonderswan: u32,
+    /// Дисковая приставка Famicom: старший бит клока NES APU
+    pub fds: bool,
 }
 
 /// Разобранный заголовок VGM. Владение данными остаётся у вызывающего.
@@ -187,6 +195,15 @@ impl Header {
             ym3812: clock_field(d, 0x50, hdr_end),
             ym3526: clock_field(d, 0x54, hdr_end),
             ymf262: clock_field(d, 0x5C, hdr_end),
+            // Не играем, но опознаём: молчать о таком звуке хуже, чем
+            // честно показать, что часть его не воспроизводится.
+            pwm: clock_field(d, 0x70, hdr_end),
+            upd7759: clock_field(d, 0x8C, hdr_end),
+            wonderswan: clock_field(d, 0xC0, hdr_end),
+            // Флаг дисковой приставки — старший бит поля NES APU, и
+            // читать его надо до маскирования: clock_field снимает
+            // старшие два бита, потому что там живут признаки чипа.
+            fds: hdr_end >= 0x88 && rd32(d, 0x84).unwrap_or(0) & 0x8000_0000 != 0,
         };
 
         Ok(Header {
@@ -610,5 +627,33 @@ mod tests {
         assert_eq!(c.ymf262, 14_318_180);
         assert_eq!(c.k051649, 1_789_772);
         assert_eq!(c.huc6280, 3_579_545);
+    }
+
+    /// Чипы, которые мы не играем, но обязаны назвать. Смещения сняты с
+    /// настоящих файлов из архива, а не со спецификации: PWM у 32X,
+    /// uPD7759 у Sega Pico, WonderSwan у своей приставки. Флаг дисковой
+    /// приставки Famicom живёт в старшем бите поля NES APU, который
+    /// clock_field снимает, — проверяем, что он всё-таки виден.
+    #[test]
+    fn declared_but_silent_chips_are_recognised() {
+        let mut v = alloc::vec![0u8; 0x100];
+        v[0..4].copy_from_slice(VGM_MAGIC);
+        v[0x08..0x0C].copy_from_slice(&0x0171u32.to_le_bytes());
+        v[0x34..0x38].copy_from_slice(&(0x100u32 - 0x34).to_le_bytes());
+        v[0x70..0x74].copy_from_slice(&23_011_360u32.to_le_bytes());
+        v[0x8C..0x90].copy_from_slice(&0x800F_4240u32.to_le_bytes());
+        v[0xC0..0xC4].copy_from_slice(&3_072_000u32.to_le_bytes());
+        v[0x84..0x88].copy_from_slice(&0x801B_4F4Du32.to_le_bytes());
+        v.push(0x66);
+        let eof = (v.len() - 4) as u32;
+        v[0x04..0x08].copy_from_slice(&eof.to_le_bytes());
+
+        let c = Header::parse(&v).unwrap().clocks;
+        assert_eq!(c.pwm, 23_011_360);
+        assert_eq!(c.upd7759, 1_000_000);
+        assert_eq!(c.wonderswan, 3_072_000);
+        assert!(c.fds);
+        // сам APU остаётся с честной частотой, без флага в старшем бите
+        assert_eq!(c.nes_apu, 1_789_773);
     }
 }
