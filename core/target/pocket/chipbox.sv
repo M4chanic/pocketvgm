@@ -654,6 +654,7 @@ module chipbox #(
 `endif
           6'h27: huc_phase_inc <= data_write;
           6'h28: huc_gain <= data_write[7:0];
+          6'h2C: md_lpf_mode <= data_write[1:0];
 `endif
 `ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
@@ -2010,6 +2011,49 @@ module chipbox #(
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
   endfunction
 
+`ifdef M4_HAS_HOME
+  // --------------------------------------------------------------------
+  // Выходной фильтр Mega Drive.
+  //
+  // У консоли в аналоговом тракте стоит фильтр нижних частот, и он есть у
+  // ОБЕИХ моделей, а не только у второй: первая режет около 3.1 кГц,
+  // вторая около 3.96 кГц. Ни у нас, ни у эталонной эмуляции его не было,
+  // поэтому по полосам мы с эталоном сходились, а на слух звучали ярче
+  // настоящей приставки — верх не заваливался, и звуки казались
+  // звенящими.
+  //
+  // Модель и коэффициенты сняты с genesis_lpf.v ядра Genesis для MiSTer
+  // (Gregory Hogan, MIT): разностное уравнение
+  //     y[n] = (B1*x[n-1] + B2*x[n-2] - A2*y[n-1]) >> 15
+  // Там она считается на 106528 Гц, у нас строб микса 55029 Гц, поэтому
+  // перенесены не числа, а полюс и ноль: p' = p^(fs1/fs2), и коэффициенты
+  // пересчитаны так, чтобы усиление на постоянном токе осталось единичным
+  // (B1 + B2 - A2 = 32768). Ноль у первой модели не совпадает с полюсом —
+  // это не чистый Butterworth, а подогнанный под измеренную АЧХ спад.
+  //
+  // Режим ставит фирмварь: он нужен файлам Mega Drive, но не OPN-рипам
+  // с PC-98, которые ходят через тот же jt12. 3 = фильтр выключен.
+  reg [1:0] md_lpf_mode = 2'd3;
+  reg signed [17:0] lpf_a2, lpf_b1, lpf_b2;
+  always @(*) begin
+    case (md_lpf_mode)
+      2'd0: begin lpf_a2 = -18'sd23346; lpf_b1 = 18'sd12756; lpf_b2 = -18'sd3334; end
+      2'd1: begin lpf_a2 = -18'sd21453; lpf_b1 = 18'sd15312; lpf_b2 = -18'sd3997; end
+      2'd2: begin lpf_a2 = -18'sd11511; lpf_b1 = 18'sd10629; lpf_b2 = 18'sd10628; end
+      default: begin lpf_a2 = 18'sd0; lpf_b1 = 18'sd0; lpf_b2 = 18'sd0; end
+    endcase
+  end
+
+  reg signed [15:0] lpf_x0_l = 0, lpf_x1_l = 0, lpf_y_l = 0;
+  reg signed [15:0] lpf_x0_r = 0, lpf_x1_r = 0, lpf_y_r = 0;
+  wire signed [33:0] lpf_acc_l = lpf_b1 * lpf_x0_l + lpf_b2 * lpf_x1_l - lpf_a2 * lpf_y_l;
+  wire signed [33:0] lpf_acc_r = lpf_b1 * lpf_x0_r + lpf_b2 * lpf_x1_r - lpf_a2 * lpf_y_r;
+
+  function automatic signed [15:0] sat16_34(input signed [33:0] v);
+    sat16_34 = v > 32767 ? 16'sd32767 : v < -32768 ? -16'sd32768 : v[15:0];
+  endfunction
+`endif
+
   always @(posedge clk) begin
     if (out_cnt == OUT_CNT_W'(OUT_DIV - 1)) begin
       out_cnt <= 0;
@@ -2029,8 +2073,22 @@ module chipbox #(
       hucr_hp_y <= (huc_right - hucr_hp_x) + (hucr_hp_y - hp_leak(hucr_hp_y));
       hucr_hp_x <= huc_right;
 `endif
+`ifdef M4_HAS_HOME
+      // Фильтр Mega Drive: состояние двигается тем же стробом, что и
+      // выход. y считается по прежним x0/x1/y — как в исходной модели,
+      // где новый отсчёт попадает в x0 в этом же такте.
+      lpf_y_l <= sat16_34(lpf_acc_l >>> 15);
+      lpf_x1_l <= lpf_x0_l;
+      lpf_x0_l <= sat16(mix_l);
+      lpf_y_r <= sat16_34(lpf_acc_r >>> 15);
+      lpf_x1_r <= lpf_x0_r;
+      lpf_x0_r <= sat16(mix_r);
+      chip_left <= md_lpf_mode == 2'd3 ? sat16(mix_l) : lpf_y_l;
+      chip_right <= md_lpf_mode == 2'd3 ? sat16(mix_r) : lpf_y_r;
+`else
       chip_left <= sat16(mix_l);
       chip_right <= sat16(mix_r);
+`endif
       chip_sample_toggle <= ~chip_sample_toggle;
     end else begin
       out_cnt <= out_cnt + 1'b1;

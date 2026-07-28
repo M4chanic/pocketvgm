@@ -1536,6 +1536,9 @@ int main(int argc, char** argv) {
     tb.wb(6, true, (adpcm_clk ? 64u : 0u) << 24 | (pcm_clk ? 34u : 0u) << 16
                  | ((ay_clk || opn_clk) ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
     tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 120u : 0u));
+    // Выходной ФНЧ Mega Drive: только для файлов с YM2612 — у OPN-рипов
+    // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
+    tb.wb(0x2C, true, fm_clk ? 0u : 3u);
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (scc_clk) {
         // Заголовок VGM несёт половину шинной частоты MSX: у эталона

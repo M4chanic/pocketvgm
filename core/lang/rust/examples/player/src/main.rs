@@ -1925,6 +1925,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         | if ay_clk != 0 || opn_clk != 0 { 64u32 } else { 0 } << 8
         | if ym_clk != 0 { 64u32 } else { 0 };
     chipbox_write(6, gains);
+    // Выходной фильтр Mega Drive (см. chipbox.sv): у консоли в тракте
+    // стоит ФНЧ, и он есть у обеих моделей. Включаем только там, где это
+    // действительно Mega Drive — у OPN-рипов с PC-98 тот же jt12, но
+    // никакого фильтра приставки в тракте нет. 0 = Model 1, 3 = выключен.
+    chipbox_write(0x2C, if fm_clk != 0 { 0 } else { 3 });
     // {opl_gain, sid_gain, gb_gain, apu_gain}. У VGM-AdLib регистры громкости
     // выкручены сильнее, чем у нашего MIDI-конвертера: на 64 выход клиппит
     // (проверено на Dune в симуляции), поэтому для VGM берём 16.
