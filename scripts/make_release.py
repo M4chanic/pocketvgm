@@ -97,6 +97,17 @@ def main():
     shutil.copy(ROOT / "scripts" / "pocketvgm_update.py", upd)
     upd.chmod(0o755)
 
+    # Версия плеера — та, что видна на титульном экране. Её легко
+    # забыть: core.json правится руками, а Cargo.toml живёт отдельно, и
+    # 0.2.1 уехал с надписью 0.1.19 на экране.
+    cargo = (ROOT / "core/lang/rust/examples/player/Cargo.toml").read_text()
+    pv = next((l.split('"')[1] for l in cargo.splitlines()
+               if l.startswith("version =")), "?")
+    print(f"  {'плеер (титульный экран)':26} version {pv}  "
+          f"{'ок' if pv == a.version else 'НЕ СОВПАДАЕТ'}", flush=True)
+    if pv != a.version:
+        sys.exit("поправьте version в Cargo.toml плеера, дождитесь сборки CI и повторите")
+
     # Версия в core.json должна совпадать с тем, что просили
     for cj in sorted(cores.glob("*/core.json")):
         v = json.loads(cj.read_text())["core"]["metadata"]["version"]
