@@ -1637,6 +1637,9 @@ int main(int argc, char** argv) {
 
     uint32_t rate = (uint32_t)((double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ) + 0.5);
     write_wav_file(out, tb.pcm, rate);
+    // Счётчик выборок DMC: отличает «канал молчит, потому что нечего
+    // играть» от «канал просит данные, а они не приходят»
+    if (nes_clk) fprintf(stderr, "DMC: выборок из памяти %u\n", tb.wb(0x19, false) >> 16);
     fprintf(stderr, "готово: %zu сэмплов @ %u Гц → %s\n", tb.pcm.size() / 2, rate, out);
     return 0;
 }
