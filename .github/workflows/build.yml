@@ -51,7 +51,7 @@ jobs:
         # экономия Actions-минут: обычный пуш — один сид; полная
         # матрица — ручной запуск workflow_dispatch с seeds=true
         seed: ${{ (github.event_name == 'workflow_dispatch' && inputs.seeds) && fromJSON('[1, 7, 23]') || fromJSON('[23]') }}
-        # два битстрима в одном пакете ядра (APF: до 8 .rev + variants.json)
+        # два ядра, по битстриму в каждом: механизм вариантов APF не работает
         variant: [home, arcade]
     runs-on: ubuntu-latest
     steps:
@@ -212,7 +212,10 @@ jobs:
         run: |
           mkdir -p dist
           cp -r core/pkg/pocket/* dist/
-          cp pocketvgm*.rev dist/Cores/M4chanic.PocketVGM/
+          # Консольному ядру нужен только его битстрим: механизм вариантов
+          # у openFPGA не работает, второй элемент cores[] был недостижим,
+          # а полтора мегабайта в архиве лежали зря
+          cp pocketvgm.rev dist/Cores/M4chanic.PocketVGM/
           # аркады — отдельное ядро, и свой битстрим ему нужен у себя:
           # без него Pocket отвечает Load error in "core"
           cp pocketvgm_a.rev dist/Cores/M4chanic.PocketVGMArcade/arcade.rev

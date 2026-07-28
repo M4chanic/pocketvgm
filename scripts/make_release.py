@@ -83,8 +83,9 @@ def main():
     # Раскладка ровно как в джобе package
     shutil.copytree(ROOT / "core" / "pkg" / "pocket", dist)
     cores = dist / "Cores"
-    for rev in art.glob("pocketvgm*.rev"):
-        shutil.copy(rev, cores / "M4chanic.PocketVGM" / rev.name)
+    # Консольному ядру — только его битстрим: механизм вариантов у
+    # openFPGA не работает, и второй элемент cores[] был недостижим
+    shutil.copy(art / "pocketvgm.rev", cores / "M4chanic.PocketVGM" / "pocketvgm.rev")
     shutil.copy(art / "pocketvgm_a.rev",
                 cores / "M4chanic.PocketVGMArcade" / "arcade.rev")
     common = dist / "Assets" / "pocketvgm" / "common"
