@@ -127,6 +127,33 @@ def correlation(a, b):
     return cov / math.sqrt(va * vb)
 
 
+def correlation_best(a, b, max_lag=12):
+    """Лучшая корреляция огибающих и сдвиг, на котором она получена.
+
+    Считать в лоб, от нуля, нельзя: у форматов, где играет код рипа
+    (NSF, GBS, SID), наш старт не обязан совпадать с эталонным. На Final
+    Fantasy мы отставали на 100 мс и получали -0.47 — метрика показывала
+    «перевёрнутые акценты» там, где со сдвигом выходит +0.96.
+
+    Постоянный сдвиг так снимается, а неверный темп — нет: он копится по
+    ходу трека, и одним сдвигом его не исправить, так что метрика
+    остаётся честной.
+
+    Возвращает (корреляция, сдвиг в шагах огибающей; плюс — мы позже).
+    """
+    best = (-2.0, 0)
+    for lag in range(-max_lag, max_lag + 1):
+        x = a[lag:] if lag > 0 else a
+        y = b if lag > 0 else b[-lag:]
+        n = min(len(x), len(y))
+        if n < 8:
+            continue
+        c = correlation(x[:n], y[:n])
+        if c > best[0]:
+            best = (c, lag)
+    return best
+
+
 def db(x, ref):
     if ref <= 0 or x <= 0:
         return float("-inf") if x <= 0 else float("inf")
@@ -172,8 +199,9 @@ def main():
         if flag:
             worst.append((lo, hi, d))
 
-    c = correlation(envelope(ref, ref_rate), envelope(our, our_rate))
-    print(f"\nогибающая: корреляция {c:+.2f}")
+    c, lag = correlation_best(envelope(ref, ref_rate), envelope(our, our_rate))
+    print(f"\nогибающая: корреляция {c:+.2f}"
+          + (f" при сдвиге {lag * 50:+d} мс" if lag else ""))
 
     print("\nвывод:")
     if abs(db(o_rms, r_rms)) > 6:

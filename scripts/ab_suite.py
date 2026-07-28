@@ -177,9 +177,14 @@ def main():
                 d = ab.db(op, rp)
                 if abs(d) > abs(worst):
                     worst, wband, wshare = d, f"{lo}-{hi}", max(rp, op)
-            corr = ab.correlation(ab.envelope(refs, rrate), ab.envelope(ours, orate))
+            # сдвиг ищется, а не считается от нуля: у NSF/GBS/SID старт
+            # не обязан совпадать с эталонным, и постоянная задержка
+            # раньше читалась как перевёрнутые акценты
+            corr, lag = ab.correlation_best(ab.envelope(refs, rrate),
+                                            ab.envelope(ours, orate))
+            note = f" (сдвиг {lag * 50:+d} мс)" if lag else ""
             print(f"{chip:10} {t.name[:30]:30} {lvl:+7.1f}д {wband:>9} {worst:+5.1f}д "
-                  f"{corr:+6.2f}  {verdict(lvl, worst, corr, wshare)}", flush=True)
+                  f"{corr:+6.2f}  {verdict(lvl, worst, corr, wshare)}{note}", flush=True)
     return 0
 
 
