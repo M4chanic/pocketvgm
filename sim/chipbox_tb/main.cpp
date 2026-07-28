@@ -1534,7 +1534,7 @@ int main(int argc, char** argv) {
     // Гейны: неиспользуемые чипы глушим (idle-DC/шум не попадает в микс);
     // SegaPCM 34/64 — баланс Out Run по MAME (0.30 FM / 0.70 PCM)
     tb.wb(6, true, (adpcm_clk ? 64u : 0u) << 24 | (pcm_clk ? 34u : 0u) << 16
-                 | ((ay_clk || opn_clk) ? 128u : 0u) << 8 | (ym_clk ? 64u : 0u));
+                 | ((ay_clk || opn_clk) ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
     tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 120u : 0u));
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (scc_clk) {
@@ -1543,7 +1543,7 @@ int main(int argc, char** argv) {
         // f = clock/(16*(N+1)) — вдвое выше расхожей формулы с 32. Чипу
         // отдаём полную частоту, иначе весь SCC играет октавой ниже.
         tb.wb(0x21, true, (uint32_t)((double)scc_clk * 2 / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(0x22, true, 50);
+        tb.wb(0x22, true, 64);
     }
     if (k060_clk) {
         tb.wb(0x25, true, (uint32_t)((double)k060_clk / CLK_HZ * 4294967296.0 + 0.5));
