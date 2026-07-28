@@ -195,6 +195,9 @@ module chipbox #(
 `endif
   reg nsf_mode = 0;
   reg gbs_mode = 0;
+  // Режим прямой записи в APU Game Boy (VGM): CPU и ROM не нужны, но
+  // сам APU обязан выйти из сброса, иначе записи уходят в никуда.
+  reg gb_apu_mode = 0;
   reg cpu_run = 0;
   reg [31:0] play_phase_inc = 0;
   reg stub_wr = 0;
@@ -635,6 +638,7 @@ module chipbox #(
             pause_r <= data_write[5];
             ff_r <= data_write[6];
             vrc6_en <= data_write[7];
+            gb_apu_mode <= data_write[8];
             // софт-сброс обязан чистить и запись: rd_ptr обнуляется в
             // секвенсоре, и без обнуления wr_ptr FIFO «воскресает» со
             // старым содержимым кольца (переигрывание прошлого трека)
@@ -1654,15 +1658,28 @@ module chipbox #(
   end
 
   wire gbs_reset = chip_reset || !gbs_mode || !cpu_run;
+  // APU живёт и в режиме VGM, где рипа с кодом нет. Сброс SM83 и ROM
+  // при этом остаётся прежним: процессор в таком файле не нужен.
+  wire gb_apu_reset = chip_reset || !(gbs_mode ? cpu_run : gb_apu_mode);
   wire [22:0] gbs_rom_addr;
   wire gbs_rom_req_toggle;
   reg [7:0] gbs_rom_data = 0;
   wire [15:0] gb_left;
   wire [15:0] gb_right;
 
+  // Прямая запись в APU Game Boy для VGM-файлов: адрес и данные держим
+  // до смены тоггла, домен gb_clk ловит фронт. Ждать подтверждения не
+  // нужно — секвенсор выдерживает паузу, а один такт gb_clk это около
+  // четырнадцати тактов clk.
+  reg gb_ext_toggle = 0;
+  reg [7:0] gb_ext_addr = 0;
+  reg [7:0] gb_ext_data = 0;
+  reg [4:0] gb_ext_wait = 0;
+
   gbsbox gbs (
       .gb_clk(gb_clk),
       .rst(gbs_reset),
+      .apu_rst(gb_apu_reset),
 
       .sys_clk(clk),
       .stub_wr(gb_stub_wr),
@@ -1673,6 +1690,10 @@ module chipbox #(
       .rom_dbg_addr(gb_rom_dbg_addr),
       .rom_dbg_data(gb_rom_dbg_data),
       .play_tick_toggle(play_toggle),
+
+      .snd_ext_toggle(gb_ext_toggle),
+      .snd_ext_addr(gb_ext_addr),
+      .snd_ext_data(gb_ext_data),
 
       .rom_addr(gbs_rom_addr),
       .rom_req_toggle(gbs_rom_req_toggle),
@@ -2145,6 +2166,7 @@ module chipbox #(
   localparam EXT_OKIM = 4'h1; // OKIM6295
   localparam EXT_K060 = 4'h2; // Konami K053260
   localparam EXT_HUC  = 4'h3; // HuC6280 PSG (PC Engine)
+  localparam EXT_GB   = 4'h4; // прямая запись в APU Game Boy (VGM)
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -2166,6 +2188,7 @@ module chipbox #(
   localparam S_G_POLL_D = 5'd18;
   localparam S_G_WR_D = 5'd19;
   localparam S_SN_WR = 5'd20;
+  localparam S_GBEXT = 5'd25;  // выдержка после записи в APU Game Boy
   localparam S_SCC_A = 5'd21;  // строб SCC ассерчен, ждём cen_scc
   localparam S_SCC_Z = 5'd22;  // строб снят, ждём восстановления
   localparam S_OKIM = 5'd23;   // импульс wrn OKIM6295 (один такт)
@@ -2367,6 +2390,13 @@ module chipbox #(
             OP_EXT: begin
               case (fifo_q[27:24])
 `ifdef M4_HAS_HOME
+                EXT_GB: begin
+                  gb_ext_addr <= fifo_q[15:8];
+                  gb_ext_data <= fifo_q[7:0];
+                  gb_ext_toggle <= ~gb_ext_toggle;
+                  gb_ext_wait <= 5'd31;
+                  state <= S_GBEXT;
+                end
                 EXT_HUC: begin
                   huc_addr <= fifo_q[11:8];
                   huc_din  <= fifo_q[7:0];
@@ -2491,6 +2521,12 @@ module chipbox #(
 `ifdef M4_HAS_HOME
         // SCC: держим CS/WR ассерченными 2 такта cen_scc (чип ловит
         // переход 1->0 по своему клоку), затем снимаем и ждём столько же
+        // Пауза, чтобы домен gb_clk успел увидеть фронт тоггла до
+        // следующей записи: одна его тактовая длиннее нашей в разы.
+        S_GBEXT: begin
+          if (gb_ext_wait == 0) state <= S_IDLE;
+          else gb_ext_wait <= gb_ext_wait - 1'b1;
+        end
         S_SCC_A: begin
           if (cen_scc) scc_wait <= scc_wait + 1'b1;
           if (scc_wait >= 4'd2) begin

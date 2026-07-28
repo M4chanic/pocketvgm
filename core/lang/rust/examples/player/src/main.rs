@@ -285,6 +285,7 @@ const OP_OPL3: u32 = 0xC000_0000;
 const OP_EXT: u32 = 0xF000_0000;
 const EXT_SCC: u32 = 0x0000_0000;
 const EXT_HUC: u32 = 0x0300_0000;
+const EXT_GB: u32 = 0x0400_0000;
 const EXT_OKIM: u32 = 0x0100_0000;
 const EXT_K060: u32 = 0x0200_0000;
 
@@ -1843,6 +1844,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         && header.clocks.huc6280 == 0
         && header.clocks.ym2203 == 0
         && header.clocks.ym2608 == 0
+        && header.clocks.gb_dmg == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
@@ -1975,9 +1977,16 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // (проверено на Dune в симуляции), поэтому для VGM берём 16.
     chipbox_write(
         0xC,
-        if opl_clk != 0 { 16u32 } else { 0 } << 24 | if nes_clk != 0 { 120u32 } else { 0 },
+        if opl_clk != 0 { 16u32 } else { 0 } << 24 | if nes_clk != 0 { 120u32 } else { 0 }
+            | if header.clocks.gb_dmg != 0 { 64u32 } else { 0 } << 8,
     );
     ctrl_reset();
+    // Game Boy в VGM: рипа с кодом нет, играет поток записей в APU.
+    // Бит 8 выводит звуковую часть из сброса, не поднимая SM83. Строго
+    // после ctrl_reset: тот обнуляет слово режима целиком.
+    if header.clocks.gb_dmg != 0 {
+        ctrl_mode(1 << 8);
+    }
 
     let mut sink = CmdSink::new();
     // SCC: разблокировать регистры звука (BR2=0x3F) первой командой FIFO
@@ -2027,6 +2036,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             Ok(Event::Write { chip: Chip::Opl, port, addr, data }) => {
                 // OPL2/OPL3 играем на нашем OPL3: port = банк регистров
                 sink.push(OP_OPL3 | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
+            }
+            Ok(Event::Write { chip: Chip::GbDmg, addr, data, .. }) => {
+                // Регистры APU Game Boy $FF10-$FF3F: в VGM адрес идёт
+                // смещением от $FF10, чипу нужен полный младший байт.
+                sink.push(OP_EXT | EXT_GB | ((addr as u32) + 0x10) << 8 | data as u32);
             }
             Ok(Event::Write { chip: Chip::HuC6280, addr, data, .. }) => {
                 sink.push(OP_EXT | EXT_HUC | ((addr & 0xF) as u32) << 8 | data as u32);

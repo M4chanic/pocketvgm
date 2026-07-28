@@ -17,6 +17,9 @@
 module gbsbox (
     input wire gb_clk,
     input wire rst,
+    // Отдельный сброс APU: в режиме VGM процессор не нужен и стоит в
+    // сбросе, а звуковая часть обязана работать.
+    input wire apu_rst,
 
     // запись стаба из clk_sys (истинная двухпортовая BRAM)
     input wire sys_clk,
@@ -26,6 +29,15 @@ module gbsbox (
 
     // play-тик (toggle из clk_sys, синхронизируется здесь)
     input wire play_tick_toggle,
+
+    // Прямая запись в звуковые регистры из clk_sys: этим играются
+    // VGM-файлы Game Boy, где рипа с кодом нет вовсе, а есть поток
+    // записей в APU. Данные держатся снаружи до смены тоггла, здесь
+    // ловится только фронт. SM83 в этом режиме стоит в сбросе, так что
+    // за шину они не спорят.
+    input wire snd_ext_toggle,
+    input wire [7:0] snd_ext_addr,
+    input wire [7:0] snd_ext_data,
 
     // ROM-запросы к PSRAM (quasi-static, домен gb_clk -> clk_sys)
     output reg [22:0] rom_addr = 0,
@@ -80,14 +92,23 @@ module gbsbox (
   // APU
   wire [7:0] snd_dout;
 
+  // Внешняя запись: тоггл из clk_sys ловится в домене gb_clk
+  reg [2:0] ext_sync = 0;
+  wire ext_wr = ext_sync[2] ^ ext_sync[1];
+  always @(posedge gb_clk) ext_sync <= {ext_sync[1:0], snd_ext_toggle};
+
+  wire [15:0] apu_a = ext_wr ? {8'hFF, snd_ext_addr} : cpu_a;
+  wire [7:0] apu_din = ext_wr ? snd_ext_data : cpu_dout;
+  wire apu_wr = ext_wr | cpu_wr;
+
   sound apu (
       .clk(gb_clk),
-      .rst(rst),
-      .a(cpu_a),
+      .rst(apu_rst),
+      .a(apu_a),
       .dout(snd_dout),
-      .din(cpu_dout),
+      .din(apu_din),
       .rd(cpu_rd),
-      .wr(cpu_wr),
+      .wr(apu_wr),
       .left(snd_left),
       .right(snd_right),
       .ch1_level(),

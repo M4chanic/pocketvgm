@@ -1355,6 +1355,7 @@ int main(int argc, char** argv) {
     uint32_t adpcm_clk = hdr_end >= 0x94 ? rd32(d, 0x90) & 0x3FFFFFFF : 0;
     uint8_t adpcm_flags = hdr_end >= 0x95 ? d[0x94] : 0;
     uint32_t nes_clk = hdr_end >= 0x88 ? rd32(d, 0x84) & 0x3FFFFFFF : 0;
+    uint32_t gb_clk_hdr = rd32(d, 0x80) & 0x3FFFFFFF;
     uint32_t fm_clk = rd32(d, 0x2C) & 0x3FFFFFFF;
     uint32_t sn_clk = rd32(d, 0x0C) & 0x3FFFFFFF;
     bool sn_dual = (rd32(d, 0x0C) & 0x40000000) != 0;
@@ -1377,7 +1378,7 @@ int main(int argc, char** argv) {
     uint32_t opn_clk = ym2608_clk ? ym2608_clk : ym2203_clk;
 
     if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk
-        && !scc_clk && !k060_clk && !huc_clk && !opn_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
+        && !scc_clk && !k060_clk && !huc_clk && !opn_clk && !gb_clk_hdr) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
 
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
@@ -1398,6 +1399,8 @@ int main(int argc, char** argv) {
     while (run && pos < d.size()) {
         uint8_t cmd = d[pos++];
         if (cmd == 0x54) { cmds.push_back(0x10000000u | d[pos] << 8 | d[pos+1]); pos += 2; }
+        // Game Boy: регистры APU $FF10-$FF3F, в VGM адрес отсчитан от $FF10
+        else if (cmd == 0xB3) { cmds.push_back(0xF4000000u | (uint32_t)(d[pos] + 0x10) << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x52) { cmds.push_back(0xD0000000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x53) { cmds.push_back(0xD0000000u | 0x10000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x4F || cmd == 0x50 || cmd == 0x30 || cmd == 0x3F) {
@@ -1552,7 +1555,7 @@ int main(int argc, char** argv) {
     // SegaPCM 34/64 — баланс Out Run по MAME (0.30 FM / 0.70 PCM)
     tb.wb(6, true, (adpcm_clk ? 64u : 0u) << 24 | (pcm_clk ? 34u : 0u) << 16
                  | ((ay_clk || opn_clk) ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
-    tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 120u : 0u));
+    tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 120u : 0u) | (gb_clk_hdr ? 64u : 0u) << 8);
     // Выходной ФНЧ Mega Drive: только для файлов с YM2612 — у OPN-рипов
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
     tb.wb(0x2C, true, fm_clk ? 0u : 3u);
@@ -1599,6 +1602,9 @@ int main(int argc, char** argv) {
     // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
     if (scc_clk) tb.wb(0, true, 0xF0000000u | (7u << 16));
     for (int i = 0; i < 2048; i++) tb.step(); // дать сбросу пройти
+    // Game Boy в VGM: бит 8 выводит APU из сброса, не поднимая SM83.
+    // Только ПОСЛЕ сброса — он пишет тот же регистр и обнулил бы бит.
+    if (gb_clk_hdr) tb.wb(2, true, 1u << 8);
 
     // Загрузка сэмпл-ROM и ADPCM-банка через WB (как это будет делать фирмварь)
     for (auto& b : rom_blocks) {
