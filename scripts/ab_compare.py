@@ -31,7 +31,7 @@
 запись уходит в out.wav длиной по умолчанию.
 
 Использование:
-    python3 scripts/ab_compare.py эталон.wav наш.wav [-t секунды]
+    python3 scripts/ab_compare.py эталон.wav наш.wav [-t секунды] [-s пропуск]
 """
 
 import argparse
@@ -165,10 +165,24 @@ def main():
     ap.add_argument("reference")
     ap.add_argument("ours")
     ap.add_argument("-t", type=float, default=5.0, help="секунд для анализа")
+    ap.add_argument("-s", type=float, default=0.0,
+                    help="пропустить секунд от начала (см. ниже про переходный процесс)")
     a = ap.parse_args()
 
-    ref, ref_rate = read_wav(a.reference, a.t)
-    our, our_rate = read_wav(a.ours, a.t)
+    # Пропуск начала. Включение канала даёт скачок выхода, и на коротком
+    # окне он забивает всё остальное: у теста DMC на скорости 4 первые
+    # две десятых секунды давали «77% энергии в 40-80 Гц и тон на 39 дБ
+    # ниже эталона», а то же окно со сдвигом 0.2 с — совпадение в
+    # пределах децибела. На эту грабельку я наступал пять раз за день.
+    ref, ref_rate = read_wav(a.reference, a.s + a.t)
+    our, our_rate = read_wav(a.ours, a.s + a.t)
+    if a.s > 0:
+        ref = ref[int(a.s * ref_rate):]
+        our = our[int(a.s * our_rate):]
+        for xs in (ref, our):
+            if xs:
+                m = sum(xs) / len(xs)
+                xs[:] = [x - m for x in xs]
     if not ref or not our:
         sys.exit("пустой файл")
 
