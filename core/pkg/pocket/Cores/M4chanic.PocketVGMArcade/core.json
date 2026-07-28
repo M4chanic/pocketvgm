@@ -9,8 +9,8 @@
       "description": "Chiptune jukebox, arcade chips. Companion to PocketVGM",
       "author": "M4chanic",
       "url": "https://github.com/M4chanic/pocketvgm",
-      "version": "0.2.0",
-      "date_release": "2026-07-27"
+      "version": "0.2.1",
+      "date_release": "2026-07-28"
     },
     "framework": {
       "target_product": "Analogue Pocket",
