@@ -11,7 +11,11 @@
      g++ -O2 -I gme -I gme/demo -o gme2wav scripts/gme2wav.c gme/demo/Wave_Writer.cpp \
          -L gme/build/gme -lgme -Wl,-rpath,$PWD/gme/build/gme
 
-   Запуск: gme2wav файл подпесня секунды выход.wav
+   Запуск: gme2wav файл подпесня секунды выход.wav [маска_глушения]
+   Маска — биты голосов, которые надо заглушить (для NSF: 1 меандр1,
+   2 меандр2, 4 треугольник, 8 шум, 16 DMC). Нужна, чтобы понять,
+   какой голос у нас потерян: глушим его у эталона и смотрим, стал
+   ли эталон похож на наш выход.
    Подпесни считаются с единицы — как в заголовке GBS и у gbsplay. На
    разной нумерации я уже обжёгся: сравнение шло по разным мелодиям и
    выглядело как дефект звука.
@@ -22,13 +26,15 @@
 #include <stdlib.h>
 
 int main(int argc, char** argv) {
-    if (argc < 5) { fprintf(stderr, "gme2wav файл подпесня секунды выход.wav\n"); return 2; }
+    if (argc < 5) { fprintf(stderr, "gme2wav файл подпесня секунды выход.wav [маска]\n"); return 2; }
+    int mute = argc >= 6 ? (int)strtol(argv[5], 0, 0) : 0;
     long rate = 44100;
     int track = atoi(argv[2]) - 1; if (track < 0) track = 0;
     double secs = atof(argv[3]);
     Music_Emu* emu;
     gme_err_t err = gme_open_file(argv[1], &emu, rate);
     if (err) { fprintf(stderr, "gme: %s\n", err); return 1; }
+    if (mute) gme_mute_voices(emu, mute);
     err = gme_start_track(emu, track);
     if (err) { fprintf(stderr, "gme: %s\n", err); return 1; }
     wave_open(rate, argv[4]);
