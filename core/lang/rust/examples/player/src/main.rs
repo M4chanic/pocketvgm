@@ -1995,6 +1995,12 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     let mut adpcm_bank_size: u32 = 0;
     // Банк DAC-сэмплов YM2612 (data-блоки 0x00), читается фирмварью
     let mut dac_bank: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // Затухание каждого канала по двум сторонам T6W28 (Neo Geo Pocket).
+    // У нас один jt89, поэтому стороны сводятся в моно по громкой:
+    // 0 — полная громкость, 15 — тишина, значит берём минимум. Простое
+    // «играть только сторону 0» потеряло бы голоса, отведённые вправо.
+    let mut sn_att = [[15u8; 4]; 2];
+    let sn_dual = header.clocks.sn_dual;
 
     loop {
         match reader.next_event() {
@@ -2004,8 +2010,19 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             Ok(Event::Write { chip: Chip::Ym2612, port, addr, data }) => {
                 sink.push(OP_FM2612 | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
             }
-            Ok(Event::Write { chip: Chip::Sn76489, data, .. }) => {
-                sink.push(OP_SN | data as u32);
+            Ok(Event::Write { chip: Chip::Sn76489, port, data, .. }) => {
+                // Защёлка громкости: бит 7 задаёт регистр, бит 4 отличает
+                // громкость от тона. Такие записи сводим по двум сторонам,
+                // остальное (частоты, вторые байты данных, шум) шлём как
+                // есть — их пишет только сторона 0.
+                if sn_dual && data & 0x90 == 0x90 {
+                    let ch = (data >> 5 & 3) as usize;
+                    sn_att[port as usize & 1][ch] = data & 0x0F;
+                    let att = sn_att[0][ch].min(sn_att[1][ch]);
+                    sink.push(OP_SN | 0x90 | (ch as u32) << 5 | att as u32);
+                } else if port == 0 {
+                    sink.push(OP_SN | data as u32);
+                }
             }
             Ok(Event::Write { chip: Chip::Opl, port, addr, data }) => {
                 // OPL2/OPL3 играем на нашем OPL3: port = банк регистров

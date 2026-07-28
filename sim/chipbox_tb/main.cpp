@@ -1357,6 +1357,8 @@ int main(int argc, char** argv) {
     uint32_t nes_clk = hdr_end >= 0x88 ? rd32(d, 0x84) & 0x3FFFFFFF : 0;
     uint32_t fm_clk = rd32(d, 0x2C) & 0x3FFFFFFF;
     uint32_t sn_clk = rd32(d, 0x0C) & 0x3FFFFFFF;
+    bool sn_dual = (rd32(d, 0x0C) & 0x40000000) != 0;
+    uint8_t sn_att[2][4] = {{15,15,15,15},{15,15,15,15}};
     size_t pos = data_off;
     // OPL-семейство: YM3812 (0x50), YM3526 (0x54), YMF262 (0x5C).
     // OPL2-файлы задают 3.58 МГц — ядро тактуется x4 (как в фирмвари).
@@ -1398,7 +1400,22 @@ int main(int argc, char** argv) {
         if (cmd == 0x54) { cmds.push_back(0x10000000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x52) { cmds.push_back(0xD0000000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x53) { cmds.push_back(0xD0000000u | 0x10000u | d[pos] << 8 | d[pos+1]); pos += 2; }
-        else if (cmd == 0x4F || cmd == 0x50) { cmds.push_back(0xE0000000u | d[pos]); pos += 1; }
+        else if (cmd == 0x4F || cmd == 0x50 || cmd == 0x30 || cmd == 0x3F) {
+            // 0x30/0x3F — вторая сторона T6W28 (Neo Geo Pocket): стерео с
+            // раздельной громкостью, а не второй чип. jt89 у нас один,
+            // поэтому стороны сводятся по громкой (0 = максимум, 15 =
+            // тишина), иначе отведённые вправо голоса пропали бы.
+            uint8_t v = d[pos]; pos += 1;
+            int side = (cmd == 0x30 || cmd == 0x3F) ? 1 : 0;
+            if (sn_dual && (v & 0x90) == 0x90) {
+                int ch = (v >> 5) & 3;
+                sn_att[side][ch] = v & 0x0F;
+                uint8_t a = sn_att[0][ch] < sn_att[1][ch] ? sn_att[0][ch] : sn_att[1][ch];
+                cmds.push_back(0xE0000000u | 0x90u | (unsigned)ch << 5 | a);
+            } else if (side == 0) {
+                cmds.push_back(0xE0000000u | v);
+            }
+        }
         // OPL-семейство на OPL3: YM3812/YM3526/YMF262 п0 — банк 0, YMF262 п1 — банк 1
         else if (cmd == 0x5A || cmd == 0x5B || cmd == 0x5E) {
             cmds.push_back(0xC0000000u | d[pos] << 8 | d[pos+1]); pos += 2;

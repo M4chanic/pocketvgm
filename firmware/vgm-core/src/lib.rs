@@ -112,6 +112,10 @@ pub struct Clocks {
     pub wonderswan: u32,
     /// Дисковая приставка Famicom: старший бит клока NES APU
     pub fds: bool,
+    /// Второй SN76489 (бит 30) и вариант T6W28 (бит 31). На Neo Geo
+    /// Pocket выставлены оба: это один чип с двумя сторонами стерео.
+    pub sn_dual: bool,
+    pub sn_t6w28: bool,
 }
 
 /// Разобранный заголовок VGM. Владение данными остаётся у вызывающего.
@@ -204,6 +208,8 @@ impl Header {
             // читать его надо до маскирования: clock_field снимает
             // старшие два бита, потому что там живут признаки чипа.
             fds: hdr_end >= 0x88 && rd32(d, 0x84).unwrap_or(0) & 0x8000_0000 != 0,
+            sn_dual: rd32(d, 0x0C).unwrap_or(0) & 0x4000_0000 != 0,
+            sn_t6w28: rd32(d, 0x0C).unwrap_or(0) & 0x8000_0000 != 0,
         };
 
         Ok(Header {
@@ -256,6 +262,10 @@ impl<'a> Reader<'a> {
         let cmd = self.u8()?;
         let ev = match cmd {
             0x4F | 0x50 => Event::Write { chip: Chip::Sn76489, port: 0, addr: 0, data: self.u8()? },
+            // Второй SN76489. На Neo Geo Pocket это не второй чип, а
+            // вторая половина T6W28: стороны стерео с раздельной
+            // громкостью. Все файлы NGP падали здесь с UnknownCommand.
+            0x30 | 0x3F => Event::Write { chip: Chip::Sn76489, port: 1, addr: 0, data: self.u8()? },
             0x51 => self.reg_write(Chip::Ym2413, 0)?,
             0x52 => self.reg_write(Chip::Ym2612, 0)?,
             0x53 => self.reg_write(Chip::Ym2612, 1)?,
