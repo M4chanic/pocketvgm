@@ -323,6 +323,35 @@ fn vu_tick(last: &mut u32) {
         *last = t;
         let v = chipbox_read(0x1A);
         ui::vu(v as u16, (v >> 16) as u16);
+        md_filter_tick();
+    }
+}
+
+/// Режим выходного фильтра Mega Drive из меню ядра (interact.json,
+/// переменная по адресу 0x1000_0100): 0 Model 1, 1 Model 2, 2
+/// минимальный, 3 выключен.
+fn md_filter_mode() -> u32 {
+    let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
+    p.APF_INTERACT.interact0.read().bits() & 3
+}
+
+/// Фильтр включён только у файлов Mega Drive, поэтому режим из меню
+/// применяется лишь пока играет такой файл. Перечитываем его на ходу:
+/// сравнивать режимы на слух иначе пришлось бы, переключая трек.
+static MD_FILTER_ON: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static MD_FILTER_CUR: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(3);
+
+fn md_filter_tick() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !MD_FILTER_ON.load(Relaxed) {
+        return;
+    }
+    let m = md_filter_mode();
+    if m != MD_FILTER_CUR.load(Relaxed) {
+        MD_FILTER_CUR.store(m, Relaxed);
+        chipbox_write(0x2C, m);
     }
 }
 
@@ -1971,7 +2000,14 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // стоит ФНЧ, и он есть у обеих моделей. Включаем только там, где это
     // действительно Mega Drive — у OPN-рипов с PC-98 тот же jt12, но
     // никакого фильтра приставки в тракте нет. 0 = Model 1, 3 = выключен.
-    chipbox_write(0x2C, if fm_clk != 0 { 0 } else { 3 });
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let on = fm_clk != 0;
+        MD_FILTER_ON.store(on, Relaxed);
+        let m = if on { md_filter_mode() } else { 3 };
+        MD_FILTER_CUR.store(m, Relaxed);
+        chipbox_write(0x2C, m);
+    }
     // {opl_gain, sid_gain, gb_gain, apu_gain}. У VGM-AdLib регистры громкости
     // выкручены сильнее, чем у нашего MIDI-конвертера: на 64 выход клиппит
     // (проверено на Dune в симуляции), поэтому для VGM берём 16.
