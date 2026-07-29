@@ -642,6 +642,11 @@ fn browser(b: &mut Buttons, pl: &PlayCtx) -> Option<usize> {
 
 struct CmdSink {
     since_check: u32,
+    /// Сколько команд ушло в чипы. Ноль означает, что играть было
+    /// нечего: у файла все записи в чипы, которых мы не умеем. Без
+    /// этого счётчика ядро молча крутило таймер над тишиной, и с
+    /// устройства это выглядело как поломка загрузки.
+    pushed: u32,
     /// Кнопки живут в синке: backpressure-спин может длиться секундами,
     /// и опрос внутри него — единственный способ не терять нажатия
     btn: Buttons,
@@ -650,13 +655,18 @@ struct CmdSink {
 
 impl CmdSink {
     fn new() -> CmdSink {
-        CmdSink { since_check: 0, btn: Buttons::new(), vu_last: 0 }
+        CmdSink { since_check: 0, pushed: 0, btn: Buttons::new(), vu_last: 0 }
     }
 
     /// Пуш команды с backpressure: держим FIFO не полнее ~1900 слов,
     /// статус читаем раз в 64 команды, чтобы не молотить шину.
     /// В спине живут VU и снятие перемотки (стримовые форматы: mode 0).
     fn push(&mut self, word: u32) {
+        // Ожидания не считаем: файл из одних пауз — это тишина, а не
+        // музыка, и именно её надо отличить
+        if word & 0xF000_0000 != OP_WAIT {
+            self.pushed = self.pushed.saturating_add(1);
+        }
         if self.since_check == 0 {
             // Опрос обязан идти НЕ только в спине backpressure. При
             // перемотке секвенсор дренит FIFO в 8 раз быстрее, спин почти
@@ -2227,6 +2237,15 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::End) => {
                 loops += 1;
+                // Ни одной записи в чипы за весь проход: у файла всё
+                // звучание приходится на то, чего мы не умеем (звук
+                // дисковой приставки Famicom, PWM у 32X, WonderSwan).
+                // Молча крутить таймер над тишиной — выглядит как
+                // поломка загрузки; лучше сказать прямо.
+                if sink.pushed == 0 {
+                    println!("В потоке нет записей в поддержанные чипы");
+                    return error_wait("VGM", "no data for supported chips");
+                }
                 if loops >= 2 || header.loop_offset.is_none() {
                     // Дать хвосту FIFO дозвучать. Время здесь обязано
                     // идти: короткий трек уходит в FIFO целиком за
