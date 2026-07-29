@@ -209,6 +209,7 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.pwm != 0 { off("PWM"); }
     if c.upd7759 != 0 { off("uPD7759"); }
     if c.wonderswan != 0 { off("WonderSwan"); }
+    if c.rf5c164 != 0 || c.rf5c68 != 0 { off("RF5C164"); }
     if c.fds { off("FDS"); }
     if !silent.is_empty() {
         if !chips.is_empty() {
@@ -238,6 +239,8 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
         "Sega Master System"
     } else if c.gb_dmg != 0 {
         "Game Boy"
+    } else if c.rf5c164 != 0 {
+        "Sega Mega CD"
     } else if c.wonderswan != 0 {
         "Bandai WonderSwan"
     } else if c.ym2151 != 0 {

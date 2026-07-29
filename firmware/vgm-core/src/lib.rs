@@ -110,6 +110,11 @@ pub struct Clocks {
     pub pwm: u32,
     pub upd7759: u32,
     pub wonderswan: u32,
+    /// PCM Sega CD (RF5C164) и его аркадный родич RF5C68: на дисках Mega
+    /// CD почти вся музыка идёт через них, без них файл звучит тихо или
+    /// молчит вовсе
+    pub rf5c164: u32,
+    pub rf5c68: u32,
     /// Дисковая приставка Famicom: старший бит клока NES APU
     pub fds: bool,
     /// Второй SN76489 (бит 30) и вариант T6W28 (бит 31). На Neo Geo
@@ -204,6 +209,8 @@ impl Header {
             pwm: clock_field(d, 0x70, hdr_end),
             upd7759: clock_field(d, 0x8C, hdr_end),
             wonderswan: clock_field(d, 0xC0, hdr_end),
+            rf5c164: clock_field(d, 0x6C, hdr_end),
+            rf5c68: clock_field(d, 0x40, hdr_end),
             // Флаг дисковой приставки — старший бит поля NES APU, и
             // читать его надо до маскирования: clock_field снимает
             // старшие два бита, потому что там живут признаки чипа.
