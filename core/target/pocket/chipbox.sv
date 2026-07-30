@@ -1910,10 +1910,32 @@ module chipbox #(
   // — один повторённый или пропущенный сэмпл раз в доли секунды вместо
   // семи тысяч в секунду. Призрак от такого расхождения садится на
   // f +- (единицы Гц), то есть вырождается в медленную модуляцию.
-  localparam OUT_DIV = CLK_HZ / 48_000;
-  localparam OUT_CNT_W = $clog2(OUT_DIV);
+  // Строб микса идёт ВДВОЕ чаще выхода, а выходной отсчёт — среднее двух
+  // подотсчётов.
+  //
+  // Зачем. Чипы отдают сэмплы на своих частотах: jt12 при 7.67 МГц — на
+  // 53267 Гц, а AY, APU, Game Boy, SID, HuC6280 и SN76489 вообще меняют
+  // выход на МГц-овой сетке. Читать это на 48 кГц без сглаживания значит
+  // заворачивать всё, что выше Найквиста, обратно в полосу. Измерено на
+  // железе (scripts/image_check.py): тон 1848 Гц у YM2612 давал
+  // НЕАРМОНИЧЕСКИЙ пик на |53267-48000| - 1848 = 3419 Гц на -17.1 дБ.
+  // Гармоники при этом лежали на -29 дБ и ниже, то есть призрак был
+  // громче любой из них.
+  //
+  // Усреднение двух подотсчётов — это КИХ длины 2 на частоте 96 кГц. Его
+  // ноль стоит ровно на 48 кГц, а на 44581 Гц, откуда заворачивается
+  // призрак, ослабление 19 дБ. Полезному сигналу на 1848 Гц он стоит
+  // 0.02 дБ. Пять подотсчётов дали бы 23 дБ, но делить на 5 пришлось бы
+  // умножителем, а площадь у нас на исходе (см. историю с K053260).
+  //
+  // 96 кГц выбрана как ровный делитель: 57120000 / 96000 = 595, и выход
+  // остаётся точно 48 кГц — 57120000 / (2*595) = 48000.
+  localparam SUB_DIV = CLK_HZ / 96_000;
+  localparam SUB_CNT_W = $clog2(SUB_DIV);
 
-  reg [OUT_CNT_W-1:0] out_cnt = 0;
+  reg [SUB_CNT_W-1:0] sub_cnt = 0;
+  reg sub_phase = 0;
+  wire sub_tick = sub_cnt == SUB_CNT_W'(SUB_DIV - 1);
 
   wire signed [16:0] ay_wide = {2'b00, ay_sound, 5'b00000};
 `ifdef M4_HAS_ARCADE
@@ -1937,9 +1959,12 @@ module chipbox #(
       + {3'b000, vrc6_out, 8'b0};  // выход APU беззнаковый, VRC6 0..61 << 8
 
   // DC-блокеры для однополярных источников (AY и NES APU держат
-  // постоянное смещение): y[n] = x[n] - x[n-1] + y[n-1]*(1 - 2^-10),
-  // обновление на строб-частоте микса (48 кГц) => срез 48000/(2*pi*1024)
-  // = 7.5 Гц. При стробе 55 кГц было 8.6 Гц — разница ниже слышимого.
+  // постоянное смещение): y[n] = x[n] - x[n-1] + y[n-1]*(1 - 2^-11),
+  // обновление на подстробе 96 кГц => срез 96000/(2*pi*2048) = 7.5 Гц.
+  // Блокеры обязаны идти на подстробе, а не на выходной частоте: иначе их
+  // выход меняется только 48000 раз в секунду, усреднять нечего, и
+  // сглаживание для этих чипов пропадает. Удвоение частоты вместе с
+  // удвоением сдвига оставляет срез там же, где он был.
   reg signed [16:0] ay_hp_x = 0;
   reg signed [18:0] ay_hp_y = 0;
   reg signed [16:0] apu_hp_x = 0;
@@ -1975,10 +2000,10 @@ module chipbox #(
   wire signed [15:0] hucl_hp = sat16_19(hucl_hp_y);
   wire signed [15:0] hucr_hp = sat16_19(hucr_hp_y);
 
-  // Утечка фильтра: y>>>10, но не меньше +-1, иначе целочисленный хвост
+  // Утечка фильтра: y>>>11, но не меньше +-1, иначе целочисленный хвост
   // «прилипает» и остаётся постоянный DC
   function automatic signed [18:0] hp_leak(input signed [18:0] y);
-    hp_leak = (y >>> 10) != 0 ? (y >>> 10) : y > 0 ? 19'sd1 : y < 0 ? -19'sd1 : 19'sd0;
+    hp_leak = (y >>> 11) != 0 ? (y >>> 11) : y > 0 ? 19'sd1 : y < 0 ? -19'sd1 : 19'sd0;
   endfunction
 `ifdef M4_HAS_ARCADE
   wire signed [15:0] adpcm_l = adpcm_pan[0] ? 16'sd0 : adpcm_wide;
@@ -2128,9 +2153,18 @@ module chipbox #(
   endfunction
 `endif
 
+  // Накопитель усреднения: держит первый подотсчёт до второго
+  reg signed [25:0] acc_l = 0, acc_r = 0;
+  wire signed [26:0] sum2_l = {mix_l[25], mix_l} + {acc_l[25], acc_l};
+  wire signed [26:0] sum2_r = {mix_r[25], mix_r} + {acc_r[25], acc_r};
+  // деление на 2 знакового числа — это взятие старших разрядов суммы
+  wire signed [25:0] avg_l = sum2_l[26:1];
+  wire signed [25:0] avg_r = sum2_r[26:1];
+
   always @(posedge clk) begin
-    if (out_cnt == OUT_CNT_W'(OUT_DIV - 1)) begin
-      out_cnt <= 0;
+    if (sub_tick) begin
+      sub_cnt <= 0;
+      sub_phase <= ~sub_phase;
       ay_hp_y <= (ay_wide - ay_hp_x) + (ay_hp_y - hp_leak(ay_hp_y));
       ay_hp_x <= ay_wide;
       apu_hp_y <= (apu_wide - apu_hp_x) + (apu_hp_y - hp_leak(apu_hp_y));
@@ -2147,25 +2181,32 @@ module chipbox #(
       hucr_hp_y <= (huc_right - hucr_hp_x) + (hucr_hp_y - hp_leak(hucr_hp_y));
       hucr_hp_x <= huc_right;
 `endif
+      // Первый подотсчёт только запоминается, на втором выдаётся среднее.
+      // Фильтр Mega Drive и выход идут на 48 кГц, как и раньше, поэтому
+      // его коэффициенты остаются теми же.
+      if (!sub_phase) begin
+        acc_l <= mix_l;
+        acc_r <= mix_r;
+      end else begin
 `ifdef M4_HAS_HOME
-      // Фильтр Mega Drive: состояние двигается тем же стробом, что и
-      // выход. y считается по прежним x0/x1/y — как в исходной модели,
-      // где новый отсчёт попадает в x0 в этом же такте.
-      lpf_y_l <= sat16_34(lpf_acc_l >>> 15);
-      lpf_x1_l <= lpf_x0_l;
-      lpf_x0_l <= sat16(mix_l);
-      lpf_y_r <= sat16_34(lpf_acc_r >>> 15);
-      lpf_x1_r <= lpf_x0_r;
-      lpf_x0_r <= sat16(mix_r);
-      chip_left <= md_lpf_mode == 2'd3 ? sat16(mix_l) : lpf_y_l;
-      chip_right <= md_lpf_mode == 2'd3 ? sat16(mix_r) : lpf_y_r;
+        // Фильтр Mega Drive: y считается по прежним x0/x1/y — как в
+        // исходной модели, где новый отсчёт попадает в x0 в этом же такте.
+        lpf_y_l <= sat16_34(lpf_acc_l >>> 15);
+        lpf_x1_l <= lpf_x0_l;
+        lpf_x0_l <= sat16(avg_l);
+        lpf_y_r <= sat16_34(lpf_acc_r >>> 15);
+        lpf_x1_r <= lpf_x0_r;
+        lpf_x0_r <= sat16(avg_r);
+        chip_left <= md_lpf_mode == 2'd3 ? sat16(avg_l) : lpf_y_l;
+        chip_right <= md_lpf_mode == 2'd3 ? sat16(avg_r) : lpf_y_r;
 `else
-      chip_left <= sat16(mix_l);
-      chip_right <= sat16(mix_r);
+        chip_left <= sat16(avg_l);
+        chip_right <= sat16(avg_r);
 `endif
-      chip_sample_toggle <= ~chip_sample_toggle;
+        chip_sample_toggle <= ~chip_sample_toggle;
+      end
     end else begin
-      out_cnt <= out_cnt + 1'b1;
+      sub_cnt <= sub_cnt + 1'b1;
     end
 
     // пульсы доменов: смена выходного сэмпла GB/OPL
