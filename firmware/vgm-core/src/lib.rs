@@ -66,6 +66,25 @@ pub enum Event {
     /// YM2612 DAC-байт из data-банка 0x00 (команды 0x80-0x8F): записать
     /// байт банка по offset в регистр 0x2A и подождать ticks тиков.
     Ym2612Dac { ticks: u8, offset: u32 },
+    /// Маска стерео Game Gear: команда 0x4F (и 0x3F для второго чипа).
+    /// По биту на канал и сторону, порт 0x06.
+    ///
+    /// Это НЕ запись в регистр PSG, а раньше было склеено с 0x50, то есть
+    /// маска уходила в чип как байт данных. Обычное значение 0xFF (всё
+    /// звучит в оба уха) для SN76489 — байт с битом 7, то есть latch:
+    /// канал 3, тип «громкость», данные 0xF. Иначе говоря, каждая такая
+    /// запись ГЛУШИЛА канал шума. Файлы Game Gear пишут маску часто.
+    GgStereo { chip2: bool, mask: u8 },
+    /// Запись, адресованная ВТОРОМУ экземпляру чипа.
+    ///
+    /// Второго экземпляра в железе нет, играть эту запись нечем. Но и
+    /// терять её молча нельзя: команды 0xA1-0xAF (зеркало 0x51-0x5F для
+    /// второго чипа) раньше проваливались в ветку «пропустить и забыть»,
+    /// и dual-chip файл лишался половины музыки без всякого сообщения. У
+    /// чипов с коротким регистровым полем второй экземпляр выбирается
+    /// битом 7 байта регистра, и этот бит доезжал до чипа: записи второго
+    /// экземпляра садились на регистры ПЕРВОГО и дрались с ними.
+    SecondChip { cmd: u8 },
     /// Конец звуковых данных.
     End,
 }
@@ -121,6 +140,12 @@ pub struct Clocks {
     /// Pocket выставлены оба: это один чип с двумя сторонами стерео.
     pub sn_dual: bool,
     pub sn_t6w28: bool,
+    /// Файл объявляет ВТОРОЙ экземпляр какого-нибудь чипа: бит 30 в поле
+    /// тактовой. Второго экземпляра у нас нет, его записи отбрасываются —
+    /// но сказать об этом надо, иначе половина музыки пропадает молча.
+    /// Случай T6W28 сюда не относится: там у SN76489 выставлены биты 30 и
+    /// 31 сразу, и это один чип с двумя сторонами стерео.
+    pub second_chip: bool,
 }
 
 /// Разобранный заголовок VGM. Владение данными остаётся у вызывающего.
@@ -138,6 +163,11 @@ pub struct Header {
 fn rd32(d: &[u8], off: usize) -> Result<u32, Error> {
     let b = d.get(off..off + 4).ok_or(Error::TooShort)?;
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Объявлен ли второй экземпляр чипа: бит 30 поля тактовой.
+fn dual_bit(d: &[u8], off: usize, hdr_end: usize) -> bool {
+    off + 4 <= hdr_end && rd32(d, off).unwrap_or(0) & 0x4000_0000 != 0
 }
 
 /// Читает 32-битное поле часов, если оно внутри заголовка (иначе 0).
@@ -217,6 +247,17 @@ impl Header {
             fds: hdr_end >= 0x88 && rd32(d, 0x84).unwrap_or(0) & 0x8000_0000 != 0,
             sn_dual: rd32(d, 0x0C).unwrap_or(0) & 0x4000_0000 != 0,
             sn_t6w28: rd32(d, 0x0C).unwrap_or(0) & 0x8000_0000 != 0,
+            // Смещения — те же поля тактовых, что читаем выше. У SN76489
+            // (0x0C) бит 30 сам по себе не считается: вместе с битом 31
+            // он означает T6W28, то есть один чип, а не два.
+            second_chip: [
+                0x10, 0x2C, 0x30, 0x38, 0x44, 0x48, 0x50, 0x54, 0x5C, 0x74, 0x80, 0x84, 0x90,
+                0x98, 0x9C, 0xA4, 0xAC,
+            ]
+            .iter()
+            .any(|&o| dual_bit(d, o, hdr_end))
+                || (dual_bit(d, 0x0C, hdr_end)
+                    && rd32(d, 0x0C).unwrap_or(0) & 0x8000_0000 == 0),
         };
 
         Ok(Header {
@@ -268,11 +309,16 @@ impl<'a> Reader<'a> {
         let at = self.pos;
         let cmd = self.u8()?;
         let ev = match cmd {
-            0x4F | 0x50 => Event::Write { chip: Chip::Sn76489, port: 0, addr: 0, data: self.u8()? },
+            0x50 => Event::Write { chip: Chip::Sn76489, port: 0, addr: 0, data: self.u8()? },
             // Второй SN76489. На Neo Geo Pocket это не второй чип, а
             // вторая половина T6W28: стороны стерео с раздельной
             // громкостью. Все файлы NGP падали здесь с UnknownCommand.
-            0x30 | 0x3F => Event::Write { chip: Chip::Sn76489, port: 1, addr: 0, data: self.u8()? },
+            0x30 => Event::Write { chip: Chip::Sn76489, port: 1, addr: 0, data: self.u8()? },
+            // Маска стерео Game Gear — отдельная команда, не запись в
+            // регистр: раньше 0x4F был склеен с 0x50 и глушил канал шума
+            // (подробности у Event::GgStereo).
+            0x4F => Event::GgStereo { chip2: false, mask: self.u8()? },
+            0x3F => Event::GgStereo { chip2: true, mask: self.u8()? },
             0x51 => self.reg_write(Chip::Ym2413, 0)?,
             0x52 => self.reg_write(Chip::Ym2612, 0)?,
             0x53 => self.reg_write(Chip::Ym2612, 1)?,
@@ -320,26 +366,50 @@ impl<'a> Reader<'a> {
                 self.skip(len)?;
                 Event::DacStream { cmd, start, len }
             }
-            0xA0 => self.reg_write(Chip::Ay8910, 0)?,
-            0xB4 => self.reg_write(Chip::NesApu, 0)?,
-            0xB3 => self.reg_write(Chip::GbDmg, 0)?,
-            0xB7 => self.reg_write(Chip::Okim6258, 0)?,
-            0xB8 => self.reg_write(Chip::Okim6295, 0)?,
-            0xBA => self.reg_write(Chip::K053260, 0)?,
-            0xA1..=0xB2 | 0xB5 | 0xB6 | 0xB9..=0xBF => {
+            // Чипы с коротким регистровым полем: бит 7 байта регистра —
+            // это признак ВТОРОГО экземпляра, а не часть адреса. Раньше
+            // он проходил в чип как есть.
+            0xA0 => self.reg_write_dual(Chip::Ay8910, 0, cmd)?,
+            0xB4 => self.reg_write_dual(Chip::NesApu, 0, cmd)?,
+            0xB3 => self.reg_write_dual(Chip::GbDmg, 0, cmd)?,
+            0xB7 => self.reg_write_dual(Chip::Okim6258, 0, cmd)?,
+            0xB8 => self.reg_write_dual(Chip::Okim6295, 0, cmd)?,
+            0xBA => self.reg_write_dual(Chip::K053260, 0, cmd)?,
+            // Второй экземпляр FM-чипов: 0xA1-0xAF — зеркало 0x51-0x5F.
+            // Регистровое поле у них полные 8 бит (0xB0-0xB6 — это
+            // панорама YM2612), поэтому битом 7 второй чип там выбрать
+            // нельзя, и спецификация отвела отдельные команды. Раньше вся
+            // эта полоса молча уходила в «пропустить и забыть».
+            0xA1..=0xAF => {
+                self.skip(2)?;
+                Event::SecondChip { cmd }
+            }
+            0xB0..=0xB2 | 0xB5 | 0xB6 | 0xBB..=0xBF => {
                 self.skip(2)?;
                 Event::Write { chip: Chip::Unknown(cmd), port: 0, addr: 0, data: 0 }
             }
             0xC0 => {
                 let offset = self.u16()?;
-                Event::SegaPcmWrite { offset, data: self.u8()? }
+                let data = self.u8()?;
+                // У SegaPCM второй экземпляр выбирается старшим битом
+                // 16-битного смещения
+                if offset & 0x8000 != 0 {
+                    Event::SecondChip { cmd }
+                } else {
+                    Event::SegaPcmWrite { offset, data }
+                }
             }
             0xD2 => {
-                // K051649/K052539 (SCC): pp aa dd — порт, регистр, данные
+                // K051649/K052539 (SCC): pp aa dd — порт, регистр, данные.
+                // Второй экземпляр — бит 7 байта порта.
                 let port = self.u8()?;
                 let addr = self.u8()?;
                 let data = self.u8()?;
-                Event::Write { chip: Chip::K051649, port, addr, data }
+                if port & 0x80 != 0 {
+                    Event::SecondChip { cmd }
+                } else {
+                    Event::Write { chip: Chip::K051649, port, addr, data }
+                }
             }
             0xC1..=0xDF => {
                 self.skip(3)?;
@@ -363,6 +433,19 @@ impl<'a> Reader<'a> {
 
     fn reg_write(&mut self, chip: Chip, port: u8) -> Result<Event, Error> {
         Ok(Event::Write { chip, port, addr: self.u8()?, data: self.u8()? })
+    }
+
+    /// То же, но для чипов, у которых регистровое поле короче байта: там
+    /// бит 7 байта регистра выбирает второй экземпляр чипа. Раньше этот
+    /// бит уходил в чип как часть адреса, и записи второго экземпляра
+    /// садились на регистры первого.
+    fn reg_write_dual(&mut self, chip: Chip, port: u8, cmd: u8) -> Result<Event, Error> {
+        let addr = self.u8()?;
+        let data = self.u8()?;
+        if addr & 0x80 != 0 {
+            return Ok(Event::SecondChip { cmd });
+        }
+        Ok(Event::Write { chip, port, addr, data })
     }
 }
 
@@ -672,5 +755,73 @@ mod tests {
         assert!(c.fds);
         // сам APU остаётся с честной частотой, без флага в старшем бите
         assert_eq!(c.nes_apu, 1_789_773);
+    }
+
+    /// Маска стерео Game Gear — не запись в регистр PSG.
+    ///
+    /// Пока 0x4F был склеен с 0x50, маска уходила в чип как данные, а
+    /// обычное её значение 0xFF для SN76489 означает latch «канал 3,
+    /// громкость, аттенюация 15», то есть глушит шум. Проверяем именно
+    /// это значение.
+    #[test]
+    fn gg_stereo_is_not_a_psg_write() {
+        let body = [0x4F, 0xFF, 0x50, 0x9F, 0x3F, 0x11, 0x66];
+        let d = synth_vgm(&body, None);
+        let h = Header::parse(&d).unwrap();
+        let mut r = Reader::new(&d, h.data_offset);
+        assert_eq!(r.next_event().unwrap(), Event::GgStereo { chip2: false, mask: 0xFF });
+        // настоящая запись в PSG идёт следом и не пострадала
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::Sn76489, port: 0, addr: 0, data: 0x9F }
+        );
+        assert_eq!(r.next_event().unwrap(), Event::GgStereo { chip2: true, mask: 0x11 });
+        assert_eq!(r.next_event().unwrap(), Event::End);
+    }
+
+    /// Записи второго экземпляра чипа не должны доставаться первому.
+    #[test]
+    fn second_chip_writes_do_not_reach_the_first() {
+        let body = [
+            0xA0, 0x07, 0x38, // AY: регистр 7 первого чипа
+            0xA0, 0x87, 0x38, // AY: тот же регистр ВТОРОГО чипа (бит 7)
+            0xA2, 0x28, 0x00, // второй YM2612, порт 0 (зеркало 0x52)
+            0xB4, 0x95, 0x1F, // второй NES APU (бит 7 в байте регистра)
+            0x66,
+        ];
+        let d = synth_vgm(&body, None);
+        let h = Header::parse(&d).unwrap();
+        let mut r = Reader::new(&d, h.data_offset);
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Write { chip: Chip::Ay8910, port: 0, addr: 0x07, data: 0x38 }
+        );
+        assert_eq!(r.next_event().unwrap(), Event::SecondChip { cmd: 0xA0 });
+        assert_eq!(r.next_event().unwrap(), Event::SecondChip { cmd: 0xA2 });
+        assert_eq!(r.next_event().unwrap(), Event::SecondChip { cmd: 0xB4 });
+        assert_eq!(r.next_event().unwrap(), Event::End);
+    }
+
+    /// Признак второго экземпляра в заголовке — бит 30 поля тактовой. У
+    /// SN76489 он же вместе с битом 31 означает T6W28, а это ОДИН чип.
+    #[test]
+    fn second_chip_flag_separates_t6w28() {
+        let mut v = synth_vgm(&[0x66], None);
+        assert!(!Header::parse(&v).unwrap().clocks.second_chip);
+
+        // второй YM2612
+        v[0x2C..0x30].copy_from_slice(&(7_670_453u32 | 0x4000_0000).to_le_bytes());
+        assert!(Header::parse(&v).unwrap().clocks.second_chip);
+        v[0x2C..0x30].copy_from_slice(&0u32.to_le_bytes());
+
+        // T6W28 (Neo Geo Pocket): биты 30 и 31 сразу — вторым чипом не считается
+        v[0x0C..0x10].copy_from_slice(&(3_072_000u32 | 0xC000_0000).to_le_bytes());
+        let c = Header::parse(&v).unwrap().clocks;
+        assert!(c.sn_t6w28 && c.sn_dual);
+        assert!(!c.second_chip);
+
+        // а один бит 30 у SN76489 — это уже настоящий второй чип
+        v[0x0C..0x10].copy_from_slice(&(3_579_545u32 | 0x4000_0000).to_le_bytes());
+        assert!(Header::parse(&v).unwrap().clocks.second_chip);
     }
 }

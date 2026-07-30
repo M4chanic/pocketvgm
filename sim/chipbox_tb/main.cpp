@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <vector>
 #include <map>
 #include <algorithm>
@@ -114,6 +115,40 @@ struct Tb {
     bool seq_busy() { return (wb(1, false) >> 29) & 1; }
 };
 
+// Выходной каскад железа.
+//
+// chipbox отдаёт сэмплы своим стробом, а i2s в audio.sv читает последний
+// защёлкнутый на 48 кГц — то есть выборка с удержанием, без интерполяции
+// и без фильтра. Стенд писал WAV ДО этого каскада, и все спектральные
+// сравнения с эталоном за всю историю проекта делались по сигналу,
+// которого на выходе не бывает. Пока строб был 55029 Гц, каскад
+// выбрасывал 7029 сэмплов в секунду и рождал неармонические призраки на
+// |55029-48000| +- f: тон 5 кГц давал 2029 Гц на -20 дБ, тон 8 кГц — 971
+// Гц на -15 дБ. Уровень при этом падал на 0.1-0.6 дБ, поэтому ни один из
+// наших признаков (уровень, полосы, огибающая) этого не видел.
+//
+// Сейчас строб равен 48 кГц (OUT_DIV в chipbox.sv), и на тактовой железа
+// каскад — тождество. Но быстрый стенд на 8 МГц делит свою тактовую
+// иначе, поэтому приводим здесь: WAV всегда равен тому, что выходит из
+// наушников, на любой тактовой стенда. Отключается --no-out-stage, если
+// нужно посмотреть сигнал до каскада.
+static const uint32_t OUT_RATE = 48000;
+static bool out_stage = true;
+
+static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
+    size_t n_in = pcm.size() / 2;
+    size_t n_out = (size_t)((double)n_in * OUT_RATE / rate);
+    std::vector<int16_t> o;
+    o.reserve(n_out * 2);
+    for (size_t k = 0; k < n_out; k++) {
+        size_t i = (size_t)((double)k * rate / OUT_RATE);
+        if (i >= n_in) i = n_in - 1;
+        o.push_back(pcm[2 * i]);
+        o.push_back(pcm[2 * i + 1]);
+    }
+    return o;
+}
+
 static void write_wav_file(const char* out, const std::vector<int16_t>& pcm, uint32_t rate);
 
 // Глушит в микшере все чипы разом.
@@ -130,6 +165,48 @@ static void mute_all(Tb& tb) {
     tb.wb(0x24, true, 0);   // OKIM6295 (вместе с признаком ss)
     tb.wb(0x26, true, 0);   // K053260
     tb.wb(0x28, true, 0);   // HuC6280
+}
+
+// Сторож выходного каскада: строб микса ОБЯЗАН совпадать с частотой i2s.
+//
+// Пока они расходились (55029 против 48000), между ними стояла выборка с
+// удержанием, засевавшая всю полосу неармоническими призраками до -15 дБ,
+// и ни один наш признак этого не показывал. Проверка дешёвая — 0.2 с
+// модельного времени с заглушенными чипами: считаем сами стробы.
+//
+// Строгая проверка возможна только на тактовой железа: 57120000/48000
+// делится ровно, а 8 МГц быстрого стенда — нет.
+static int outrate_selftest() {
+    Tb tb;
+    mute_all(tb);
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 2048; i++) tb.step();
+    uint64_t cycles = (uint64_t)(0.2 * CLK_HZ);
+    while (tb.cycle < cycles) tb.step();
+
+    double got = (double)tb.pcm.size() / 2 / (tb.cycle / CLK_HZ);
+    uint32_t div = (uint32_t)(CLK_HZ / 48000.0);   // OUT_DIV в chipbox.sv
+    double want = CLK_HZ / (double)div;
+    fprintf(stderr, "строб микса: %.1f Гц (делитель %u даёт %.1f), i2s: %u Гц\n",
+            got, div, want, OUT_RATE);
+
+    if (fabs(got - want) > 5.0) {
+        fprintf(stderr, "строб не равен CLK/(CLK/48000): значит OUT_DIV в "
+                "chipbox.sv считается уже не от частоты i2s -> FAIL\n");
+        return 1;
+    }
+    if ((uint64_t)CLK_HZ == 57120000ull) {
+        if (fabs(got - (double)OUT_RATE) > 1.0) {
+            fprintf(stderr, "на тактовой железа строб ОБЯЗАН быть %u Гц: "
+                    "иначе между chipbox и i2s снова встанет пересчёт -> FAIL\n", OUT_RATE);
+            return 1;
+        }
+        fprintf(stderr, "сторож выходного каскада: OK\n");
+    } else {
+        fprintf(stderr, "тактовая стенда не железная — строгую проверку пропускаю, "
+                "перепроверьте с CLK=57120000\n");
+    }
+    return 0;
 }
 
 // Изолирующий тест: те же регистры APU, но через VGM-путь (FIFO), без CPU
@@ -1318,6 +1395,8 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) max_seconds = atof(argv[++i]);
         else if (!strcmp(argv[i], "--nsf-selftest")) selftest = true;
+        else if (!strcmp(argv[i], "--no-out-stage")) { out_stage = false; }
+        else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
         else if (!strcmp(argv[i], "--gbs-selftest")) { return gbs_selftest(out, 2.0); }
         else if (!strcmp(argv[i], "--gbs-int-selftest")) { return gbs_int_selftest(out, 2.0); }
@@ -1342,7 +1421,14 @@ int main(int argc, char** argv) {
         else in = argv[i];
     }
     if (selftest) return nsf_selftest(out, max_seconds > 0 ? max_seconds : 2.0);
-    if (!in) { fprintf(stderr, "usage: chipbox_tb <file.vgm|.vgz> [-o out.wav] [-t sec] | --nsf-selftest\n"); return 1; }
+    if (!in) {
+        fprintf(stderr, "usage: chipbox_tb <file.vgm|.vgz> [-o out.wav] [-t sec] "
+                "[--no-out-stage] | --nsf-selftest | --out-rate-selftest\n"
+                "  WAV пишется на частоте выхода i2s (48 кГц), как на железе;\n"
+                "  --no-out-stage оставляет строб микса как есть. Ключ должен\n"
+                "  идти ДО ключей, которые сразу запускают режим.\n");
+        return 1;
+    }
 
     std::vector<uint8_t> d = read_maybe_gz(in);
     if (d.size() < 0x40 || memcmp(d.data(), "Vgm ", 4)) { fprintf(stderr, "не VGM\n"); return 1; }
@@ -1394,22 +1480,37 @@ int main(int argc, char** argv) {
     std::vector<StrBlock> adpcm_blocks;
     uint64_t total_ticks = 0;
     size_t pcm_masked = 0, stream_warn = 0;
+    // Отброшенное осознанно: записи второго экземпляра чипа (второго
+    // экземпляра в железе нет) и маски стерео Game Gear. И то, и другое
+    // раньше уходило в тишину без сообщения, а маска вдобавок глушила
+    // канал шума, потому что попадала в PSG как байт данных.
+    size_t drop2 = 0, drop_gg = 0;
     auto wait_ticks = [&](uint32_t n) { if (n) { cmds.push_back(0x80000000u | n); total_ticks += n; } };
     bool run = true;
     while (run && pos < d.size()) {
         uint8_t cmd = d[pos++];
         if (cmd == 0x54) { cmds.push_back(0x10000000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         // Game Boy: регистры APU $FF10-$FF3F, в VGM адрес отсчитан от $FF10
-        else if (cmd == 0xB3) { cmds.push_back(0xF4000000u | (uint32_t)(d[pos] + 0x10) << 8 | d[pos+1]); pos += 2; }
+        else if (cmd == 0xB3) {
+            if (d[pos] & 0x80) drop2++;  // бит 7 — второй экземпляр, не адрес
+            else cmds.push_back(0xF4000000u | (uint32_t)(d[pos] + 0x10) << 8 | d[pos+1]);
+            pos += 2;
+        }
         else if (cmd == 0x52) { cmds.push_back(0xD0000000u | d[pos] << 8 | d[pos+1]); pos += 2; }
         else if (cmd == 0x53) { cmds.push_back(0xD0000000u | 0x10000u | d[pos] << 8 | d[pos+1]); pos += 2; }
-        else if (cmd == 0x4F || cmd == 0x50 || cmd == 0x30 || cmd == 0x3F) {
-            // 0x30/0x3F — вторая сторона T6W28 (Neo Geo Pocket): стерео с
+        // Маска стерео Game Gear (0x4F, 0x3F — для второго чипа): порт
+        // 0x06, а НЕ регистр PSG. Раньше была склеена с 0x50/0x30 и уходила
+        // в чип как байт данных: обычное значение 0xFF для SN76489 — это
+        // latch «канал 3, громкость, аттенюация 15», то есть глушило шум.
+        // Стерео мы не воспроизводим (jt89 моно), но и портить нечего.
+        else if (cmd == 0x4F || cmd == 0x3F) { drop_gg++; pos += 1; }
+        else if (cmd == 0x50 || cmd == 0x30) {
+            // 0x30 — вторая сторона T6W28 (Neo Geo Pocket): стерео с
             // раздельной громкостью, а не второй чип. jt89 у нас один,
             // поэтому стороны сводятся по громкой (0 = максимум, 15 =
             // тишина), иначе отведённые вправо голоса пропали бы.
             uint8_t v = d[pos]; pos += 1;
-            int side = (cmd == 0x30 || cmd == 0x3F) ? 1 : 0;
+            int side = (cmd == 0x30) ? 1 : 0;
             if (sn_dual && (v & 0x90) == 0x90) {
                 int ch = (v >> 5) & 3;
                 sn_att[side][ch] = v & 0x0F;
@@ -1428,15 +1529,22 @@ int main(int argc, char** argv) {
         }
         // SCC (K051649): 0xD2 порт рег знач -> OP_EXT|EXT_SCC
         else if (cmd == 0xD2) {
-            cmds.push_back(0xF0000000u | d[pos] << 16 | d[pos+1] << 8 | d[pos+2]); pos += 3;
+            // второй экземпляр SCC — бит 7 байта порта
+            if (d[pos] & 0x80) drop2++;
+            else cmds.push_back(0xF0000000u | d[pos] << 16 | d[pos+1] << 8 | d[pos+2]);
+            pos += 3;
         }
         // K053260: 0xBA рег знач -> OP_EXT|EXT_K060
         else if (cmd == 0xBA) {
-            cmds.push_back(0xF2000000u | d[pos] << 8 | d[pos+1]); pos += 2;
+            if (d[pos] & 0x80) drop2++;
+            else cmds.push_back(0xF2000000u | d[pos] << 8 | d[pos+1]);
+            pos += 2;
         }
         // HuC6280: 0xB9 рег знач -> OP_EXT|EXT_HUC
         else if (cmd == 0xB9) {
-            cmds.push_back(0xF3000000u | (d[pos] & 0xF) << 8 | d[pos+1]); pos += 2;
+            if (d[pos] & 0x80) drop2++;
+            else cmds.push_back(0xF3000000u | (d[pos] & 0xF) << 8 | d[pos+1]);
+            pos += 2;
         }
         // OPN (YM2203 0x55, YM2608 0x56/0x57): низ порта 0 — SSG, от $20 — FM
         else if (cmd == 0x55 || cmd == 0x56 || cmd == 0x57) {
@@ -1454,16 +1562,29 @@ int main(int argc, char** argv) {
             wait_ticks(cmd & 0xF);
         }
         else if (cmd == 0xE0) { dac_ptr = rd32(d, pos); pos += 4; }
-        else if (cmd == 0xA0) { cmds.push_back(0x20000000u | (d[pos] & 15) << 8 | d[pos+1]); pos += 2; }
+        // У чипов с коротким регистровым полем бит 7 байта регистра — это
+        // признак ВТОРОГО экземпляра, а не часть адреса. Здесь он раньше
+        // просто маскировался (& 15), то есть записи второго чипа садились
+        // на регистры первого и дрались с ними.
+        else if (cmd == 0xA0) {
+            if (d[pos] & 0x80) drop2++;
+            else cmds.push_back(0x20000000u | (d[pos] & 15) << 8 | d[pos+1]);
+            pos += 2;
+        }
         else if (cmd == 0xB4) {
-            if (d[pos] > 0x1F) stream_warn++;  // FDS и пр. не поддержаны
+            if (d[pos] & 0x80) drop2++;
+            else if (d[pos] > 0x1F) stream_warn++;  // FDS и пр. не поддержаны
             else cmds.push_back(0x90000000u | d[pos] << 8 | d[pos+1]);
             pos += 2;
         }
         else if (cmd == 0xC0) {
             uint32_t off = d[pos] | d[pos+1] << 8;
-            if (off > 0xFF) pcm_masked++;
-            cmds.push_back(0x30000000u | (off & 0xFF) << 8 | d[pos+2]);
+            // второй экземпляр SegaPCM — старший бит 16-битного смещения
+            if (off & 0x8000) drop2++;
+            else {
+                if (off > 0xFF) pcm_masked++;
+                cmds.push_back(0x30000000u | (off & 0xFF) << 8 | d[pos+2]);
+            }
             pos += 3;
         }
         else if (cmd == 0x61) { wait_ticks(d[pos] | d[pos+1] << 8); pos += 2; }
@@ -1500,7 +1621,11 @@ int main(int argc, char** argv) {
             }
             pos += 6 + len;
         }
-        else if (cmd == 0xB7) { cmds.push_back(0x40000000u | (d[pos] & 3) << 8 | d[pos+1]); pos += 2; }
+        else if (cmd == 0xB7) {
+            if (d[pos] & 0x80) drop2++;  // бит 7 — второй экземпляр, не адрес
+            else cmds.push_back(0x40000000u | (d[pos] & 3) << 8 | d[pos+1]);
+            pos += 2;
+        }
         else if (cmd == 0x93) {
             uint32_t start = rd32(d, pos + 1);
             uint8_t lm = d[pos + 5];
@@ -1524,6 +1649,12 @@ int main(int argc, char** argv) {
         else if (cmd >= 0x51 && cmd <= 0x5F) pos += 2;
         else if (cmd == 0x68) pos += 11;
         else if (cmd >= 0x90 && cmd <= 0x95) { static const int L[] = {4,4,5,10,1,4}; pos += L[cmd-0x90]; }
+        // 0xA1-0xAF — зеркало 0x51-0x5F для ВТОРОГО экземпляра FM-чипа
+        // (0xA2/0xA3 — второй YM2612 и т.д.). Регистровое поле у них
+        // полные 8 бит, поэтому битом 7 второй чип не выбрать, и
+        // спецификация отвела отдельные команды. Раньше вся полоса молча
+        // проваливалась сюда же, в «пропустить и забыть».
+        else if (cmd >= 0xA1 && cmd <= 0xAF) { drop2++; pos += 2; }
         else if (cmd >= 0xA0 && cmd <= 0xBF) pos += 2;
         else if (cmd >= 0xC0 && cmd <= 0xDF) pos += 3;
         else if (cmd >= 0xE0) pos += 4;
@@ -1539,6 +1670,10 @@ int main(int argc, char** argv) {
             nes_clk, cmds.size(), total_ticks / 44100.0);
     if (pcm_masked) fprintf(stderr, "ВНИМАНИЕ: %zu записей SegaPCM с offset > 0xFF (замаскированы)\n", pcm_masked);
     if (stream_warn) fprintf(stderr, "ВНИМАНИЕ: %zu необработанных DAC-стрим команд\n", stream_warn);
+    if (drop2) fprintf(stderr, "ВНИМАНИЕ: %zu записей ко ВТОРОМУ экземпляру чипа отброшено "
+                               "(второго экземпляра в железе нет)\n", drop2);
+    if (drop_gg) fprintf(stderr, "ВНИМАНИЕ: %zu масок стерео Game Gear отброшено "
+                                 "(стерео PSG не воспроизводится)\n", drop_gg);
 
     Tb tb;
     // фазовые инкременты cen: Fchip / CLK_HZ * 2^32
@@ -1644,7 +1779,19 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-static void write_wav_file(const char* out, const std::vector<int16_t>& pcm, uint32_t rate) {
+static void write_wav_file(const char* out, const std::vector<int16_t>& pcm_in, uint32_t rate_in) {
+    // Приведение к частоте i2s — см. комментарий у to_out_rate
+    std::vector<int16_t> conv;
+    const std::vector<int16_t>* src = &pcm_in;
+    uint32_t rate = rate_in;
+    if (out_stage && rate_in != OUT_RATE && !pcm_in.empty()) {
+        conv = to_out_rate(pcm_in, rate_in);
+        src = &conv;
+        rate = OUT_RATE;
+        fprintf(stderr, "выходной каскад: строб стенда %u Гц -> i2s %u Гц "
+                "(выборка с удержанием, как в audio.sv)\n", rate_in, OUT_RATE);
+    }
+    const std::vector<int16_t>& pcm = *src;
     FILE* f = fopen(out, "wb");
     if (!f) { fprintf(stderr, "не открыть %s\n", out); exit(1); }
     uint32_t dlen = pcm.size() * 2, riff = 36 + dlen, byterate = rate * 4, fmtlen = 16;

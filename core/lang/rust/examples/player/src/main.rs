@@ -211,6 +211,9 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.wonderswan != 0 { off("WonderSwan"); }
     if c.rf5c164 != 0 || c.rf5c68 != 0 { off("RF5C164"); }
     if c.fds { off("FDS"); }
+    // Второго экземпляра чипа в железе нет. Раньше его записи молча
+    // терялись, и половина музыки dual-chip файла исчезала без следа.
+    if c.second_chip { off("2nd chip"); }
     if !silent.is_empty() {
         if !chips.is_empty() {
             chips.push(' ');
@@ -2070,6 +2073,12 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // «играть только сторону 0» потеряло бы голоса, отведённые вправо.
     let mut sn_att = [[15u8; 4]; 2];
     let sn_dual = header.clocks.sn_dual;
+    // Отброшенное за проход: записи второго экземпляра чипа и маски
+    // стерео Game Gear. И то, и другое раньше уходило в тишину без
+    // сообщения (а маска ещё и глушила канал шума, потому что попадала в
+    // PSG как данные). Считаем и говорим один раз в конце прохода.
+    let mut drop2 = 0u32;
+    let mut drop_gg = 0u32;
 
     loop {
         match reader.next_event() {
@@ -2249,8 +2258,16 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                     ui::progress(el.min(total_s), total_s, diag_ff(&mut fbuf));
                 }
             }
+            // Отброшенное осознанно. Ветки нужны явные: ниже стоит
+            // «Ok(_) => {}», и молчаливое проглатывание этих двух команд
+            // как раз и было дефектом.
+            Ok(Event::SecondChip { .. }) => drop2 += 1,
+            Ok(Event::GgStereo { .. }) => drop_gg += 1,
             Ok(Event::End) => {
                 loops += 1;
+                if loops == 1 && (drop2 != 0 || drop_gg != 0) {
+                    println!("Отброшено: второй чип {drop2}, стерео Game Gear {drop_gg}");
+                }
                 // Ни одной записи в чипы за весь проход: у файла всё
                 // звучание приходится на то, чего мы не умеем (звук
                 // дисковой приставки Famicom, PWM у 32X, WonderSwan).

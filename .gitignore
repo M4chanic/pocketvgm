@@ -6,6 +6,9 @@ vgmrips/
 .claude/
 sim/*/obj_dir/
 sim/chipbox_tb/chipbox_tb
+sim/chipbox_tb/chipbox_tb_8m
+sim/chipbox_tb_8m
+sim/chipbox_tb/.clk-*
 sim/sid_tb/sid_tb
 Test/
 CLAUDE.md

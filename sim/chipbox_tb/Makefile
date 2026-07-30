@@ -26,7 +26,18 @@ CHIPBOX  := ../../core/target/pocket/chipbox.sv
 # собирать с CLK=57120000, как на железе: make CLK=57120000
 CLK ?= 8000000
 
-chipbox_tb: main.cpp $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB) $(HUC) $(SCC) $(SID) $(OPL)
+# Штамп тактовой. Цель зависела только от исходников, поэтому после
+# сборки на 57.12 МГц команда «make CLK=8000000» отвечала «up to date» и
+# оставляла бинарь с ЧУЖОЙ тактовой — а он молча выдаёт замеры не на той
+# частоте. Наступал на это дважды. Смена CLK создаёт новый штамп, он
+# новее бинаря, и пересборка происходит сама.
+CLKSTAMP := .clk-$(CLK)
+
+$(CLKSTAMP):
+	@rm -f .clk-*
+	@touch $@
+
+chipbox_tb: main.cpp $(CLKSTAMP) $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) $(NES) $(GB) $(HUC) $(SCC) $(SID) $(OPL)
 	verilator --cc --exe --build -O3 -Wno-fatal --top-module chipbox \
 		-GCLK_HZ=$(CLK) -DM4_SIM -DM4_CLK_HZ=$(CLK).0 -CFLAGS "-DM4_CLK_HZ=$(CLK).0" -I$(VB_HDL) \
 		$(NES) $(GB) $(SID) $(OPL) $(SCC) $(HUC) $(OKIM) $(K060) $(GEN) $(CHIPBOX) $(JT51_SRC) $(JT49_SRC) $(JTOUTRUN) main.cpp -CFLAGS "-O2" -LDFLAGS "-lz" -o ../$@
@@ -60,6 +71,6 @@ lint:
 	else echo "линт: собственные файлы чисты"; fi
 
 clean:
-	rm -rf obj_dir chipbox_tb
+	rm -rf obj_dir chipbox_tb .clk-*
 
 .PHONY: clean lint
