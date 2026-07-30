@@ -330,7 +330,69 @@ fn vu_tick(last: &mut u32) {
         let v = chipbox_read(0x1A);
         ui::vu(v as u16, (v >> 16) as u16);
         md_filter_tick();
+        nes_filter_tick();
     }
+}
+
+/// Гейн чипа с учётом того, что просит сам файл.
+///
+/// `base` — наше подобранное значение, `chip` — номер чипа по
+/// спецификации VGM (бит 7 — парная часть составного чипа). Учитываются
+/// два множителя: свой у чипа из extra header и общий из поля 0x7C.
+///
+/// Зачем это нужно. Наши гейны — подобранные числа, одни на все файлы. Но
+/// автор рипа выравнивает баланс внутри системы сам, и для составных
+/// чипов это единственное место, где сказано, насколько SSG громче или
+/// тише FM. В корпусе такие поправки несут 91 файл из 314: рипы YM2203
+/// просят SSG в 1.602 раза громче, рипы YM2608 — в 0.625 раза тише.
+///
+/// Всё целочисленно: FPU из софткора вырезан. Потолок 255 — гейн в
+/// регистре восьмибитный, и просьбу «в 64 раза громче» (спецификация это
+/// допускает) выполнить всё равно нечем.
+/// Применять ли ПОЧИПОВЫЕ громкости из extra header.
+///
+/// Выключено, и это измерено, а не осторожность. Наши базовые гейны
+/// подбирались сравнением с libvgm на настоящих файлах — а те файлы уже
+/// несли эти поправки. То есть подгонка их УЖЕ впитала, и применить их
+/// сверху значит посчитать дважды.
+///
+/// Опыт на «01 Dailyopening.vgz» (YM2203, просит SSG в 1.602 раза
+/// громче), один бинарь, две копии файла — с просьбой и без:
+///
+///     уровень      -0.5 дБ  ->  +0.9 дБ   (промах вырос)
+///     80-160 Гц    -6.9     ->  -11.8
+///     640-1250     +5.6     ->   +0.9
+///     1250-2500    -7.4     ->  -10.8
+///     2500-5000    -4.8     ->   -1.3
+///
+/// Две полосы стали лучше, две хуже, общий уровень ушёл дальше от
+/// эталона. Чистого выигрыша нет, значит включать нельзя.
+///
+/// Что нужно, чтобы включить: заново откалибровать базовые гейны по
+/// файлам БЕЗ таких поправок, и учесть, что libvgm вдобавок нормирует
+/// общий уровень (NormalizeOverallVolume), то есть его абсолютная шкала
+/// не совпадает с нашей. Разбор и модель готовы и проверены тестами —
+/// остаётся только калибровка.
+const APPLY_CHIP_VOLUMES: bool = false;
+
+/// Гейн чипа с учётом того, что просит сам файл.
+///
+/// `base` — наше подобранное значение, `chip` — номер чипа по
+/// спецификации VGM (бит 7 — парная часть составного чипа).
+///
+/// Общий модификатор (поле 0x7C) применяется всегда: подгонка гейнов его
+/// впитать не могла, в корпусе его не ставит ни один файл из 314. А вот
+/// почиповые поправки — см. APPLY_CHIP_VOLUMES.
+///
+/// Всё целочисленно: FPU из софткора вырезан. Потолок 255 — гейн в
+/// регистре восьмибитный, и просьбу «в 64 раза громче» (спецификация это
+/// допускает) выполнить всё равно нечем.
+fn gain_of(h: Header, base: u32, chip: u8) -> u32 {
+    if base == 0 {
+        return 0;
+    }
+    let scaled = if APPLY_CHIP_VOLUMES { base * h.chip_scale(chip) / 256 } else { base };
+    (scaled * h.volume_scale() / 256).min(255)
 }
 
 /// Режим выходного фильтра Mega Drive из меню ядра (interact.json,
@@ -359,6 +421,41 @@ fn md_filter_tick() {
         MD_FILTER_CUR.store(m, Relaxed);
         chipbox_write(0x2C, m);
     }
+}
+
+/// Режим выходного тракта NES из меню ядра (переменная по адресу
+/// 0x1000_0104): 0 NES, 1 Famicom (без ФВЧ 440 Гц), 3 выключено.
+fn nes_filter_mode() -> u32 {
+    let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
+    p.APF_INTERACT.interact1.read().bits() & 3
+}
+
+static NES_FILTER_ON: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+static NES_FILTER_CUR: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(3);
+
+/// То же, что у Mega Drive: режим перечитывается на ходу, иначе сравнить
+/// его на слух можно было бы только переключая трек.
+fn nes_filter_tick() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !NES_FILTER_ON.load(Relaxed) {
+        return;
+    }
+    let m = nes_filter_mode();
+    if m != NES_FILTER_CUR.load(Relaxed) {
+        NES_FILTER_CUR.store(m, Relaxed);
+        chipbox_write(0x2D, m);
+    }
+}
+
+/// Включить тракт NES на время файла Famicom и снять его на остальных.
+fn nes_filter_set(on: bool) {
+    use core::sync::atomic::Ordering::Relaxed;
+    NES_FILTER_ON.store(on, Relaxed);
+    let m = if on { nes_filter_mode() } else { 3 };
+    NES_FILTER_CUR.store(m, Relaxed);
+    chipbox_write(0x2D, m);
 }
 
 /// Диагностика перемотки: f — бит FF в контрол-слове, которое фирмварь
@@ -929,6 +1026,8 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     // разброса — разница линейного микширования у эталона и настоящего
     // нелинейного у нас, одним множителем он не убирается.
     chipbox_write(0xC, 120);
+    // NSF — это всегда Famicom, тракт включаем по режиму из меню
+    nes_filter_set(true);
     chipbox_write(0x15, 0);
 
     println!("NSF: {num_songs} песен, rate {play_hz} Гц; D-pad влево/вправо — переключение");
@@ -1946,7 +2045,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         // выходит f = clock/(16*(N+1)) — вдвое выше расхожей формулы с
         // 32. Отдаём чипу полную частоту, иначе SCC играет октавой ниже.
         chipbox_write(0x21, (((scc_clk as u64 * 2) << 32) / CHIPBOX_CLK_HZ) as u32);
-        chipbox_write(0x22, 64); // scc_gain
+        chipbox_write(0x22, gain_of(header, 64, 0x19)); // scc_gain
     }
     // OPL-семейство (YM3812/YM3526/YMF262) играет на нашем OPL3. Клок OPL3
     // номинально 14.32 МГц, но ядро тактуется master-клоком x2 (25.45 МГц
@@ -1984,17 +2083,18 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     let okim_clk = header.clocks.okim6295 & 0x7FFF_FFFF; // бит31 = флаг чипа
     if okim_clk != 0 {
         chipbox_write(0x23, (((okim_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
-        chipbox_write(0x24, 1 << 8 | 64); // ss=1, okim_gain=64
+        chipbox_write(0x24, 1 << 8 | gain_of(header, 64, 0x18)); // ss=1, okim_gain
     }
     let huc_clk = header.clocks.huc6280;
     if huc_clk != 0 {
         chipbox_write(0x27, (((huc_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
-        chipbox_write(0x28, 128); // huc_gain: модель громкости приведена к эталонной, остаток ~6 дБ добираем здесь
+        // huc_gain: модель громкости приведена к эталонной, остаток ~6 дБ добираем здесь
+        chipbox_write(0x28, gain_of(header, 128, 0x1B));
     }
     let k060_clk = header.clocks.k053260;
     if k060_clk != 0 {
         chipbox_write(0x25, (((k060_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
-        chipbox_write(0x26, 64); // k060_gain
+        chipbox_write(0x26, gain_of(header, 64, 0x1D)); // k060_gain
     }
     // Genesis-баланс: PSG заметно тише FM. Гейн FM включает и OPN: у
     // файла YM2608/YM2203 поле клока YM2612 пустое, и раньше FM глушился
@@ -2005,23 +2105,40 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // громкого из проверенных треков запас до потолка 6.5 дБ. Берём +4 дБ
     // (x1.6), это оставляет около 2.5 дБ и на нём. Отношение FM к PSG
     // сохранено — по полосам оно сходилось с эталоном.
+    // Номер чипа для гейна FM и для гейна SSG/AY. У составных OPN парная
+    // часть (SSG) адресуется тем же номером с битом 7 — именно там рипы и
+    // задают баланс FM против SSG.
+    let fm_id: u8 = if fm_clk != 0 {
+        0x02
+    } else if header.clocks.ym2608 != 0 {
+        0x07
+    } else {
+        0x06
+    };
+    let ssg_id: u8 = if header.clocks.ym2608 != 0 {
+        0x87
+    } else if header.clocks.ym2203 != 0 {
+        0x86
+    } else {
+        0x12
+    };
     chipbox_write(
         0x15,
-        if sn_clk != 0 { 51u32 } else { 0 } << 8
-            | if fm_clk != 0 || opn_clk != 0 { 102u32 } else { 0 },
+        gain_of(header, if sn_clk != 0 { 51 } else { 0 }, 0x00) << 8
+            | gain_of(header, if fm_clk != 0 || opn_clk != 0 { 102 } else { 0 }, fm_id),
     );
     // Гейны: неиспользуемые чипы глушим; SegaPCM 34/64 — баланс Out Run
     // по MAME (0.30 FM / 0.70 PCM с учётом нативных амплитуд ядер)
-    let gains = if adpcm_clk != 0 { 64u32 } else { 0 } << 24
-        | if pcm_clk != 0 { 34u32 } else { 0 } << 16
+    let gains = gain_of(header, if adpcm_clk != 0 { 64 } else { 0 }, 0x17) << 24
+        | gain_of(header, if pcm_clk != 0 { 34 } else { 0 }, 0x04) << 16
         // AY остаётся на 64. Поднимал до 128 по изолированному замеру
         // (msx_part.py), но синтетический тон показал, что при 128 мы на
         // 6.1 дБ ГРОМЧЕ эталона, и полный микс на корпусе это
         // подтверждает. Изоляция врёт: libvgm нормирует выход по числу
         // объявленных чипов у SCC и не нормирует у AY, и сравнивать по
         // ней абсолютные уровни нельзя.
-        | if ay_clk != 0 || opn_clk != 0 { 64u32 } else { 0 } << 8
-        | if ym_clk != 0 { 64u32 } else { 0 };
+        | gain_of(header, if ay_clk != 0 || opn_clk != 0 { 64 } else { 0 }, ssg_id) << 8
+        | gain_of(header, if ym_clk != 0 { 64 } else { 0 }, 0x03);
     chipbox_write(6, gains);
     // Выходной фильтр Mega Drive (см. chipbox.sv): у консоли в тракте
     // стоит ФНЧ, и он есть у обеих моделей. Включаем только там, где это
@@ -2035,13 +2152,25 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         MD_FILTER_CUR.store(m, Relaxed);
         chipbox_write(0x2C, m);
     }
+    // Выходной тракт NES (см. chipbox.sv): цепочка ФВЧ 90 и 440 Гц и ФНЧ
+    // 14 кГц, задокументированная на NESdev. Включаем только там, где это
+    // действительно Famicom.
+    nes_filter_set(nes_clk != 0);
     // {opl_gain, sid_gain, gb_gain, apu_gain}. У VGM-AdLib регистры громкости
     // выкручены сильнее, чем у нашего MIDI-конвертера: на 64 выход клиппит
     // (проверено на Dune в симуляции), поэтому для VGM берём 16.
+    let opl_id: u8 = if header.clocks.ymf262 != 0 {
+        0x0C
+    } else if header.clocks.ym3526 != 0 {
+        0x0A
+    } else {
+        0x09
+    };
     chipbox_write(
         0xC,
-        if opl_clk != 0 { 16u32 } else { 0 } << 24 | if nes_clk != 0 { 120u32 } else { 0 }
-            | if header.clocks.gb_dmg != 0 { 64u32 } else { 0 } << 8,
+        gain_of(header, if opl_clk != 0 { 16 } else { 0 }, opl_id) << 24
+            | gain_of(header, if nes_clk != 0 { 120 } else { 0 }, 0x14)
+            | gain_of(header, if header.clocks.gb_dmg != 0 { 64 } else { 0 }, 0x13) << 8,
     );
     ctrl_reset();
     // Game Boy в VGM: рипа с кодом нет, играет поток записей в APU.

@@ -681,6 +681,7 @@ module chipbox #(
           6'h27: huc_phase_inc <= data_write;
           6'h28: huc_gain <= data_write[7:0];
           6'h2C: md_lpf_mode <= data_write[1:0];
+          6'h2D: nes_flt_mode <= data_write[1:0];
 `endif
 `ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
@@ -2151,6 +2152,64 @@ module chipbox #(
   function automatic signed [15:0] sat16_34(input signed [33:0] v);
     sat16_34 = v > 32767 ? 16'sd32767 : v < -32768 ? -16'sd32768 : v[15:0];
   endfunction
+
+  // --------------------------------------------------------------------
+  // Выходной тракт NES.
+  //
+  // За ЦАП-ами приставки стоит цепочка, задокументированная на NESdev:
+  // ФВЧ первого порядка 90 Гц, второй ФВЧ 440 Гц и ФНЧ 14 кГц. Так
+  // считают Mesen, Nestopia и puNES. У нас на этом месте был только
+  // общий DC-блокер на 7.5 Гц, то есть низа у нас заметно больше, чем у
+  // приставки: каскад 90+440 режет 110 Гц на 14.5 дБ, 220 Гц на 7.7 дБ.
+  //
+  // Почему режимами, а не молча. Эталоны расходятся: libgme, по которому
+  // мы сверяемся, применяет вместо этой цепочки мягкий спад от 80 Гц, и
+  // потому провала не показывал. У Famicom тракт свой и второго ФВЧ в
+  // нём нет. Решать на слух — владельцу, как это уже вышло с фильтром
+  // Mega Drive. 0 = NES, 1 = Famicom (без 440 Гц), 3 = выключено.
+  reg [1:0] nes_flt_mode = 2'd3;
+
+  // Состояние держим в 16.8 — младшие 8 бит дробные. Без них целое
+  // усечение «прилипает»: у ФВЧ при y = -1 арифметический сдвиг даёт
+  // снова -1, и фильтр вместо затухания звенит между -1 и +1.
+  localparam NF_W = 27;
+  reg signed [NF_W-1:0] nf_h1x_l = 0, nf_h1y_l = 0, nf_h2x_l = 0, nf_h2y_l = 0, nf_lp_l = 0;
+  reg signed [NF_W-1:0] nf_h1x_r = 0, nf_h1y_r = 0, nf_h2x_r = 0, nf_h2y_r = 0, nf_lp_r = 0;
+
+  // Коэффициенты подобраны так, чтобы обойтись сдвигами и сложениями:
+  // умножители в проекте на исходе. a = 1 - 3/256 даёт срез 90.6 Гц,
+  // a = 1 - 7/128 — 442 Гц, b = 165/256 — 13.9 кГц. Отклонение от
+  // задокументированных 90 / 440 / 14000 меньше процента.
+  function automatic signed [NF_W-1:0] nf_hp90(input signed [NF_W-1:0] t);
+    nf_hp90 = t - ((t * 3 + 128) >>> 8);
+  endfunction
+  function automatic signed [NF_W-1:0] nf_hp440(input signed [NF_W-1:0] t);
+    nf_hp440 = t - ((t * 7 + 64) >>> 7);
+  endfunction
+  function automatic signed [NF_W-1:0] nf_lp14k(input signed [NF_W-1:0] d);
+    nf_lp14k = (d * 165 + 128) >>> 8;
+  endfunction
+  function automatic signed [15:0] sat16_nf(input signed [NF_W-1:0] v);
+    sat16_nf = (v >>> 8) > 32767 ? 16'sd32767
+             : (v >>> 8) < -32768 ? -16'sd32768 : v[23:8];
+  endfunction
+`endif
+
+`ifdef M4_HAS_HOME
+  // Выход тракта Mega Drive — он же вход тракта NES
+  wire signed [15:0] md_out_l = md_lpf_mode == 2'd3 ? sat16(avg_l) : lpf_y_l;
+  wire signed [15:0] md_out_r = md_lpf_mode == 2'd3 ? sat16(avg_r) : lpf_y_r;
+  // Вход в 16.8 и обе ступени ФВЧ. Второй ФВЧ считается всегда, а в
+  // режиме Famicom просто не выбирается — так его состояние не
+  // застаивается и переключение не даёт щелчка длиной в постоянную времени.
+  wire signed [NF_W-1:0] nf_in_l = {{(NF_W - 24) {md_out_l[15]}}, md_out_l, 8'b0};
+  wire signed [NF_W-1:0] nf_in_r = {{(NF_W - 24) {md_out_r[15]}}, md_out_r, 8'b0};
+  wire signed [NF_W-1:0] nf_s1_l = nf_hp90(nf_h1y_l + nf_in_l - nf_h1x_l);
+  wire signed [NF_W-1:0] nf_s1_r = nf_hp90(nf_h1y_r + nf_in_r - nf_h1x_r);
+  wire signed [NF_W-1:0] nf_s2_l = nf_hp440(nf_h2y_l + nf_s1_l - nf_h2x_l);
+  wire signed [NF_W-1:0] nf_s2_r = nf_hp440(nf_h2y_r + nf_s1_r - nf_h2x_r);
+  wire signed [NF_W-1:0] nf_pick_l = nes_flt_mode == 2'd0 ? nf_s2_l : nf_s1_l;
+  wire signed [NF_W-1:0] nf_pick_r = nes_flt_mode == 2'd0 ? nf_s2_r : nf_s1_r;
 `endif
 
   // Накопитель усреднения: держит первый подотсчёт до второго
@@ -2197,8 +2256,20 @@ module chipbox #(
         lpf_y_r <= sat16_34(lpf_acc_r >>> 15);
         lpf_x1_r <= lpf_x0_r;
         lpf_x0_r <= sat16(avg_r);
-        chip_left <= md_lpf_mode == 2'd3 ? sat16(avg_l) : lpf_y_l;
-        chip_right <= md_lpf_mode == 2'd3 ? sat16(avg_r) : lpf_y_r;
+        // Тракт NES стоит за трактом Mega Drive. Оба сразу не включаются
+        // никогда: режим ставит фирмварь по тому, какой это файл.
+        nf_h1x_l <= nf_in_l;
+        nf_h1y_l <= nf_s1_l;
+        nf_h2x_l <= nf_s1_l;
+        nf_h2y_l <= nf_s2_l;
+        nf_lp_l <= nf_lp_l + nf_lp14k(nf_pick_l - nf_lp_l);
+        nf_h1x_r <= nf_in_r;
+        nf_h1y_r <= nf_s1_r;
+        nf_h2x_r <= nf_s1_r;
+        nf_h2y_r <= nf_s2_r;
+        nf_lp_r <= nf_lp_r + nf_lp14k(nf_pick_r - nf_lp_r);
+        chip_left <= nes_flt_mode == 2'd3 ? md_out_l : sat16_nf(nf_lp_l);
+        chip_right <= nes_flt_mode == 2'd3 ? md_out_r : sat16_nf(nf_lp_r);
 `else
         chip_left <= sat16(avg_l);
         chip_right <= sat16(avg_r);

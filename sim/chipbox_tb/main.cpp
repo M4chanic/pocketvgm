@@ -135,6 +135,11 @@ struct Tb {
 static const uint32_t OUT_RATE = 48000;
 static bool out_stage = true;
 
+// Режим выходного тракта NES (регистр 0x2D): 0 NES, 1 Famicom, 3 выключен.
+// По умолчанию выключен — ровно как в меню ядра, чтобы стенд играл то же,
+// что железо. Для замеров включается ключом --nes-filter.
+static uint32_t nes_flt_opt = 3;
+
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
     size_t n_in = pcm.size() / 2;
     size_t n_out = (size_t)((double)n_in * OUT_RATE / rate);
@@ -465,6 +470,7 @@ static int nsf_file(const char* path, const char* out, double seconds) {
     Tb tb;
     mute_all(tb);
     tb.wb(0xC, true, 120);   // см. комментарий в фирмвари: APU шёл на ~5 дБ ниже эталона
+    tb.wb(0x2D, true, nes_flt_opt);   // выходной тракт NES, см. --nes-filter
     tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
 
@@ -512,6 +518,7 @@ static int vrc6_selftest(const char* out, double seconds) {
     Tb tb;
     mute_all(tb);
     tb.wb(0xC, true, 120);   // канал APU (VRC6 подмешан в него), уровень см. в фирмвари
+    tb.wb(0x2D, true, nes_flt_opt);
     tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
 
@@ -1396,6 +1403,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "-t") && i + 1 < argc) max_seconds = atof(argv[++i]);
         else if (!strcmp(argv[i], "--nsf-selftest")) selftest = true;
         else if (!strcmp(argv[i], "--no-out-stage")) { out_stage = false; }
+        else if (!strcmp(argv[i], "--nes-filter") && i + 1 < argc) { nes_flt_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
         else if (!strcmp(argv[i], "--gbs-selftest")) { return gbs_selftest(out, 2.0); }
@@ -1479,6 +1487,74 @@ int main(int argc, char** argv) {
     struct StrBlock { uint32_t off, len; };
     std::vector<StrBlock> adpcm_blocks;
     uint64_t total_ticks = 0;
+    // Громкости, которые просит сам файл. Разбор и модель — те же, что в
+    // фирмвари (firmware/vgm-core/src/lib.rs), а туда сняты с libvgm.
+    // Держать это только в фирмвари нельзя: тогда стенд играет другой
+    // баланс, чем железо, и сравнение с эталоном относится не к тому.
+    int vol_mod = 0;
+    if (hdr_end > 0x7C) {
+        uint8_t v = d[0x7C];
+        vol_mod = v <= 0xC0 ? v : (v == 0xC1 ? -0x40 : (int)v - 0x100);
+    }
+    struct ChipVol { uint8_t chip, inst; uint16_t raw; };
+    std::vector<ChipVol> chip_vols;
+    if (hdr_end >= 0xC0) {
+        uint32_t rel = rd32(d, 0xBC);
+        if (rel) {
+            size_t xo = 0xBC + rel;
+            if (xo + 12 <= d.size() && rd32(d, xo) >= 12) {
+                uint32_t vrel = rd32(d, xo + 8);
+                if (vrel) {
+                    size_t vb = xo + 8 + vrel;
+                    if (vb < d.size()) {
+                        size_t n = d[vb];
+                        for (size_t i = 0; i < n && vb + 5 + 4 * i <= d.size(); i++)
+                            chip_vols.push_back({d[vb+1+4*i], (uint8_t)(d[vb+2+4*i] & 1),
+                                                 (uint16_t)(d[vb+3+4*i] | d[vb+4+4*i] << 8)});
+                    }
+                }
+            }
+        }
+    }
+    // Базовые громкости чипов из libvgm — только для абсолютных записей
+    static const uint16_t CHIP_BASE_VOL[32] = {
+        0x80, 0x200, 0x100, 0x100, 0x180, 0xB0, 0x100, 0x80,
+        0x80, 0x100, 0x100, 0x100, 0x100, 0x100, 0x100, 0x98,
+        0x80, 0xE0, 0x100, 0xC0, 0x100, 0x40, 0x11E, 0x1C0,
+        0x100, 0xA0, 0x100, 0x100, 0x100, 0x100, 0x100, 0x100,
+    };
+    static const uint32_t POW2_32[32] = {
+        256, 262, 267, 273, 279, 285, 292, 298, 304, 311, 318, 325, 332, 339, 347, 354,
+        362, 370, 378, 386, 395, 403, 412, 421, 431, 440, 450, 459, 470, 480, 490, 501,
+    };
+    uint32_t vol_scale;
+    {
+        int i = vol_mod >> 5;              // целая часть степени, вниз
+        uint32_t frac = POW2_32[vol_mod & 31];
+        vol_scale = i >= 0 ? frac << std::min(i, 8) : frac >> std::min(-i, 8);
+    }
+    auto chip_scale = [&](uint8_t chip) -> uint32_t {
+        for (auto& e : chip_vols) {
+            if (e.chip != chip || e.inst != 0) continue;
+            if (e.raw & 0x8000) return e.raw & 0x7FFF;
+            uint32_t base = CHIP_BASE_VOL[chip & 0x1F];
+            if ((chip & 0x80) && (chip & 0x7F) == 0x06) base /= 2;
+            return base ? (uint32_t)e.raw * 256 / base : 256;
+        }
+        return 256;
+    };
+    // Почиповые громкости пока НЕ применяем — см. APPLY_CHIP_VOLUMES в
+    // фирмвари: наши базовые гейны подбирались по файлам, которые эти
+    // поправки уже несут, и применить их сверху значит посчитать дважды.
+    // Замер это подтвердил. Общий модификатор 0x7C применяется всегда.
+    const bool apply_chip_volumes = false;
+    auto gain_of = [&](uint32_t base, uint8_t chip) -> uint32_t {
+        if (!base) return 0;
+        uint32_t v = apply_chip_volumes ? base * chip_scale(chip) / 256 : base;
+        v = v * vol_scale / 256;
+        return v > 255 ? 255 : v;
+    };
+
     size_t pcm_masked = 0, stream_warn = 0;
     // Отброшенное осознанно: записи второго экземпляра чипа (второго
     // экземпляра в железе нет) и маски стерео Game Gear. И то, и другое
@@ -1688,12 +1764,22 @@ int main(int argc, char** argv) {
     mute_all(tb);
     // Гейны: неиспользуемые чипы глушим (idle-DC/шум не попадает в микс);
     // SegaPCM 34/64 — баланс Out Run по MAME (0.30 FM / 0.70 PCM)
-    tb.wb(6, true, (adpcm_clk ? 64u : 0u) << 24 | (pcm_clk ? 34u : 0u) << 16
-                 | ((ay_clk || opn_clk) ? 64u : 0u) << 8 | (ym_clk ? 64u : 0u));
-    tb.wb(0xC, true, (opl_clk ? 16u : 0u) << 24 | (nes_clk ? 120u : 0u) | (gb_clk_hdr ? 64u : 0u) << 8);
+    // Номера чипов по спецификации VGM; у составных OPN парная часть
+    // (SSG) — тот же номер с битом 7, и рипы задают баланс именно там.
+    uint8_t fm_id = fm_clk ? 0x02 : (ym2608_clk ? 0x07 : 0x06);
+    uint8_t ssg_id = ym2608_clk ? 0x87 : (ym2203_clk ? 0x86 : 0x12);
+    uint8_t opl_id = ymf262_clk ? 0x0C : (ym3526_clk ? 0x0A : 0x09);
+    tb.wb(6, true, gain_of(adpcm_clk ? 64u : 0u, 0x17) << 24
+                 | gain_of(pcm_clk ? 34u : 0u, 0x04) << 16
+                 | gain_of((ay_clk || opn_clk) ? 64u : 0u, ssg_id) << 8
+                 | gain_of(ym_clk ? 64u : 0u, 0x03));
+    tb.wb(0xC, true, gain_of(opl_clk ? 16u : 0u, opl_id) << 24
+                   | gain_of(nes_clk ? 120u : 0u, 0x14)
+                   | gain_of(gb_clk_hdr ? 64u : 0u, 0x13) << 8);
     // Выходной ФНЧ Mega Drive: только для файлов с YM2612 — у OPN-рипов
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
     tb.wb(0x2C, true, fm_clk ? 0u : 3u);
+    tb.wb(0x2D, true, nes_clk ? nes_flt_opt : 3u);
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (scc_clk) {
         // Заголовок VGM несёт половину шинной частоты MSX: у эталона
@@ -1701,15 +1787,15 @@ int main(int argc, char** argv) {
         // f = clock/(16*(N+1)) — вдвое выше расхожей формулы с 32. Чипу
         // отдаём полную частоту, иначе весь SCC играет октавой ниже.
         tb.wb(0x21, true, (uint32_t)((double)scc_clk * 2 / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(0x22, true, 64);
+        tb.wb(0x22, true, gain_of(64, 0x19));
     }
     if (k060_clk) {
         tb.wb(0x25, true, (uint32_t)((double)k060_clk / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(0x26, true, 64);
+        tb.wb(0x26, true, gain_of(64, 0x1D));
     }
     if (huc_clk) {
         tb.wb(0x27, true, (uint32_t)((double)huc_clk / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(0x28, true, 128);
+        tb.wb(0x28, true, gain_of(128, 0x1B));
     }
     if (opn_clk) {
         // Делители сняты с эталона (libvgm, fmopn.c): FM идёт с частотой
@@ -1732,7 +1818,8 @@ int main(int argc, char** argv) {
         tb.wb(0x16, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));
     }
     if (sn_clk) tb.wb(0x17, true, (uint32_t)((double)sn_clk / CLK_HZ * 4294967296.0 + 0.5));
-    tb.wb(0x15, true, (sn_clk ? 51u : 0u) << 8 | ((fm_clk || opn_clk) ? 102u : 0u));
+    tb.wb(0x15, true, gain_of(sn_clk ? 51u : 0u, 0x00) << 8
+                    | gain_of((fm_clk || opn_clk) ? 102u : 0u, fm_id));
     tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
     // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
     if (scc_clk) tb.wb(0, true, 0xF0000000u | (7u << 16));

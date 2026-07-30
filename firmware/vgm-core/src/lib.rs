@@ -148,6 +148,20 @@ pub struct Clocks {
     pub second_chip: bool,
 }
 
+/// Одна запись таблицы громкостей из extra header.
+///
+/// `chip` — номер чипа по спецификации VGM; бит 7 означает ПАРНУЮ часть
+/// составного чипа (у YM2203 и YM2608 это SSG, а не FM). `raw` — сырое
+/// поле: бит 15 отличает относительную громкость от абсолютной.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChipVolume {
+    pub chip: u8,
+    pub instance: u8,
+    pub raw: u16,
+}
+
+pub const MAX_CHIP_VOLUMES: usize = 8;
+
 /// Разобранный заголовок VGM. Владение данными остаётся у вызывающего.
 #[derive(Debug, Clone, Copy)]
 pub struct Header {
@@ -158,6 +172,14 @@ pub struct Header {
     pub data_offset: usize,
     pub gd3_offset: Option<usize>,
     pub clocks: Clocks,
+    /// Общий модификатор громкости (поле 0x7C), уже со снятым знаком.
+    /// Множитель = 2^(значение/32). Ноль означает «без изменений».
+    pub volume_modifier: i16,
+    /// Громкости по чипам из extra header (VGM 1.70+). Автор рипа
+    /// выравнивает баланс именно здесь, и у составных чипов это
+    /// единственное место, где сказано, насколько SSG громче или тише FM.
+    pub chip_volumes: [ChipVolume; MAX_CHIP_VOLUMES],
+    pub chip_volume_count: u8,
 }
 
 fn rd32(d: &[u8], off: usize) -> Result<u32, Error> {
@@ -260,6 +282,24 @@ impl Header {
                     && rd32(d, 0x0C).unwrap_or(0) & 0x8000_0000 == 0),
         };
 
+        // Модификатор громкости: множитель 2^(v/32). Разворот знака взят
+        // с libvgm (vgmplayer.cpp), вместе с его особым случаем 0xC1 —
+        // тот даёт -0x40, а не -0x3F, как вышло бы по общему правилу.
+        let volume_modifier = if hdr_end > 0x7C {
+            let v = d[0x7C];
+            if v <= 0xC0 {
+                v as i16
+            } else if v == 0xC1 {
+                -0x40
+            } else {
+                v as i16 - 0x100
+            }
+        } else {
+            0
+        };
+
+        let (chip_volumes, chip_volume_count) = parse_chip_volumes(d, hdr_end);
+
         Ok(Header {
             version,
             total_ticks: rd32(d, 0x18)?,
@@ -268,8 +308,120 @@ impl Header {
             data_offset,
             gd3_offset,
             clocks,
+            volume_modifier,
+            chip_volumes,
+            chip_volume_count,
         })
     }
+}
+
+/// Базовые громкости чипов, снятые с libvgm (`_CHIP_VOLUME` в
+/// player/vgmplayer.cpp). Нужны только для АБСОЛЮТНЫХ записей: там
+/// сказано «поставь столько-то» в шкале libvgm, и превратить это в
+/// поправку к нашему гейну можно лишь через отношение к тому, что стояло
+/// бы по умолчанию. Для относительных записей таблица не нужна вовсе.
+const CHIP_BASE_VOL: [u16; 32] = [
+    0x80, 0x200, 0x100, 0x100, 0x180, 0xB0, 0x100, 0x80, // SN76489..YM2608
+    0x80, 0x100, 0x100, 0x100, 0x100, 0x100, 0x100, 0x98, // YM2610..YMZ280B
+    0x80, 0xE0, 0x100, 0xC0, 0x100, 0x40, 0x11E, 0x1C0, // RF5C164..OKIM6258
+    0x100, 0xA0, 0x100, 0x100, 0x100, 0x100, 0x100, 0x100, // OKIM6295..QSound
+];
+
+/// 2^(k/32) в 1/256 долях
+const POW2_32: [u32; 32] = [
+    256, 262, 267, 273, 279, 285, 292, 298, 304, 311, 318, 325, 332, 339, 347, 354, 362, 370,
+    378, 386, 395, 403, 412, 421, 431, 440, 450, 459, 470, 480, 490, 501,
+];
+
+impl Header {
+    /// Общий множитель громкости файла, в 1/256 долях (256 = без правки).
+    ///
+    /// Целочисленно: степень двойки разложена на целую часть (сдвиг) и
+    /// дробную (таблица на 32 значения). Вещественной арифметики в
+    /// фирмвари нет — FPU из софткора вырезан.
+    pub fn volume_scale(&self) -> u32 {
+        let v = self.volume_modifier;
+        let i = v >> 5; // арифметический сдвиг даёт целую часть вниз
+        let frac = POW2_32[(v & 31) as usize];
+        if i >= 0 {
+            frac << (i.min(8) as u32)
+        } else {
+            frac >> ((-i).min(8) as u32)
+        }
+    }
+
+    /// Во сколько раз файл просит изменить громкость чипа, в 1/256 долях.
+    ///
+    /// `chip` — номер по спецификации VGM, бит 7 для парной части
+    /// (у YM2203/YM2608 это SSG). 256 означает «ничего не менять».
+    pub fn chip_scale(&self, chip: u8) -> u32 {
+        for e in &self.chip_volumes[..self.chip_volume_count as usize] {
+            if e.chip != chip || e.instance != 0 {
+                continue;
+            }
+            if e.raw & 0x8000 != 0 {
+                return (e.raw & 0x7FFF) as u32; // относительная — это и есть множитель
+            }
+            let idx = (chip & 0x7F) as usize;
+            let mut base = *CHIP_BASE_VOL.get(idx).unwrap_or(&0x100) as u32;
+            // У YM2203 парная часть (SSG) по умолчанию вдвое тише FM —
+            // так считает libvgm, и абсолютное значение надо мерить от
+            // этого, иначе поправка выйдет вдвое.
+            if chip & 0x80 != 0 && idx == 0x06 {
+                base /= 2;
+            }
+            return if base == 0 { 256 } else { e.raw as u32 * 256 / base };
+        }
+        256
+    }
+}
+
+/// Таблица громкостей из extra header (смещение 0xBC, VGM 1.70+).
+///
+/// Раскладка: сам extra header — размер, смещение таблицы тактовых,
+/// смещение таблицы громкостей; оба смещения отсчитываются от своего
+/// поля. Таблица громкостей — счётчик и по 4 байта на запись.
+///
+/// Всё с проверкой границ: заголовок приходит с карты памяти, и падать
+/// на кривом файле нельзя.
+fn parse_chip_volumes(d: &[u8], hdr_end: usize) -> ([ChipVolume; MAX_CHIP_VOLUMES], u8) {
+    let mut out = [ChipVolume::default(); MAX_CHIP_VOLUMES];
+    if hdr_end < 0xC0 {
+        return (out, 0);
+    }
+    let rel = rd32(d, 0xBC).unwrap_or(0) as usize;
+    if rel == 0 {
+        return (out, 0);
+    }
+    let xo = 0xBC + rel;
+    if rd32(d, xo).unwrap_or(0) < 12 {
+        return (out, 0); // таблицы громкостей в этом заголовке нет
+    }
+    let vrel = rd32(d, xo + 8).unwrap_or(0) as usize;
+    if vrel == 0 {
+        return (out, 0);
+    }
+    let vb = xo + 8 + vrel;
+    let n = match d.get(vb) {
+        Some(&n) => (n as usize).min(MAX_CHIP_VOLUMES),
+        None => return (out, 0),
+    };
+    let mut got = 0;
+    for i in 0..n {
+        let e = vb + 1 + 4 * i;
+        match d.get(e..e + 4) {
+            Some(b) => {
+                out[got] = ChipVolume {
+                    chip: b[0],
+                    instance: b[1] & 1,
+                    raw: b[2] as u16 | (b[3] as u16) << 8,
+                };
+                got += 1;
+            }
+            None => break,
+        }
+    }
+    (out, got as u8)
 }
 
 /// Итератор по командам VGM. Не владеет данными; позицию можно
@@ -800,6 +952,58 @@ mod tests {
         assert_eq!(r.next_event().unwrap(), Event::SecondChip { cmd: 0xA2 });
         assert_eq!(r.next_event().unwrap(), Event::SecondChip { cmd: 0xB4 });
         assert_eq!(r.next_event().unwrap(), Event::End);
+    }
+
+    /// Громкости чипов из extra header. Значения взяты из настоящих
+    /// файлов корпуса: рипы YM2203 просят SSG в 1.602 раза ГРОМЧЕ
+    /// умолчания, рипы YM2608 — в 0.625 раза тише. Игнорировать это
+    /// значит слушать другой баланс FM и SSG, чем задумал автор рипа.
+    #[test]
+    fn chip_volumes_from_extra_header() {
+        let mut v = alloc::vec![0u8; 0x100];
+        v[0..4].copy_from_slice(VGM_MAGIC);
+        v[0x08..0x0C].copy_from_slice(&0x0171u32.to_le_bytes());
+        v[0x34..0x38].copy_from_slice(&(0x100u32 - 0x34).to_le_bytes());
+        v[0x44..0x48].copy_from_slice(&3_993_600u32.to_le_bytes()); // YM2203
+        // extra header по 0xC0: размер 12, тактовых нет, громкости +4
+        v[0xBC..0xC0].copy_from_slice(&(0xC0u32 - 0xBC).to_le_bytes());
+        v[0xC0..0xC4].copy_from_slice(&12u32.to_le_bytes());
+        v[0xC4..0xC8].copy_from_slice(&0u32.to_le_bytes());
+        v[0xC8..0xCC].copy_from_slice(&4u32.to_le_bytes());
+        // Таблица лежит по xo + 8 + смещение = 0xC0 + 8 + 4 = 0xCC, то
+        // есть ВНУТРИ заголовка, а не за ним: одна запись, SSG YM2203
+        // (0x86), относительная 0x819A
+        v[0xCC..0xD1].copy_from_slice(&[1, 0x86, 0x00, 0x9A, 0x81]);
+        v.push(0x66);
+        let eof = (v.len() - 4) as u32;
+        v[0x04..0x08].copy_from_slice(&eof.to_le_bytes());
+
+        let h = Header::parse(&v).unwrap();
+        assert_eq!(h.chip_volume_count, 1);
+        assert_eq!(h.chip_volumes[0], ChipVolume { chip: 0x86, instance: 0, raw: 0x819A });
+        assert_eq!(h.chip_scale(0x86), 0x19A); // 410/256 = 1.602x
+        assert_eq!(h.chip_scale(0x06), 256); // FM-часть не тронута
+        assert_eq!(h.chip_scale(0x12), 256); // чужой чип тоже
+        assert_eq!(h.volume_scale(), 256); // модификатор не задан
+    }
+
+    /// Общий модификатор громкости: множитель 2^(v/32), знак разворачивается
+    /// как в libvgm, вместе с особым случаем 0xC1.
+    #[test]
+    fn volume_modifier_matches_reference() {
+        let mut v = synth_vgm(&[0x66], None);
+        let set = |v: &mut alloc::vec::Vec<u8>, b: u8| {
+            v[0x7C] = b;
+            Header::parse(v).unwrap()
+        };
+        assert_eq!(set(&mut v, 0x00).volume_scale(), 256); // без изменений
+        assert_eq!(set(&mut v, 0x20).volume_scale(), 512); // ровно вдвое
+        assert_eq!(set(&mut v, 0x40).volume_scale(), 1024); // вчетверо
+        assert_eq!(set(&mut v, 0xE0).volume_scale(), 128); // -0x20 -> вдвое тише
+        // 0xC1 у libvgm даёт -0x40, а не -0x3F: 2^-2 = 0.25
+        assert_eq!(set(&mut v, 0xC1).volume_scale(), 64);
+        assert_eq!(set(&mut v, 0x10).volume_modifier, 0x10);
+        assert_eq!(set(&mut v, 0xFF).volume_modifier, -1);
     }
 
     /// Признак второго экземпляра в заголовке — бит 30 поля тактовой. У
