@@ -22,6 +22,16 @@
 
     */
 
+// m4pocket: отводы и ширина сдвигового регистра сделаны настраиваемыми.
+//
+// Здесь была зашита разновидность Master System: 16 бит, отводы 0 и 3. У
+// SN76489AN (SG-1000, аркады, BBC Micro) регистр 15-битный, а отводы 0 и
+// 1 — шум звучит иначе и по высоте, и по окраске. Заголовок VGM несёт
+// эти параметры в полях 0x28 (маска отводов) и 0x2A (ширина), и раньше мы
+// их не читали вовсе.
+//
+// Значения по умолчанию воспроизводят прежнее поведение бит в бит:
+// fb_mask = 16'h0009 даёт ^(shift & 9) = shift[0]^shift[3], sr15 = 0.
 module jt89_noise(
     input               clk,
 (* direct_enable = 1 *) input   clk_en,
@@ -30,6 +40,9 @@ module jt89_noise(
     input         [2:0] ctrl3,
     input         [3:0] vol,
     input               tone2,
+    input        [15:0] fb_mask,
+    input               sr15,     // 1 = регистр 15 бит, 0 = 16 бит
+    output              raw,      // выход до применения громкости
     output        [8:0] snd
 );
 
@@ -69,14 +82,24 @@ always @(posedge clk)
         end
     end
 
-wire fb = ctrl3[2]?(shift[0]^shift[3]):shift[0];
+assign raw = shift[0];
+
+// Белый шум складывает отводы по маске, периодический берёт один бит —
+// как и было, только маска теперь задаётся снаружи.
+wire fb = ctrl3[2] ? ^(shift & fb_mask) : shift[0];
+
+// Стартовое значение и место вдвига зависят от ширины регистра: у 15
+// битов старший разряд не используется вовсе.
+wire [15:0] seed = sr15 ? {1'b0, 1'b1, 14'd0} : {1'b1, 15'd0};
+wire [15:0] next = sr15 ? {1'b0, fb, shift[14:1]} : {fb, shift[15:1]};
+wire        empty = sr15 ? (shift[14:0] == 15'd0) : (shift == 16'd0);
 
 always @(posedge clk)
     if( rst || clr )
-        shift <= { 1'b1, 15'd0 };
+        shift <= seed;
     else if( clk_en ) begin
         if( up ) begin
-            shift <= (|shift == 1'b0) ? {1'b1, 15'd0 } : {fb, shift[15:1]};
+            shift <= empty ? seed : next;
         end
     end
 

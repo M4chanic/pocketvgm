@@ -1521,6 +1521,11 @@ int main(int argc, char** argv) {
     uint32_t sn_clk = rd32(d, 0x0C) & 0x3FFFFFFF;
     bool sn_dual = (rd32(d, 0x0C) & 0x40000000) != 0;
     uint8_t sn_att[2][4] = {{15,15,15,15},{15,15,15,15}};
+    // Стерео SN76489: T6W28 объявлен в заголовке, Game Gear узнаётся по
+    // первой маске в потоке. Модель та же, что в фирмвари.
+    bool sn_t6w28 = (rd32(d, 0x0C) & 0x80000000) != 0;
+    bool sn_stereo = sn_t6w28;
+    uint8_t gg_mask = 0xFF;
     size_t pos = data_off;
     // OPL-семейство: YM3812 (0x50), YM3526 (0x54), YMF262 (0x5C).
     // OPL2-файлы задают 3.58 МГц — ядро тактуется x4 (как в фирмвари).
@@ -1544,6 +1549,17 @@ int main(int argc, char** argv) {
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
     std::vector<uint32_t> cmds;
+    auto push_sn_att = [&]() {
+        uint32_t l = 0, r = 0;
+        for (int ch = 0; ch < 4; ch++) {
+            uint8_t al = (gg_mask >> (4 + ch)) & 1 ? sn_att[0][ch] : 15;
+            uint8_t ar = (gg_mask >> ch) & 1 ? sn_att[1][ch] : 15;
+            l |= (uint32_t)al << (4 * ch);
+            r |= (uint32_t)ar << (4 * ch);
+        }
+        cmds.push_back(0xF5000000u | l);
+        cmds.push_back(0xF5000000u | 1u << 16 | r);
+    };
     struct RomBlock { uint32_t start; std::vector<uint8_t> bytes; };
     std::vector<RomBlock> rom_blocks;
     std::vector<uint8_t> dac_bank;
@@ -1646,7 +1662,14 @@ int main(int argc, char** argv) {
         // в чип как байт данных: обычное значение 0xFF для SN76489 — это
         // latch «канал 3, громкость, аттенюация 15», то есть глушило шум.
         // Стерео мы не воспроизводим (jt89 моно), но и портить нечего.
-        else if (cmd == 0x4F || cmd == 0x3F) { drop_gg++; pos += 1; }
+        // Маска стерео Game Gear: биты 0-3 — правая сторона каналов 0..3,
+        // биты 4-7 — левая. Первая же маска включает стерео-путь.
+        else if (cmd == 0x4F) {
+            gg_mask = d[pos]; pos += 1;
+            sn_stereo = true;
+            push_sn_att();
+        }
+        else if (cmd == 0x3F) { drop_gg++; pos += 1; }  // маска второго чипа
         else if (cmd == 0x50 || cmd == 0x30) {
             // 0x30 — вторая сторона T6W28 (Neo Geo Pocket): стерео с
             // раздельной громкостью, а не второй чип. jt89 у нас один,
@@ -1654,11 +1677,15 @@ int main(int argc, char** argv) {
             // тишина), иначе отведённые вправо голоса пропали бы.
             uint8_t v = d[pos]; pos += 1;
             int side = (cmd == 0x30) ? 1 : 0;
-            if (sn_dual && (v & 0x90) == 0x90) {
+            if ((v & 0x90) == 0x90) {
                 int ch = (v >> 5) & 3;
-                sn_att[side][ch] = v & 0x0F;
-                uint8_t a = sn_att[0][ch] < sn_att[1][ch] ? sn_att[0][ch] : sn_att[1][ch];
-                cmds.push_back(0xE0000000u | 0x90u | (unsigned)ch << 5 | a);
+                // У T6W28 стороны пишутся раздельно, у обычного чипа одна
+                // и та же громкость идёт в обе.
+                if (sn_dual) sn_att[side][ch] = v & 0x0F;
+                else { sn_att[0][ch] = v & 0x0F; sn_att[1][ch] = v & 0x0F; }
+                if (side == 0 || !sn_dual)
+                    cmds.push_back(0xE0000000u | 0x90u | (unsigned)ch << 5 | (v & 0x0F));
+                if (sn_stereo) push_sn_att();
             } else if (side == 0) {
                 cmds.push_back(0xE0000000u | v);
             }
@@ -1887,7 +1914,15 @@ int main(int argc, char** argv) {
         double inc = (double)fm_clk / CLK_HZ * 4294967296.0;
         tb.wb(0x16, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));
     }
-    if (sn_clk) tb.wb(0x17, true, (uint32_t)((double)sn_clk / CLK_HZ * 4294967296.0 + 0.5));
+    if (sn_clk) {
+        tb.wb(0x17, true, (uint32_t)((double)sn_clk / CLK_HZ * 4294967296.0 + 0.5));
+        // Разновидность шума из заголовка (поля 0x28 и 0x2A); ноль в поле
+        // означает вариант Master System, как было зашито в jt89.
+        uint32_t fb = hdr_end > 0x29 ? (d[0x28] | d[0x29] << 8) : 0;
+        if (!fb) fb = 0x0009;
+        uint32_t w = (hdr_end > 0x2A && d[0x2A]) ? d[0x2A] : 16;
+        tb.wb(0x2E, true, (w == 15 ? 1u : 0u) << 16 | fb);
+    }
     tb.wb(0x15, true, gain_of(sn_clk ? 33u : 0u, 0x00) << 8
                     | gain_of(fm_clk ? 239u : (opn_clk ? 204u : 0u), fm_id));
     tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
@@ -1896,6 +1931,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 2048; i++) tb.step(); // дать сбросу пройти
     // Game Boy в VGM: бит 8 выводит APU из сброса, не поднимая SM83.
     // Только ПОСЛЕ сброса — он пишет тот же регистр и обнулил бы бит.
+    tb.wb(0x2F, true, sn_stereo ? 1u : 0u);   // стерео SN76489
     if (gb_clk_hdr) tb.wb(2, true, 1u << 8);
 
     // Game Boy: привести APU в состояние после загрузчика приставки.

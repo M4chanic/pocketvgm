@@ -697,6 +697,8 @@ module chipbox #(
           6'h28: huc_gain <= data_write[7:0];
           6'h2C: md_lpf_mode <= data_write[1:0];
           6'h2D: nes_flt_mode <= data_write[1:0];
+          6'h2E: {sn_sr15, sn_fb_mask} <= data_write[16:0];
+          6'h2F: sn_stereo_en <= data_write[0];
 `endif
 `ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
@@ -1841,6 +1843,13 @@ module chipbox #(
   reg [7:0] sn_din = 0;
   wire signed [10:0] sn_sound;
 
+  // Разновидность шума SN76489 из заголовка VGM: у Master System регистр
+  // 16 бит и отводы 0 и 3, у SN76489AN (SG-1000, аркады, BBC) — 15 бит и
+  // отводы 0 и 1. Сброс воспроизводит вариант Master System, как было.
+  reg [15:0] sn_fb_mask = 16'h0009;
+  reg sn_sr15 = 1'b0;
+  wire sn_raw0, sn_raw1, sn_raw2, sn_raw3;
+
   jt89 sn76489 (
       .rst(chip_reset),
       .clk(clk),
@@ -1848,7 +1857,13 @@ module chipbox #(
       .wr_n(sn_wr_n),
       .cs_n(1'b0),
       .din(sn_din),
+      .fb_mask(sn_fb_mask),
+      .sr15(sn_sr15),
       .sound(sn_sound),
+      .raw0(sn_raw0),
+      .raw1(sn_raw1),
+      .raw2(sn_raw2),
+      .raw3(sn_raw3),
       .ready()
   );
 
@@ -2041,7 +2056,46 @@ module chipbox #(
   wire signed [8:0] g_opl = {1'b0, opl_gain};
   wire signed [8:0] g_fm = {1'b0, fm_gain};
   wire signed [8:0] g_sn = {1'b0, sn_gain};
-  wire signed [15:0] sn_wide = {sn_sound, 5'b00000};
+  // --------------------------------------------------------------------
+  // Стерео SN76489.
+  //
+  // Зачем отдельный путь. У T6W28 (Neo Geo Pocket) две банки аттенюаторов,
+  // по одной на сторону, а мы сводили их в моно по громкой — голоса,
+  // отведённые вправо, теряли свою громкость. У Game Gear стороны задаются
+  // маской, и её мы вообще не воспроизводили.
+  //
+  // Как сделано. jt89 отдаёт сырые квадраты каналов до применения
+  // громкости (raw0..raw3), а аттенюация накладывается здесь, своя на
+  // каждую сторону. Таблица — та же, что в jt89_vol и в описании чипа:
+  // шаг 2 дБ, пятнадцатая ступень это тишина.
+  //
+  // Путь включается фирмварью только для файлов, которые стерео объявили.
+  // Обычные моно-файлы идут прежней дорогой через sn_sound бит в бит: при
+  // равных аттенюациях на сторонах суммы совпадают по построению.
+  reg sn_stereo_en = 0;
+  reg [15:0] sn_att_l = {4{4'hF}};  // по 4 бита на канал, 15 = тишина
+  reg [15:0] sn_att_r = {4{4'hF}};
+
+  function automatic signed [8:0] sn_ch(input raw, input [3:0] att);
+    reg [7:0] mx;
+    begin
+      case (att)
+        4'd0:  mx = 8'd255; 4'd1:  mx = 8'd203; 4'd2:  mx = 8'd161; 4'd3:  mx = 8'd128;
+        4'd4:  mx = 8'd102; 4'd5:  mx = 8'd81;  4'd6:  mx = 8'd64;  4'd7:  mx = 8'd51;
+        4'd8:  mx = 8'd40;  4'd9:  mx = 8'd32;  4'd10: mx = 8'd26;  4'd11: mx = 8'd20;
+        4'd12: mx = 8'd16;  4'd13: mx = 8'd13;  4'd14: mx = 8'd10;  default: mx = 8'd0;
+      endcase
+      sn_ch = raw ? {1'b0, mx} : -{1'b0, mx};
+    end
+  endfunction
+
+  wire signed [10:0] sn_sum_l = sn_ch(sn_raw0, sn_att_l[3:0]) + sn_ch(sn_raw1, sn_att_l[7:4])
+                              + sn_ch(sn_raw2, sn_att_l[11:8]) + sn_ch(sn_raw3, sn_att_l[15:12]);
+  wire signed [10:0] sn_sum_r = sn_ch(sn_raw0, sn_att_r[3:0]) + sn_ch(sn_raw1, sn_att_r[7:4])
+                              + sn_ch(sn_raw2, sn_att_r[11:8]) + sn_ch(sn_raw3, sn_att_r[15:12]);
+
+  wire signed [15:0] sn_wide_l = {sn_stereo_en ? sn_sum_l : sn_sound, 5'b00000};
+  wire signed [15:0] sn_wide_r = {sn_stereo_en ? sn_sum_r : sn_sound, 5'b00000};
 `ifdef M4_HAS_HOME
   // SCC моно, знаковый 11 бит -> << 5 (x32) до 16 бит
   wire signed [8:0] g_scc = {1'b0, scc_gain};
@@ -2076,7 +2130,7 @@ module chipbox #(
   reg signed [25:0] ym_l_g = 0, ym_r_g = 0, pcm_l_g = 0, pcm_r_g = 0;
   reg signed [25:0] adpcm_l_g = 0, adpcm_r_g = 0;
 `endif
-  reg signed [25:0] fm_l_g, fm_r_g, sn_g;
+  reg signed [25:0] fm_l_g, fm_r_g, sn_l_g, sn_r_g;
   // SCC/OKIM6295/K053260 — только в симуляции; в Quartus = 0
   reg signed [25:0] scc_g = 0, okim_g = 0, k060_l_g = 0, k060_r_g = 0;
   reg signed [25:0] huc_l_g = 0, huc_r_g = 0;
@@ -2103,7 +2157,8 @@ module chipbox #(
     opl_r_g <= (opl_r_s * g_opl) >>> 6;
     fm_l_g <= (fm_l * g_fm) >>> 6;
     fm_r_g <= (fm_r * g_fm) >>> 6;
-    sn_g <= (sn_wide * g_sn) >>> 6;
+    sn_l_g <= (sn_wide_l * g_sn) >>> 6;
+    sn_r_g <= (sn_wide_r * g_sn) >>> 6;
 `ifdef M4_HAS_HOME
     scc_g <= (scc_wide * g_scc) >>> 6;
     huc_l_g <= (hucl_hp * g_huc) >>> 6;
@@ -2116,8 +2171,8 @@ module chipbox #(
 `endif
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_g + scc_g + huc_l_g + okim_g + k060_l_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_g + scc_g + huc_r_g + okim_g + k060_r_g;
+  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
+  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -2354,6 +2409,7 @@ module chipbox #(
   localparam EXT_K060 = 4'h2; // Konami K053260
   localparam EXT_HUC  = 4'h3; // HuC6280 PSG (PC Engine)
   localparam EXT_GB   = 4'h4; // прямая запись в APU Game Boy (VGM)
+  localparam EXT_SNST = 4'h5; // аттенюации SN76489 по сторонам (стерео)
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -2588,6 +2644,13 @@ module chipbox #(
                   huc_addr <= fifo_q[11:8];
                   huc_din  <= fifo_q[7:0];
                   huc_wr   <= 1;
+                end
+                // Стерео SN76489: аттенюации идут ЧЕРЕЗ ОЧЕРЕДЬ, а не
+                // прямой записью в регистр — иначе панорама опережала бы
+                // музыку на всю глубину очереди, а это десятки миллисекунд.
+                EXT_SNST: begin
+                  if (fifo_q[16]) sn_att_r <= fifo_q[15:0];
+                  else sn_att_l <= fifo_q[15:0];
                 end
                 EXT_SCC: begin
                   // порт 7 = разблокировка BR2 (ABHI=0x12, DB=0x3F)

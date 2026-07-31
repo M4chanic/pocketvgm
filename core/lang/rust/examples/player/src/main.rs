@@ -292,6 +292,7 @@ const OP_EXT: u32 = 0xF000_0000;
 const EXT_SCC: u32 = 0x0000_0000;
 const EXT_HUC: u32 = 0x0300_0000;
 const EXT_GB: u32 = 0x0400_0000;
+const EXT_SNST: u32 = 0x0500_0000;
 const EXT_OKIM: u32 = 0x0100_0000;
 const EXT_K060: u32 = 0x0200_0000;
 
@@ -332,6 +333,29 @@ fn vu_tick(last: &mut u32) {
         md_filter_tick();
         nes_filter_tick();
     }
+}
+
+/// Аттенюации SN76489 по сторонам, с наложенной маской Game Gear.
+///
+/// `att[0]` — сторона 0 (левая), `att[1]` — правая. У T6W28 стороны
+/// пишутся файлом раздельно и маска остаётся 0xFF; у Game Gear обе
+/// стороны одинаковы, а разводит их именно маска: биты 0-3 включают
+/// каналы справа, биты 4-7 слева. Выключенный канал глушится на своей
+/// стороне аттенюацией 15.
+///
+/// Идёт через очередь команд, а не прямой записью в регистр: иначе
+/// панорама опережала бы музыку на всю глубину очереди.
+fn sn_push_att(sink: &mut CmdSink, att: &[[u8; 4]; 2], mask: u8) {
+    let mut l = 0u32;
+    let mut r = 0u32;
+    for ch in 0..4 {
+        let al = if mask >> (4 + ch) & 1 != 0 { att[0][ch] } else { 15 };
+        let ar = if mask >> ch & 1 != 0 { att[1][ch] } else { 15 };
+        l |= (al as u32) << (4 * ch);
+        r |= (ar as u32) << (4 * ch);
+    }
+    sink.push(OP_EXT | EXT_SNST | l);
+    sink.push(OP_EXT | EXT_SNST | 1 << 16 | r);
 }
 
 /// Гейн чипа с учётом того, что просит сам файл.
@@ -2047,6 +2071,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     }
     if sn_clk != 0 {
         chipbox_write(0x17, (((sn_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+        // Разновидность шума из заголовка: маска отводов и признак
+        // 15-битного регистра. У Master System 0x0009 и 16 бит, у
+        // SN76489AN (SG-1000, аркады, BBC) — 0x0003 и 15.
+        let sr15 = (header.clocks.sn_sr_width == 15) as u32;
+        chipbox_write(0x2E, sr15 << 16 | header.clocks.sn_feedback as u32);
     }
     let scc_clk = header.clocks.k051649;
     if scc_clk != 0 {
@@ -2254,6 +2283,16 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // «играть только сторону 0» потеряло бы голоса, отведённые вправо.
     let mut sn_att = [[15u8; 4]; 2];
     let sn_dual = header.clocks.sn_dual;
+    // Маска стерео Game Gear: биты 0-3 — правая сторона каналов 0..3,
+    // биты 4-7 — левая. 0xFF означает «всё в оба уха».
+    let mut gg_mask: u8 = 0xFF;
+    // Стерео включаем только там, где файл его объявил: у T6W28 (Neo Geo
+    // Pocket) или у файла с маской Game Gear. Обычные моно-файлы идут
+    // прежней дорогой через sn_sound и звучат бит в бит как раньше.
+    // T6W28 объявлен в заголовке, а Game Gear узнаётся только по первой
+    // маске стерео в потоке — там путь включается по факту её прихода.
+    let mut sn_stereo = header.clocks.sn_t6w28;
+    chipbox_write(0x2F, sn_stereo as u32);
     // Отброшенное за проход: записи второго экземпляра чипа и маски
     // стерео Game Gear. И то, и другое раньше уходило в тишину без
     // сообщения (а маска ещё и глушила канал шума, потому что попадала в
@@ -2271,17 +2310,42 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::Write { chip: Chip::Sn76489, port, data, .. }) => {
                 // Защёлка громкости: бит 7 задаёт регистр, бит 4 отличает
-                // громкость от тона. Такие записи сводим по двум сторонам,
-                // остальное (частоты, вторые байты данных, шум) шлём как
-                // есть — их пишет только сторона 0.
-                if sn_dual && data & 0x90 == 0x90 {
+                // громкость от тона. Частоты, вторые байты данных и режим
+                // шума пишет только сторона 0 — их шлём как есть.
+                if data & 0x90 == 0x90 {
                     let ch = (data >> 5 & 3) as usize;
-                    sn_att[port as usize & 1][ch] = data & 0x0F;
-                    let att = sn_att[0][ch].min(sn_att[1][ch]);
-                    sink.push(OP_SN | 0x90 | (ch as u32) << 5 | att as u32);
+                    // У T6W28 стороны пишутся раздельно (порт 0 и 1); у
+                    // обычного чипа сторона одна и та же для обеих.
+                    if sn_dual {
+                        sn_att[port as usize & 1][ch] = data & 0x0F;
+                    } else {
+                        sn_att[0][ch] = data & 0x0F;
+                        sn_att[1][ch] = data & 0x0F;
+                    }
+                    // В сам чип по-прежнему уходит сторона 0: моно-путь
+                    // остаётся рабочим, если стерео не включено.
+                    if port == 0 || !sn_dual {
+                        sink.push(OP_SN | 0x90 | (ch as u32) << 5 | (data & 0x0F) as u32);
+                    }
+                    // Только при включённом стерео: иначе моно-файлы
+                    // получили бы вдвое больше команд в очереди на ровном месте.
+                    if sn_stereo {
+                        sn_push_att(&mut sink, &sn_att, gg_mask);
+                    }
                 } else if port == 0 {
                     sink.push(OP_SN | data as u32);
                 }
+            }
+            // Маска стерео Game Gear: биты 0-3 — правая сторона каналов
+            // 0..3, биты 4-7 — левая. Выключенный канал глушим на своей
+            // стороне аттенюацией 15, включённый берёт свою громкость.
+            Ok(Event::GgStereo { chip2: false, mask }) => {
+                gg_mask = mask;
+                if !sn_stereo {
+                    sn_stereo = true;
+                    chipbox_write(0x2F, 1);
+                }
+                sn_push_att(&mut sink, &sn_att, mask);
             }
             Ok(Event::Write { chip: Chip::Opl, port, addr, data }) => {
                 // OPL2/OPL3 играем на нашем OPL3: port = банк регистров
@@ -2443,6 +2507,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             // «Ok(_) => {}», и молчаливое проглатывание этих двух команд
             // как раз и было дефектом.
             Ok(Event::SecondChip { .. }) => drop2 += 1,
+            // Маска второго чипа: играть её нечем, считаем как отброшенное
             Ok(Event::GgStereo { .. }) => drop_gg += 1,
             Ok(Event::End) => {
                 loops += 1;

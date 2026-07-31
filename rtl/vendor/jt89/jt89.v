@@ -39,7 +39,18 @@ module jt89(
     input          wr_n,
     input          cs_n,    // set to 0 if not needed
     input    [7:0] din,
+    // m4pocket: разновидность шума из заголовка VGM (поля 0x28 и 0x2A).
+    // По умолчанию — Master System, как было зашито.
+    input   [15:0] fb_mask,
+    input          sr15,
     output signed [10:0] sound,
+    // m4pocket: сырые выходы каналов до применения громкости. Нужны для
+    // стерео Game Gear и T6W28: там громкость своя на каждую сторону, а
+    // сам квадрат общий.
+    output         raw0,
+    output         raw1,
+    output         raw2,
+    output         raw3,
     output reg     ready
 );
 
@@ -148,7 +159,7 @@ jt89_tone u_tone0(
     .vol    ( vol0      ),
     .tone   ( tone0     ),
     .snd    ( ch0       ),
-    .out    (           )
+    .out    ( raw0      )
 );
 
 jt89_tone u_tone1(
@@ -158,10 +169,11 @@ jt89_tone u_tone1(
     .vol    ( vol1      ),
     .tone   ( tone1     ),
     .snd    ( ch1       ),
-    .out    (           )
+    .out    ( raw1      )
 );
 
 wire out2;
+assign raw2 = out2;
 
 jt89_tone u_tone2(
     .clk    ( clk       ),
@@ -181,6 +193,9 @@ jt89_noise u_noise(
     .vol    ( vol3      ),
     .ctrl3  ( ctrl3     ),
     .tone2  ( out2      ),
+    .fb_mask( fb_mask   ),
+    .sr15   ( sr15      ),
+    .raw    ( raw3      ),
     .snd    ( noise     )
 );
 
