@@ -250,7 +250,27 @@ pub fn screen(
     text(12, 88, "system:", DIM, 1);
     text(12 + 64, 88, system, FG, 1);
     text(12, 102, "chips:", DIM, 1);
-    text(12 + 64, 102, chips, FG, 1);
+    // Под строку чипов после подписи остаётся всего (266-76-12)/8 = 22
+    // знака, а «YM2612+SN76489 (no RF5C164)» это 27 — с устройства пришло
+    // «сообщения появились, но не везде влезают». Хвост переносим на
+    // следующую строку во всю ширину, там помещается 31 знак.
+    //
+    // Перенос только когда номера подпесни нет: она рисуется вдвое
+    // крупнее с y=116 и заняла бы это место. У форматов с подпеснями
+    // (NSF, GBS) длинных строк чипов не бывает — там максимум «(no FDS)».
+    let chip_w = (W - 76 - 12) / 8;
+    if song.is_none() && chips.len() > chip_w {
+        let (c1, c2) = split_fit(chips, chip_w);
+        text(12 + 64, 102, c1, FG, 1);
+        text(12, 114, c2, FG, 1);
+    } else {
+        let cut = chips.len().min(chip_w);
+        let mut cut = cut;
+        while cut > 0 && !chips.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text(12 + 64, 102, &chips[..cut], FG, 1);
+    }
 
     if let Some((cur, total)) = song {
         let mut buf = [0u8; 16];

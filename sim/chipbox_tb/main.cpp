@@ -1547,7 +1547,7 @@ int main(int argc, char** argv) {
     // фирмвари: наши базовые гейны подбирались по файлам, которые эти
     // поправки уже несут, и применить их сверху значит посчитать дважды.
     // Замер это подтвердил. Общий модификатор 0x7C применяется всегда.
-    const bool apply_chip_volumes = false;
+    const bool apply_chip_volumes = true;
     auto gain_of = [&](uint32_t base, uint8_t chip) -> uint32_t {
         if (!base) return 0;
         uint32_t v = apply_chip_volumes ? base * chip_scale(chip) / 256 : base;
@@ -1771,6 +1771,9 @@ int main(int argc, char** argv) {
     uint8_t opl_id = ymf262_clk ? 0x0C : (ym3526_clk ? 0x0A : 0x09);
     tb.wb(6, true, gain_of(adpcm_clk ? 64u : 0u, 0x17) << 24
                  | gain_of(pcm_clk ? 34u : 0u, 0x04) << 16
+                 // SSG внутри OPN вдвое тише отдельного AY — libvgm делит
+                 // громкость парной части составного чипа пополам. См.
+                 // подробный комментарий в фирмвари.
                  | gain_of((ay_clk || opn_clk) ? 64u : 0u, ssg_id) << 8
                  | gain_of(ym_clk ? 64u : 0u, 0x03));
     tb.wb(0xC, true, gain_of(opl_clk ? 16u : 0u, opl_id) << 24
@@ -1818,8 +1821,8 @@ int main(int argc, char** argv) {
         tb.wb(0x16, true, inc >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)(inc + 0.5));
     }
     if (sn_clk) tb.wb(0x17, true, (uint32_t)((double)sn_clk / CLK_HZ * 4294967296.0 + 0.5));
-    tb.wb(0x15, true, gain_of(sn_clk ? 51u : 0u, 0x00) << 8
-                    | gain_of((fm_clk || opn_clk) ? 102u : 0u, fm_id));
+    tb.wb(0x15, true, gain_of(sn_clk ? 33u : 0u, 0x00) << 8
+                    | gain_of(fm_clk ? 239u : (opn_clk ? 204u : 0u), fm_id));
     tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
     // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
     if (scc_clk) tb.wb(0, true, 0xF0000000u | (7u << 16));

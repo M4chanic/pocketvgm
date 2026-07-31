@@ -38,19 +38,19 @@
         "persist": true,
         "writeonly": true,
         "address": "0x10000104",
-        "defaultval": 3,
+        "defaultval": 0,
         "options": [
           {
             "value": 0,
-            "name": "NES (90+440 Hz, 14 kHz)"
+            "name": "Off"
           },
           {
             "value": 1,
-            "name": "Famicom (90 Hz, 14 kHz)"
+            "name": "NES (90+440 Hz, 14 kHz)"
           },
           {
-            "value": 3,
-            "name": "Off"
+            "value": 2,
+            "name": "Famicom (90 Hz, 14 kHz)"
           }
         ]
       }
