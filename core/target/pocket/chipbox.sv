@@ -101,7 +101,7 @@ module chipbox #(
     input wire [3:0] sel,
     input wire stb,
     input wire we,
-    output reg ack = 0,
+    output reg ack = 0,  // импульс; удержание шины см. wb_served
     output reg [31:0] data_read = 0,
     output reg err = 0,
 
@@ -171,6 +171,10 @@ module chipbox #(
   // --------------------------------------------------------------------
   // Wishbone
   reg soft_reset_req = 0;
+  // Текущая транзакция шины уже обслужена; снимается, когда мастер
+  // отпускает stb/cyc. Без этого блок исполнялся повторно всё время
+  // удержания шины — подробности у него самого.
+  reg wb_served = 0;
   reg [31:0] phase_inc = DEFAULT_PHASE_INC;
   reg [31:0] ay_phase_inc = DEFAULT_AY_PHASE_INC;
   reg [31:0] pcm_phase_inc = DEFAULT_PCM_PHASE_INC;
@@ -358,6 +362,16 @@ module chipbox #(
 
   always @(posedge clk) begin
     ack <= 0;
+    // Транзакция шины обслуживается РОВНО ОДИН РАЗ.
+    //
+    // Условие было «stb && cyc && !ack», но ack — импульс: он сам себя
+    // сбрасывает строкой выше, поэтому при удержании шины блок исполнялся
+    // через такт, снова и снова. Регистрам без побочных действий это не
+    // мешало, а VU (чтение 0x1A очищает пики) отдавал уже очищенный ноль:
+    // на устройстве мастер держит шину дольше такта, и полоска стояла
+    // мёртвой, притом что таймер по 0x18 шёл. Наш wb() в стенде снимал stb
+    // сразу после ack и потому этого не видел — см. --vu-selftest.
+    if (!(stb && cyc)) wb_served <= 0;
     soft_reset_req <= 0;
     stub_wr <= 0;
     gb_stub_wr <= 0;
@@ -641,9 +655,10 @@ module chipbox #(
       nsf_done <= 0;
       gbs_pending <= 0;
       gbs_wait_data <= 0;
-    end else if (stb && cyc && !ack) begin
+    end else if (stb && cyc && !wb_served) begin
       if (we) begin
         ack <= 1;
+        wb_served <= 1;
         case (addr[5:0])
           4'h0: begin
             if (!fifo_full) begin
@@ -721,13 +736,17 @@ module chipbox #(
               up_data <= data_write[15:0];
               up_pending <= 1;
             end else begin
+              // стойло: ack не отдаём и транзакцию не считаем
+              // обслуженной, чтобы мастер получил ответ следующим тактом
               ack <= 0;
+              wb_served <= 0;
             end
           end
           default: ;
         endcase
       end else begin
         ack <= 1;
+        wb_served <= 1;
         case (addr[5:0])
           4'h1: data_read <= {fifo_full, fifo_empty, seq_busy, 16'h0, fifo_used};
           4'h2: data_read <= {dbg_apu_wr, dbg_apu_ce, cpu_ab};

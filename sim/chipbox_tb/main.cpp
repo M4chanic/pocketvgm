@@ -111,6 +111,26 @@ struct Tb {
         step();
         return r;
     }
+    // Чтение с УДЕРЖАНИЕМ stb на несколько тактов.
+    //
+    // Обычный wb() снимает stb сразу после ack и потому не воспроизводит
+    // поведение настоящего мастера: ack у нас — импульс на каждый такт,
+    // пока подняты stb и cyc, значит блок чтения исполняется столько раз,
+    // сколько мастер держит шину. Для регистров с побочным действием (VU
+    // очищается по чтению) это меняет результат, и симуляция расходится с
+    // железом. Нужно, чтобы проверить именно это.
+    uint32_t wb_hold(uint32_t word_addr, int hold) {
+        top.addr = word_addr; top.we = 0; top.data_write = 0;
+        top.stb = 1; top.cyc = 1;
+        int guard = 100;
+        do { step(); } while (!top.ack && --guard);
+        uint32_t first = top.data_read;
+        for (int i = 1; i < hold; i++) step();
+        uint32_t last = top.data_read;
+        top.stb = 0; top.cyc = 0;
+        step();
+        return hold > 1 ? last : first;
+    }
     uint32_t fifo_used() { return wb(1, false) & 0x1FFF; }
     bool seq_busy() { return (wb(1, false) >> 29) & 1; }
 };
@@ -212,6 +232,52 @@ static int outrate_selftest() {
                 "перепроверьте с CLK=57120000\n");
     }
     return 0;
+}
+
+// Чтение VU не должно зависеть от того, сколько мастер держит шину.
+//
+// С устройства пришло «полоска не шевелится», притом что таймер идёт и
+// музыка играет — то есть чтение регистра 0x18 работает, а 0x1A отдаёт
+// ноль. Подозрение: ack у нас импульс на КАЖДЫЙ такт с поднятым stb, и
+// блок чтения исполняется столько раз, сколько мастер держит шину. У
+// 0x1A есть побочное действие (очистка пиков), поэтому при удержании
+// шины мастер получает уже очищенное значение. Наш wb() снимает stb
+// сразу и потому проблемы не видел.
+static int vu_selftest() {
+    Tb tb;
+    mute_all(tb);
+    tb.wb(0xC, true, 64);   // гейн APU
+    tb.wb(0xB, true, phase_inc(1789773.0, "NES APU"));
+    tb.wb(2, true, 1);
+    for (int i = 0; i < 2048; i++) tb.step();
+    const uint32_t regs[][2] = {{0x15,0x0F},{0x00,0xBF},{0x01,0x00},{0x02,0xFD},{0x03,0x00}};
+    for (auto& r : regs) tb.wb(0, true, 0x90000000u | r[0] << 8 | r[1]);
+    while (tb.cycle < (uint64_t)(0.2 * CLK_HZ)) tb.step();
+
+    // Окно накопления перед каждым замером одинаковое: чтение обнуляет
+    // пики, и без выравнивания значения нельзя сравнивать между собой —
+    // а сравнивать надо, иначе тест ловит только полный ноль.
+    int bad = 0;
+    uint32_t ref = 0;
+    for (int hold : {1, 2, 3, 4, 8}) {
+        tb.wb(0x1A, false);                          // сбросить пики
+        // Окно задаётся ВРЕМЕНЕМ, а не тактами. В тактах оно на разных
+        // тактовых стенда получается разной длины: 20000 тактов — это
+        // 120 выходных отсчётов на 8 МГц и всего 17 на 57.12, а период
+        // тона около 109 отсчётов. Пик ловился в случайной фазе, и тест
+        // падал на ровном месте, показывая то 4094, то 1243.
+        uint64_t until = tb.cycle + (uint64_t)(0.02 * CLK_HZ);
+        while (tb.cycle < until) tb.step();
+        uint32_t v = tb.wb_hold(0x1A, hold) & 0xFFFF;
+        if (!ref) ref = v;
+        bool ok = v && ref && v * 10 >= ref * 9 && v * 9 <= ref * 10;
+        fprintf(stderr, "удержание stb %d такт(ов): VU=%u%s\n", hold, v,
+                ok ? "" : (v ? "  <-- РАСХОДИТСЯ" : "  <-- НОЛЬ"));
+        if (!ok) bad++;
+    }
+    fprintf(stderr, "селфтест VU: %s\n",
+            bad ? "FAIL — чтение зависит от длины цикла шины" : "OK");
+    return bad ? 1 : 0;
 }
 
 // Изолирующий тест: те же регистры APU, но через VGM-путь (FIFO), без CPU
@@ -1405,6 +1471,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--no-out-stage")) { out_stage = false; }
         else if (!strcmp(argv[i], "--nes-filter") && i + 1 < argc) { nes_flt_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
+        else if (!strcmp(argv[i], "--vu-selftest")) { return vu_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
         else if (!strcmp(argv[i], "--gbs-selftest")) { return gbs_selftest(out, 2.0); }
         else if (!strcmp(argv[i], "--gbs-int-selftest")) { return gbs_int_selftest(out, 2.0); }
@@ -1830,6 +1897,20 @@ int main(int argc, char** argv) {
     // Game Boy в VGM: бит 8 выводит APU из сброса, не поднимая SM83.
     // Только ПОСЛЕ сброса — он пишет тот же регистр и обнулил бы бит.
     if (gb_clk_hdr) tb.wb(2, true, 1u << 8);
+
+    // Game Boy: привести APU в состояние после загрузчика приставки.
+    // Запись в звуковые регистры игнорируется, пока не поднят бит 7 NR52,
+    // а на настоящем Game Boy звук включает загрузчик — рип, который сам
+    // NR52 не пишет, на приставке играет, а у нас молчал. Значения те же,
+    // что в фирмвари: NR52 = 0x80, NR50 = 0x77, NR51 = 0xF3.
+    // NR52 обязан идти ПЕРВЫМ: пока питание не поднято, остальные записи
+    // отбрасываются, и вставка в обратном порядке всё бы обесценила.
+    if (gb_clk_hdr) {
+        static const uint32_t gb_boot[3][2] = {{0x26, 0x80}, {0x24, 0x77}, {0x25, 0xF3}};
+        std::vector<uint32_t> pre;
+        for (auto& rv : gb_boot) pre.push_back(0xF4000000u | rv[0] << 8 | rv[1]);
+        cmds.insert(cmds.begin(), pre.begin(), pre.end());
+    }
 
     // Загрузка сэмпл-ROM и ADPCM-банка через WB (как это будет делать фирмварь)
     for (auto& b : rom_blocks) {
