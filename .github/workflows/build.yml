@@ -83,6 +83,18 @@ jobs:
         run: |
           grep -A4 'Slack' core/projects/output_files/*.sta.summary || true
 
+      # Итог по кристаллу печатаем ОТДЕЛЬНО и первым. Раньше в лог шла
+      # только таблица по узлам, и на вопрос «влезет ли ещё один чип»
+      # приходилось выковыривать числа из неё и сверять с документацией
+      # на кристалл вручную. Узкое место у нас не логика, а блочная
+      # память, и видеть её долю нужно с одного взгляда.
+      - name: Занятость кристалла
+        run: |
+          awk '/Fitter Summary/,/^\+---/' \
+            core/projects/output_files/*.fit.rpt | head -40 || true
+          grep -E "Logic utilization|ALMs needed|Total block memory|M10K|DSP Blocks|Total registers|Total pins" \
+            core/projects/output_files/*.fit.rpt | head -20 || true
+
       - name: Топ потребителей площади (ALM по entity)
         run: |
           awk '/Fitter Resource Utilization by Entity/,/^$/' \

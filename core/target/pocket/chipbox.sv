@@ -2150,7 +2150,10 @@ module chipbox #(
   wire signed [33:0] lpf_acc_r = lpf_b1 * lpf_x0_r + lpf_b2 * lpf_x1_r - lpf_a2 * lpf_y_r;
 
   function automatic signed [15:0] sat16_34(input signed [33:0] v);
-    sat16_34 = v > 32767 ? 16'sd32767 : v < -32768 ? -16'sd32768 : v[15:0];
+    // 16'sh8000 вместо -16'sd32768: литерал 16'sd32768 в знаковые 16 бит
+    // не влезает, и Quartus ругается «constant value overflow». Значение
+    // получалось верное только по счастливой случайности.
+    sat16_34 = v > 32767 ? 16'sd32767 : v < -32768 ? 16'sh8000 : v[15:0];
   endfunction
 
   // --------------------------------------------------------------------
@@ -2191,7 +2194,7 @@ module chipbox #(
   endfunction
   function automatic signed [15:0] sat16_nf(input signed [NF_W-1:0] v);
     sat16_nf = (v >>> 8) > 32767 ? 16'sd32767
-             : (v >>> 8) < -32768 ? -16'sd32768 : v[23:8];
+             : (v >>> 8) < -32768 ? 16'sh8000 : v[23:8];  // см. sat16_34
   endfunction
 `endif
 
