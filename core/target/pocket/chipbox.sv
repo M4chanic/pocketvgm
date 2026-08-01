@@ -183,6 +183,7 @@ module chipbox #(
   reg [1:0] adpcm_clkdiv = 2'd2;  // /512
   reg [31:0] nes_phase_inc = DEFAULT_NES_PHASE_INC;
   reg [7:0] apu_gain = 8'd64;
+  reg [7:0] fds_gain = 8'd64;
   reg [7:0] gb_gain = 8'd64;
 `ifdef M4_HAS_HOME
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
@@ -699,6 +700,7 @@ module chipbox #(
           6'h2D: nes_flt_mode <= data_write[1:0];
           6'h2E: {sn_sr15, sn_fb_mask} <= data_write[16:0];
           6'h2F: sn_stereo_en <= data_write[0];
+          6'h31: fds_gain <= data_write[7:0];
 `endif
 `ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
@@ -1993,6 +1995,25 @@ module chipbox #(
   wire signed [16:0] apu_wide = {2'b00, apu_sample[15:1]}
       + {3'b000, vrc6_out, 8'b0};  // выход APU беззнаковый, VRC6 0..61 << 8
 
+  // Дисковая приставка Famicom: волновая таблица со своим модулятором.
+  // Отдельным каналом, а не подмешиванием в APU: выход у него тоже
+  // однополярный и требует своего блокера, а расширять общий путь APU
+  // ради этого пришлось бы на разряд.
+  reg [7:0] fds_addr = 0;
+  reg [7:0] fds_din = 0;
+  reg fds_wr = 0;
+  wire signed [15:0] fds_snd;
+
+  fds fds_i (
+      .clk(clk),
+      .cen(cen_nes),
+      .rst(chip_reset),
+      .wr(fds_wr),
+      .addr(fds_addr),
+      .din(fds_din),
+      .snd(fds_snd)
+  );
+
   // DC-блокеры для однополярных источников (AY и NES APU держат
   // постоянное смещение): y[n] = x[n] - x[n-1] + y[n-1]*(1 - 2^-11),
   // обновление на подстробе 96 кГц => срез 96000/(2*pi*2048) = 7.5 Гц.
@@ -2004,6 +2025,8 @@ module chipbox #(
   reg signed [18:0] ay_hp_y = 0;
   reg signed [16:0] apu_hp_x = 0;
   reg signed [18:0] apu_hp_y = 0;
+  reg signed [16:0] fds_hp_x = 0;
+  reg signed [18:0] fds_hp_y = 0;
 
   function automatic signed [15:0] sat16_19(input signed [18:0] v);
     sat16_19 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -2029,6 +2052,7 @@ module chipbox #(
 
   wire signed [15:0] ay_hp = sat16_19(ay_hp_y);
   wire signed [15:0] apu_hp = sat16_19(apu_hp_y);
+  wire signed [15:0] fds_hp = sat16_19(fds_hp_y);
   wire signed [15:0] gbl_hp = sat16_19(gbl_hp_y);
   wire signed [15:0] gbr_hp = sat16_19(gbr_hp_y);
   wire signed [15:0] sid_hp = sat16_19(sid_hp_y);
@@ -2051,6 +2075,9 @@ module chipbox #(
   wire signed [8:0] g_pcm = {1'b0, mix_gains[23:16]};
   wire signed [8:0] g_adpcm = {1'b0, mix_gains[31:24]};
   wire signed [8:0] g_apu = {1'b0, apu_gain};
+  wire signed [8:0] g_fds = {1'b0, fds_gain};
+  // выход FDS 0..2016, поднимаем до общей шкалы
+  wire signed [16:0] fds_wide = {fds_snd[15], fds_snd} <<< 4;
   wire signed [8:0] g_gb = {1'b0, gb_gain};
   wire signed [8:0] g_sid = {1'b0, sid_gain};
   wire signed [8:0] g_opl = {1'b0, opl_gain};
@@ -2118,7 +2145,7 @@ module chipbox #(
   // Конвейер: произведения регистрируются (разгрузка длинного пути),
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ay_g;
-  reg signed [25:0] apu_g, opl_l_g, opl_r_g;
+  reg signed [25:0] apu_g, fds_g, opl_l_g, opl_r_g;
 `ifdef M4_HAS_HOME
   reg signed [25:0] gbl_g, gbr_g, sid_g;
 `else
@@ -2146,6 +2173,7 @@ module chipbox #(
     adpcm_r_g <= (adpcm_r * g_adpcm) >>> 6;
 `endif
     apu_g <= (apu_hp * g_apu) >>> 6;
+    fds_g <= (fds_hp * g_fds) >>> 6;
 `ifdef M4_HAS_HOME
     gbl_g <= (gbl_hp * g_gb) >>> 6;
     gbr_g <= (gbr_hp * g_gb) >>> 6;
@@ -2171,8 +2199,8 @@ module chipbox #(
 `endif
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
+  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + fds_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
+  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + fds_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -2305,6 +2333,8 @@ module chipbox #(
       ay_hp_x <= ay_wide;
       apu_hp_y <= (apu_wide - apu_hp_x) + (apu_hp_y - hp_leak(apu_hp_y));
       apu_hp_x <= apu_wide;
+      fds_hp_y <= (fds_wide - fds_hp_x) + (fds_hp_y - hp_leak(fds_hp_y));
+      fds_hp_x <= fds_wide;
 `ifdef M4_HAS_HOME
       gbl_hp_y <= (gbl_wide - gbl_hp_x) + (gbl_hp_y - hp_leak(gbl_hp_y));
       gbl_hp_x <= gbl_wide;
@@ -2410,6 +2440,7 @@ module chipbox #(
   localparam EXT_HUC  = 4'h3; // HuC6280 PSG (PC Engine)
   localparam EXT_GB   = 4'h4; // прямая запись в APU Game Boy (VGM)
   localparam EXT_SNST = 4'h5; // аттенюации SN76489 по сторонам (стерео)
+  localparam EXT_FDS  = 4'h6; // звуковой канал дисковой приставки Famicom
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -2478,6 +2509,7 @@ module chipbox #(
   always @(posedge clk) begin
 `ifdef M4_HAS_HOME
     huc_wr <= 0;   // однотактовый строб: гасится там же, где взводится
+    fds_wr <= 0;
 `endif
     if (reset || soft_reset_req) begin
       rd_ptr <= 0;
@@ -2651,6 +2683,11 @@ module chipbox #(
                 EXT_SNST: begin
                   if (fifo_q[16]) sn_att_r <= fifo_q[15:0];
                   else sn_att_l <= fifo_q[15:0];
+                end
+                EXT_FDS: begin
+                  fds_addr <= fifo_q[15:8];
+                  fds_din  <= fifo_q[7:0];
+                  fds_wr   <= 1;
                 end
                 EXT_SCC: begin
                   // порт 7 = разблокировка BR2 (ABHI=0x12, DB=0x3F)

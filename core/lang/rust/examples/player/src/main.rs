@@ -210,7 +210,6 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.upd7759 != 0 { off("uPD7759"); }
     if c.wonderswan != 0 { off("WonderSwan"); }
     if c.rf5c164 != 0 || c.rf5c68 != 0 { off("RF5C164"); }
-    if c.fds { off("FDS"); }
     // Второго экземпляра чипа в железе нет. Раньше его записи молча
     // терялись, и половина музыки dual-chip файла исчезала без следа.
     if c.second_chip { off("2nd chip"); }
@@ -293,6 +292,7 @@ const EXT_SCC: u32 = 0x0000_0000;
 const EXT_HUC: u32 = 0x0300_0000;
 const EXT_GB: u32 = 0x0400_0000;
 const EXT_SNST: u32 = 0x0500_0000;
+const EXT_FDS: u32 = 0x0600_0000;
 const EXT_OKIM: u32 = 0x0100_0000;
 const EXT_K060: u32 = 0x0200_0000;
 
@@ -2218,6 +2218,15 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // 14 кГц, задокументированная на NESdev. Включаем только там, где это
     // действительно Famicom.
     nes_filter_set(nes_clk != 0);
+    // Гейн дисковой приставки, откалиброван по методу задачи 69:
+    // синтетический файл, где сначала звучит импульсный канал APU, потом
+    // волновая таблица FDS — оба в одном файле, поэтому множитель
+    // нормировки эталона сокращается и сравнивается отношение чипов.
+    //     громко: эталон -4.5 дБ, наше -7.3 -> поправка +2.8
+    //     тише:   эталон -4.4 дБ, наше -7.2 -> поправка +2.8
+    // Поправка не зависит от уровня, значит это чистый гейн, а не форма
+    // таблицы громкости. 64 / 10^(2.8/20) = 46.
+    chipbox_write(0x31, if header.clocks.fds { 46 } else { 0 });
     // {opl_gain, sid_gain, gb_gain, apu_gain}. У VGM-AdLib регистры громкости
     // выкручены сильнее, чем у нашего MIDI-конвертера: на 64 выход клиппит
     // (проверено на Dune в симуляции), поэтому для VGM берём 16.
@@ -2471,6 +2480,21 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::Write { chip: Chip::NesApu, addr, data: d, .. }) if addr <= 0x1F => {
                 sink.push(OP_APU | (addr as u32) << 8 | d as u32);
+            }
+            // Дисковая приставка Famicom адресуется тем же кодом команды.
+            // Пересчёт адресов взят с libvgm (Cmd_NES_Reg): 0x3F — это
+            // общее разрешение ввода-вывода $4023, 0x20-0x3E ложатся на
+            // $4080-$409E, а 0x40-0x7F проходят как есть и попадают в
+            // волновую таблицу $4040-$407F.
+            Ok(Event::Write { chip: Chip::NesApu, addr, data: d, .. }) => {
+                let reg = if addr == 0x3F {
+                    0x23u32
+                } else if addr & 0xE0 == 0x20 {
+                    0x80 | (addr as u32 & 0x1F)
+                } else {
+                    addr as u32
+                };
+                sink.push(OP_EXT | EXT_FDS | reg << 8 | d as u32);
             }
             Ok(Event::DataBlock { kind: 0xC2, start, len }) if len >= 2 => {
                 // DPCM-страница NES: [u16 адрес][данные] — через FIFO,

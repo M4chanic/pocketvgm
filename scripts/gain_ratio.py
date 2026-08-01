@@ -139,7 +139,65 @@ def build_md(path, loud):
     return ("FM", "PSG")
 
 
-BUILDERS = {"opn": build_opn, "md": build_md}
+def apu_regs(vol):
+    """NES APU: первый импульсный канал, период 0x0FD, громкость 0..15."""
+    w = bytearray()
+    for a, d in ((0x15, 0x0F), (0x00, 0xB0 | (vol & 0xF)), (0x01, 0x00),
+                 (0x02, 0xFD), (0x03, 0x00)):
+        w += bytes([0xB4, a, d])
+    return w
+
+
+def apu_off():
+    return bytes([0xB4, 0x15, 0x00])
+
+
+def fds_regs(vol, freq=0x0200):
+    """Дисковая приставка: синус в волновой таблице, огибающая выключена.
+
+    Адреса — как их адресует VGM: 0x3F это $4023, 0x20-0x3E ложатся на
+    $4080-$409E, 0x40-0x7F проходят в волновую таблицу как есть.
+    """
+    import math as _m
+    w = bytearray()
+    def r(a, d):
+        w.extend([0xB4, a, d])
+    r(0x3F, 0x02)                 # разрешение ввода-вывода
+    r(0x29, 0x80)                 # разрешить запись таблицы
+    for i in range(64):
+        r(0x40 + i, int(31.5 + 31.5 * _m.sin(2 * _m.pi * i / 64)) & 0x3F)
+    r(0x29, 0x00)                 # закрыть запись, общая громкость полная
+    r(0x2A, 0xFF)                 # общая скорость огибающей
+    r(0x20, 0x80 | (vol & 0x3F))  # огибающая выключена, громкость задана
+    r(0x24, 0x80)                 # модулятор: сила 0
+    r(0x27, 0x80)                 # модулятор остановлен
+    r(0x22, freq & 0xFF)
+    r(0x23, (freq >> 8) & 0x0F)   # запуск
+    return w
+
+
+def fds_off():
+    return bytes([0xB4, 0x23, 0x80])   # остановить волновую таблицу
+
+
+def build_fds(path, loud):
+    """Famicom: сначала импульсный канал APU, потом волновая таблица FDS."""
+    w = bytearray()
+    w += apu_regs(15 if loud else 7)
+    wait(w, SEG)
+    w += apu_off()
+    w += fds_regs(32 if loud else 16)
+    wait(w, SEG)
+    w += fds_off()
+    wait(w, 0.1)
+    w.append(0x66)
+    # старший бит поля NES APU — признак дисковой приставки
+    path.write_bytes(bytes(hdr([(0x84, 1_789_773 | 0x80000000)], 2 * SEG + 0.1))
+                     + bytes(w))
+    return ("APU", "FDS")
+
+
+BUILDERS = {"opn": build_opn, "md": build_md, "fds": build_fds}
 
 
 def rms(xs):

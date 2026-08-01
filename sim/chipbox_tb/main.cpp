@@ -1743,7 +1743,13 @@ int main(int argc, char** argv) {
         }
         else if (cmd == 0xB4) {
             if (d[pos] & 0x80) drop2++;
-            else if (d[pos] > 0x1F) stream_warn++;  // FDS и пр. не поддержаны
+            else if (d[pos] > 0x1F) {
+                // Дисковая приставка Famicom: пересчёт адресов как в
+                // libvgm (Cmd_NES_Reg), см. фирмварь.
+                uint32_t a = d[pos];
+                uint32_t reg = (a == 0x3F) ? 0x23 : ((a & 0xE0) == 0x20 ? (0x80 | (a & 0x1F)) : a);
+                cmds.push_back(0xF6000000u | reg << 8 | d[pos+1]);
+            }
             else cmds.push_back(0x90000000u | d[pos] << 8 | d[pos+1]);
             pos += 2;
         }
@@ -1877,6 +1883,9 @@ int main(int argc, char** argv) {
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
     tb.wb(0x2C, true, fm_clk ? 0u : 3u);
     tb.wb(0x2D, true, nes_clk ? nes_flt_opt : 3u);
+    // Гейн дисковой приставки: старший бит поля NES APU. Значение
+    // откалибровано по отношению к APU против эталона, см. фирмварь.
+    tb.wb(0x31, true, (rd32(d, 0x84) & 0x80000000u) ? 46u : 0u);
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
     if (scc_clk) {
         // Заголовок VGM несёт половину шинной частоты MSX: у эталона
