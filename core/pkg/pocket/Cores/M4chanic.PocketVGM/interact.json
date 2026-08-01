@@ -53,6 +53,26 @@
             "name": "Famicom (90 Hz, 14 kHz)"
           }
         ]
+      },
+      {
+        "name": "Developer info",
+        "id": 3,
+        "type": "list",
+        "enabled": true,
+        "persist": true,
+        "writeonly": true,
+        "address": "0x10000108",
+        "defaultval": 0,
+        "options": [
+          {
+            "value": 0,
+            "name": "Off"
+          },
+          {
+            "value": 1,
+            "name": "On"
+          }
+        ]
       }
     ],
     "messages": []

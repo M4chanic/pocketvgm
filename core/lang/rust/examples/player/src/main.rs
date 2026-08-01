@@ -419,6 +419,29 @@ fn gain_of(h: Header, base: u32, chip: u8) -> u32 {
     (scaled * h.volume_scale() / 256).min(255)
 }
 
+/// Отброшенное за проход: записи второму экземпляру чипа и маски стерео
+/// Game Gear. Статики, а не локальные счётчики, чтобы их могла показать
+/// строка диагностики.
+static DROP2: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static DROP_GG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn bump(c: &core::sync::atomic::AtomicU32) {
+    c.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Показывать ли служебную строку рядом с таймером (пункт меню
+/// «Developer info», переменная по адресу 0x1000_0108).
+///
+/// Раньше диагностика висела на экране у всех подряд и занимала место
+/// рядом со временем, а часть счётчиков — отброшенные записи второму
+/// чипу, маски стерео — была видна вообще только в симуляции. При разборе
+/// неисправностей на устройстве этого не хватало: с экрана читалось лишь
+/// «таймер идёт, музыки нет».
+fn dev_mode() -> bool {
+    let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
+    p.APF_INTERACT.interact2.read().bits() & 1 != 0
+}
+
 /// Режим выходного фильтра Mega Drive из меню ядра (interact.json,
 /// переменная по адресу 0x1000_0100): 0 Model 1, 1 Model 2, 2
 /// минимальный, 3 выключен.
@@ -497,6 +520,9 @@ fn nes_filter_set(on: bool) {
 /// идёт ускоренно при f0 r0, значит железо держит ff_r само, и дело не в
 /// фирмвари. Два прошлых захода правились вслепую — больше не гадаем.
 fn diag_ff(buf: &mut [u8; 16]) -> &str {
+    if !dev_mode() {
+        return "";
+    }
     use core::sync::atomic::Ordering::Relaxed;
     let f = (CTRL_FLAGS.load(Relaxed) >> 6) & 1;
     let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
@@ -511,13 +537,26 @@ fn diag_ff(buf: &mut [u8; 16]) -> &str {
     // а проверить это в симуляции нельзя: фирмварь там не исполняется.
     // Если цифра меняется при переключении — значит значение доезжает и
     // виновата запись в регистр; если стоит на месте — не доезжает.
+    let mut n = 5;
     if MD_FILTER_ON.load(Relaxed) {
-        buf[5] = b' ';
-        buf[6] = b'F';
-        buf[7] = b'0' + (md_filter_mode() & 3) as u8;
-        return core::str::from_utf8(&buf[..8]).unwrap_or("");
+        buf[n] = b' ';
+        buf[n + 1] = b'F';
+        buf[n + 2] = b'0' + (md_filter_mode() & 3) as u8;
+        n += 3;
     }
-    core::str::from_utf8(&buf[..5]).unwrap_or("")
+    // Отброшенное: d — записи второму экземпляру чипа, g — маски стерео
+    // Game Gear. Показываем только когда есть что показать.
+    let d2 = DROP2.load(Relaxed).min(9);
+    let dgg = DROP_GG.load(Relaxed).min(9);
+    if (d2 != 0 || dgg != 0) && n + 5 <= buf.len() {
+        buf[n] = b' ';
+        buf[n + 1] = b'd';
+        buf[n + 2] = b'0' + d2 as u8;
+        buf[n + 3] = b'g';
+        buf[n + 4] = b'0' + dgg as u8;
+        n += 5;
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("")
 }
 
 /// Диагностика GBS: t — play-тики, ДОСТАВЛЕННЫЕ в gb-домен, w — записи
@@ -581,6 +620,9 @@ fn upload_psram(base: u32, bytes: &[u8]) {
 static GB_ROM_BAD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 fn diag_gb(buf: &mut [u8; 16]) -> &str {
+    if !dev_mode() {
+        return "";
+    }
     let tw = chipbox_read(0x1E);
     let f = chipbox_read(0x1D) >> 16;
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -607,6 +649,9 @@ fn diag_gb(buf: &mut [u8; 16]) -> &str {
 
 /// Пульс домена OPL (рег 0x1C, младшая половина)
 fn diag_opl(buf: &mut [u8; 16]) -> &str {
+    if !dev_mode() {
+        return "";
+    }
     let v = chipbox_read(0x1C) & 0xFFFF;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     buf[0] = b'o';
@@ -621,6 +666,9 @@ fn diag_opl(buf: &mut [u8; 16]) -> &str {
 /// w — записи CPU в звуковые реги. p=0 -> CPU не крутит стаб;
 /// p растёт, w=0 -> PLAY не пишет в чипы; оба растут -> тракт звука
 fn diag_str(buf: &mut [u8; 16]) -> &str {
+    if !dev_mode() {
+        return "";
+    }
     let v = chipbox_read(0x1B);
     let f = chipbox_read(0x1D) & 0xFFFF;
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2306,8 +2354,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // стерео Game Gear. И то, и другое раньше уходило в тишину без
     // сообщения (а маска ещё и глушила канал шума, потому что попадала в
     // PSG как данные). Считаем и говорим один раз в конце прохода.
-    let mut drop2 = 0u32;
-    let mut drop_gg = 0u32;
+    // Счётчики видны и на экране, если включён Developer info: до этого
+    // они жили только в выводе стенда, и на устройстве понять, что часть
+    // записей отбрасывается, было нечем.
+    DROP2.store(0, core::sync::atomic::Ordering::Relaxed);
+    DROP_GG.store(0, core::sync::atomic::Ordering::Relaxed);
 
     loop {
         match reader.next_event() {
@@ -2530,13 +2581,17 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             // Отброшенное осознанно. Ветки нужны явные: ниже стоит
             // «Ok(_) => {}», и молчаливое проглатывание этих двух команд
             // как раз и было дефектом.
-            Ok(Event::SecondChip { .. }) => drop2 += 1,
+            Ok(Event::SecondChip { .. }) => bump(&DROP2),
             // Маска второго чипа: играть её нечем, считаем как отброшенное
-            Ok(Event::GgStereo { .. }) => drop_gg += 1,
+            Ok(Event::GgStereo { .. }) => bump(&DROP_GG),
             Ok(Event::End) => {
                 loops += 1;
-                if loops == 1 && (drop2 != 0 || drop_gg != 0) {
-                    println!("Отброшено: второй чип {drop2}, стерео Game Gear {drop_gg}");
+                let (d2, dgg) = (
+                    DROP2.load(core::sync::atomic::Ordering::Relaxed),
+                    DROP_GG.load(core::sync::atomic::Ordering::Relaxed),
+                );
+                if loops == 1 && (d2 != 0 || dgg != 0) {
+                    println!("Отброшено: второй чип {d2}, стерео Game Gear {dgg}");
                 }
                 // Ни одной записи в чипы за весь проход: у файла всё
                 // звучание приходится на то, чего мы не умеем (звук
