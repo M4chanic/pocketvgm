@@ -336,6 +336,7 @@ fn vu_tick(last: &mut u32) {
         md_filter_tick();
         nes_filter_tick();
         mono_tick();
+        ui::scroll_tick();
     }
 }
 

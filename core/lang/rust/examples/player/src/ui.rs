@@ -1,6 +1,8 @@
 //! Минимальный экранный UI: текст 8x8 (x2) в RGB565-фреймбуфер litex.
 
 use crate::font::FONT8X8;
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 const FB_BASE: *mut u16 = 0x40C0_0000 as *mut u16;
 const W: usize = 266;
@@ -34,6 +36,101 @@ fn put_px(x: usize, y: usize, c: u16) {
     if x < W && y < H {
         unsafe { FB_BASE.add(y * W + x).write_volatile(c) };
     }
+}
+
+// ----------------------------------------------------------------------
+// Прокрутка последней строки подписи.
+//
+// В две строки укладывается 88.7% корпуса (705 файлов с тегами GD3).
+// Остаток — в основном игры Konami, где через запятую перечислены три-
+// четыре композитора: «Contra: Hard Corps - Hiroshi Kobayashi, Michiru
+// Yamane, Akira Ya...» это 99 знаков. Третья статическая строка подняла
+// бы покрытие лишь до 92.3%, а места стоит столько же, сколько первые
+// две, поэтому вместо неё окно едет по строке.
+//
+// Шаг — знак, а не точка: put_px отсекает всё за правым краем, а
+// координаты беззнаковые, так что уехать влево нечем. Для чтения этого
+// достаточно, и обходится без клиппинга.
+struct ScrollBuf(UnsafeCell<[u8; 192]>);
+// Прошивка однопоточная, доступ только из тика отрисовки
+unsafe impl Sync for ScrollBuf {}
+static SCROLL: ScrollBuf = ScrollBuf(UnsafeCell::new([0; 192]));
+static SCROLL_LEN: AtomicUsize = AtomicUsize::new(0);
+static SCROLL_POS: AtomicUsize = AtomicUsize::new(0);
+static SCROLL_HOLD: AtomicUsize = AtomicUsize::new(0);
+static SCROLL_Y: AtomicUsize = AtomicUsize::new(0);
+
+/// Пауза на краях, в тиках. Тик приходит 12 раз в секунду (см. vu_tick),
+/// то есть края держатся полторы секунды — успеть прочитать начало.
+const SCROLL_HOLD_TICKS: usize = 18;
+
+fn scroll_set(s: &str, y: usize) {
+    let b = unsafe { &mut *SCROLL.0.get() };
+    let n = s.len().min(b.len());
+    // режем по границе символа, иначе from_utf8 потом откажет
+    let mut n = n;
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    b[..n].copy_from_slice(&s.as_bytes()[..n]);
+    SCROLL_LEN.store(n, Relaxed);
+    SCROLL_POS.store(0, Relaxed);
+    SCROLL_HOLD.store(SCROLL_HOLD_TICKS, Relaxed);
+    SCROLL_Y.store(y, Relaxed);
+}
+
+fn scroll_clear() {
+    SCROLL_LEN.store(0, Relaxed);
+}
+
+/// Перерисовывает только свою строку — как progress() чистит свою полосу
+fn band(y: usize, s: &str, color: u16) {
+    for yy in y..y + 8 {
+        for x in 12..W {
+            put_px(x, yy, BG);
+        }
+    }
+    text(12, y, s, color, 1);
+}
+
+/// Двигает окно на знак. Зовётся из того же тика, что и счётчик времени.
+pub fn scroll_tick() {
+    let len = SCROLL_LEN.load(Relaxed);
+    if len == 0 {
+        return;
+    }
+    let buf = unsafe { &*SCROLL.0.get() };
+    let s = match core::str::from_utf8(&buf[..len]) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let max = (W - 24) / 8;
+    let total = s.chars().count();
+    if total <= max {
+        return;
+    }
+    let last = total - max;
+    let hold = SCROLL_HOLD.load(Relaxed);
+    if hold > 0 {
+        SCROLL_HOLD.store(hold - 1, Relaxed);
+        return;
+    }
+    let mut pos = SCROLL_POS.load(Relaxed);
+    if pos >= last {
+        pos = 0;
+        SCROLL_HOLD.store(SCROLL_HOLD_TICKS, Relaxed);
+    } else {
+        pos += 1;
+        if pos == last {
+            SCROLL_HOLD.store(SCROLL_HOLD_TICKS, Relaxed);
+        }
+    }
+    SCROLL_POS.store(pos, Relaxed);
+
+    let start = s.char_indices().nth(pos).map(|(i, _)| i).unwrap_or(0);
+    let win = &s[start..];
+    let end = win.char_indices().nth(max).map(|(i, _)| i).unwrap_or(win.len());
+    band(SCROLL_Y.load(Relaxed), &win[..end], DIM);
 }
 
 /// Текст 8x8 с масштабом (1 или 2), возвращает ширину в пикселях
@@ -254,6 +351,14 @@ pub fn screen(
     text(12, 58, s1, DIM, 1);
     if !s2.is_empty() {
         text(12, 70, s2, DIM, 1);
+    }
+    // Если и в две строки не влезло — вторую отдаём под прокрутку.
+    // s1 обрезан по границе символа, поэтому срез по его длине законен.
+    let rest = sub[s1.len()..].trim_start();
+    if rest.chars().count() > max_chars {
+        scroll_set(rest, 70);
+    } else {
+        scroll_clear();
     }
 
     // Система переносится так же. Раньше она рисовалась одной строкой и
