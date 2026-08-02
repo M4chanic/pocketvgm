@@ -1972,7 +1972,7 @@ int main(int argc, char** argv) {
     }
     if (huc_clk) {
         tb.wb(0x27, true, (uint32_t)((double)huc_clk / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(0x28, true, gain_of(128, 0x1B));
+        tb.wb(0x28, true, gain_of(228, 0x1B));   // +5 дБ, см. фирмварь
     }
     if (opn_clk) {
         // Делители сняты с эталона (libvgm, fmopn.c): FM идёт с частотой

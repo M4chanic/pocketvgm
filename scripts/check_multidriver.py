@@ -67,6 +67,67 @@ def check(path: Path) -> list[str]:
     return out
 
 
+# Объявление целиком, вместе со списком имён через запятую: строка
+# «reg signed [25:0] ym_l_g, ym_r_g, adpcm_l_g;» объявляет три сигнала, а
+# не один — иначе второй и третий выглядят необъявленными.
+DECL = re.compile(r"^[ \t]*(?:reg|wire|logic|integer|localparam)\b(.*)$")
+DECL_NAME = re.compile(r"\b([A-Za-z_]\w*)\s*(?:=[^,;]*)?(?=\s*[,;]|\s*$)")
+WORD = re.compile(r"\b([A-Za-z_]\w*)\b")
+
+
+def check_gated(path: Path) -> list[str]:
+    """Сигналы, объявленные под `ifdef, но используемые снаружи.
+
+    Аркадный вариант собирается без M4_HAS_HOME. Если объявление сидит под
+    этим гейтом, а ссылка на него — нет, Quartus падает: в проекте задан
+    default_nettype none, и неявный провод заводить нельзя. Verilator это
+    НЕ ловит — директива живёт в настройках Quartus, а не в исходнике, и
+    он молча создаёт провод. Так упала сборка на cen_rf5c.
+    """
+    stack: list[str] = []
+    declared: dict[str, set] = {}   # имя -> множество гейтов объявления
+    used_open: set[str] = set()     # имена, встреченные ВНЕ гейтов
+    for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
+        t = line.strip()
+        if t.startswith("`ifdef") or t.startswith("`ifndef"):
+            parts = t.split()
+            stack.append(parts[1] if len(parts) > 1 else "?")
+            continue
+        if t.startswith("`else"):
+            if stack:
+                stack[-1] = "!" + stack[-1]
+            continue
+        if t.startswith("`endif"):
+            if stack:
+                stack.pop()
+            continue
+        if t.startswith("//"):
+            continue
+        code = re.sub(r"//.*", "", line)
+        m = DECL.match(code)
+        if m:
+            # отбрасываем разрядность и тип, остаются только имена
+            tail = re.sub(r"\[[^\]]*\]", "", m.group(1))
+            tail = re.sub(r"\b(?:signed|unsigned)\b", "", tail)
+            for nm in DECL_NAME.findall(tail):
+                declared.setdefault(nm, set()).add(stack[-1] if stack else "")
+        if not stack:
+            # Имя порта в подключении (.cen(sig)) — не ссылка на сигнал
+            used_open.update(WORD.findall(re.sub(r"\.\s*\w+\s*\(", "(", code)))
+
+    out = []
+    for name, gates in sorted(declared.items()):
+        if name not in used_open:
+            continue
+        # объявлено где-то без гейта, либо и под G, и под !G — тогда есть всегда
+        if "" in gates or any(g.startswith("!") and g[1:] in gates for g in gates):
+            continue
+        gate = sorted(gates)[0]
+        out.append(f"{path}: '{name}' объявлен только под `ifdef {gate}, "
+                   f"а используется вне гейта")
+    return out
+
+
 def check_signed_lits(path: Path) -> list:
     """Знаковые литералы, переполняющие собственную разрядность."""
     src = strip_comments(path.read_text())
@@ -96,14 +157,22 @@ def check_signed_lits(path: Path) -> list:
 def main() -> int:
     files = [Path(p) for p in (sys.argv[1:] or DEFAULT)]
     problems = []
+    gate_problems = []
     lit_problems = []
     for f in files:
         if f.exists():
             problems += check(f)
+            gate_problems += check_gated(f)
             lit_problems.extend(check_signed_lits(f))
     if problems:
         print("несколько драйверов на регистр (Quartus это отвергнет):")
         for p in problems:
+            print("  " + p)
+        return 1
+    if gate_problems:
+        print("объявлено под `ifdef, а используется снаружи "
+              "(аркадный вариант не соберётся):")
+        for p in gate_problems:
             print("  " + p)
         return 1
     if lit_problems:
@@ -111,7 +180,7 @@ def main() -> int:
         for p in lit_problems:
             print("  " + p)
         return 1
-    print(f"драйверы и литералы: чисто ({len(files)} файлов)")
+    print(f"драйверы, гейты и литералы: чисто ({len(files)} файлов)")
     return 0
 
 

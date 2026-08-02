@@ -189,11 +189,13 @@ module chipbox #(
   reg [7:0] fds_gain = 8'd64;
   reg [7:0] rf5c_gain = 8'd64;
   reg [7:0] gb_gain = 8'd64;
+  // Вне M4_HAS_HOME вместе со своим стробом: модуль rf5c164 живёт в обоих
+  // вариантах, значит и делитель его отсчётов должен быть в обоих.
+  reg [31:0] rf5c_phase_inc = DEFAULT_RF5C_PHASE_INC;
 `ifdef M4_HAS_HOME
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
   reg [7:0] scc_gain = 8'd64;
   reg [31:0] huc_phase_inc = DEFAULT_HUC_PHASE_INC;
-  reg [31:0] rf5c_phase_inc = DEFAULT_RF5C_PHASE_INC;
   reg [7:0] huc_gain = 8'd64;
 `endif
 `ifdef M4_HAS_ARCADE
@@ -972,8 +974,14 @@ module chipbox #(
     nes_phi2_d <= nes_phi2;
   end
 
-`ifdef M4_HAS_HOME
-  // Отсчётный строб RF5C164 (32.5 кГц)
+  // Отсчётный строб RF5C164 (32.5 кГц).
+  //
+  // ВНЕ M4_HAS_HOME намеренно: сам модуль rf5c164 инстанцируется без
+  // гейта, как и fds, поэтому и его строб должен существовать в обоих
+  // вариантах. Пока строб лежал под гейтом, аркадная сборка падала в
+  // Quartus на «can't declare implicit net cen_rf5c»: в проекте задан
+  // default_nettype none, а Verilator этого не видит (директива стоит в
+  // настройках Quartus, а не в исходнике) и молча заводит неявный провод.
   reg [31:0] rf5c_cen_phase = 0;
   reg cen_rf5c = 0;
   always @(posedge clk) begin
@@ -981,6 +989,7 @@ module chipbox #(
     if (!pause_r) {cen_rf5c, rf5c_cen_phase} <= {1'b0, rf5c_cen_phase} + {1'b0, rf5c_phase_inc};
   end
 
+`ifdef M4_HAS_HOME
   // Клок Konami SCC (~1.79 МГц)
   reg [31:0] scc_cen_phase = 0;
   reg cen_scc = 0;
