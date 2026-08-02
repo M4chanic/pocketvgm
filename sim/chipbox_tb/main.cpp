@@ -2003,8 +2003,8 @@ int main(int argc, char** argv) {
         uint32_t w = (hdr_end > 0x2A && d[0x2A]) ? d[0x2A] : 16;
         tb.wb(0x2E, true, (w == 15 ? 1u : 0u) << 16 | fb);
     }
-    // В файлах Mega Drive 39 и 207 вместо 33 и 239 — см. фирмварь
-    tb.wb(0x15, true, gain_of(sn_clk ? (fm_clk ? 39u : 33u) : 0u, 0x00) << 8
+    // В файлах Mega Drive 36 и 207 вместо 33 и 239 — см. фирмварь
+    tb.wb(0x15, true, gain_of(sn_clk ? (fm_clk ? 36u : 33u) : 0u, 0x00) << 8
                     | gain_of(fm_clk ? 207u : (opn_clk ? 204u : 0u), fm_id));
     tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
     // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
