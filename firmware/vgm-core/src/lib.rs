@@ -43,6 +43,8 @@ pub enum Chip {
     Opn,
     /// HuC6280 PSG (PC Engine / TurboGrafx-16)
     HuC6280,
+    /// RF5C164 — PCM дисковой приставки Mega CD (и родич RF5C68)
+    Rf5c164,
     /// OPL-семейство (YM3812/YM3526/YMF262) — играется на нашем OPL3.
     /// `port` = банк регистров (0 или 1; у OPL2 всегда 0).
     Opl,
@@ -85,6 +87,18 @@ pub enum Event {
     /// битом 7 байта регистра, и этот бит доезжал до чипа: записи второго
     /// экземпляра садились на регистры ПЕРВОГО и дрались с ними.
     SecondChip { cmd: u8 },
+    /// Запись байта в ОЗУ сэмплов RF5C164 (команда 0xC2).
+    ///
+    /// Рипы Mega CD пишут сэмплы не только в начале трека, но и по ходу,
+    /// поэтому это отдельное событие, а не разовая заливка.
+    Rf5cMem { offset: u16, data: u8 },
+    /// Заливка ОЗУ сэмплов из блока данных (команда 0x68, «PCM RAM write»).
+    ///
+    /// Рипы Mega CD грузят сэмплы именно так: блок типа 0x01/0x02 лежит в
+    /// файле целиком, а по ходу трека из него кусками копируют в ОЗУ чипа.
+    /// Раньше команда просто пропускалась, и у Sonic CD в ОЗУ не приезжало
+    /// НИ ОДНОГО байта — регистры игрались по пустой памяти.
+    PcmRamWrite { kind: u8, src: u32, dst: u32, len: u32 },
     /// Конец звуковых данных.
     End,
 }
@@ -462,6 +476,10 @@ impl<'a> Reader<'a> {
         Ok(self.u8()? as u16 | (self.u8()? as u16) << 8)
     }
 
+    fn u24(&mut self) -> Result<u32, Error> {
+        Ok(self.u8()? as u32 | (self.u8()? as u32) << 8 | (self.u8()? as u32) << 16)
+    }
+
     fn skip(&mut self, n: usize) -> Result<(), Error> {
         if self.pos + n > self.data.len() {
             return Err(Error::TooShort);
@@ -493,6 +511,9 @@ impl<'a> Reader<'a> {
             0x55 | 0x56 => self.reg_write(Chip::Opn, 0)?,
             0x57 => self.reg_write(Chip::Opn, 1)?,
             0xB9 => self.reg_write(Chip::HuC6280, 0)?,
+            // RF5C164: регистры чипа. Бит 7 байта регистра — второй
+            // экземпляр, как у прочих команд полосы 0xB0-0xBF.
+            0xB1 => self.reg_write_dual(Chip::Rf5c164, 0, cmd)?,
             // OPL-семейство на нашем OPL3: YM3812/YM3526 — один банк,
             // YMF262 — два порта (0x5E/0x5F)
             0x5A | 0x5B | 0x5E => self.reg_write(Chip::Opl, 0)?,
@@ -516,8 +537,14 @@ impl<'a> Reader<'a> {
                 Event::DataBlock { kind, start, len }
             }
             0x68 => {
-                self.skip(11)?;
-                Event::Write { chip: Chip::Unknown(cmd), port: 0, addr: 0, data: 0 }
+                self.u8()?; // 0x66 (совместимость)
+                let kind = self.u8()?;
+                let src = self.u24()?;
+                let dst = self.u24()?;
+                let len = self.u24()?;
+                // Ноль в поле длины означает полные 0x1000000 байт
+                let len = if len == 0 { 0x0100_0000 } else { len };
+                Event::PcmRamWrite { kind, src, dst, len }
             }
             0x70..=0x7F => Event::Wait { ticks: (cmd & 0xF) as u16 + 1 },
             0x80..=0x8F => {
@@ -550,7 +577,7 @@ impl<'a> Reader<'a> {
                 self.skip(2)?;
                 Event::SecondChip { cmd }
             }
-            0xB0..=0xB2 | 0xB5 | 0xB6 | 0xBB..=0xBF => {
+            0xB0 | 0xB2 | 0xB5 | 0xB6 | 0xBB..=0xBF => {
                 self.skip(2)?;
                 Event::Write { chip: Chip::Unknown(cmd), port: 0, addr: 0, data: 0 }
             }
@@ -565,6 +592,13 @@ impl<'a> Reader<'a> {
                     Event::SegaPcmWrite { offset, data }
                 }
             }
+            // 0xC1 — запись со смещением у RF5C68, 0xC2 — у RF5C164.
+            // Чип у нас один на оба, поэтому и команды ведут в одно место.
+            0xC1 | 0xC2 => {
+                // ОЗУ сэмплов: смещение 16 бит, затем байт
+                let offset = self.u16()?;
+                Event::Rf5cMem { offset, data: self.u8()? }
+            }
             0xD2 => {
                 // K051649/K052539 (SCC): pp aa dd — порт, регистр, данные.
                 // Второй экземпляр — бит 7 байта порта.
@@ -577,7 +611,7 @@ impl<'a> Reader<'a> {
                     Event::Write { chip: Chip::K051649, port, addr, data }
                 }
             }
-            0xC1..=0xDF => {
+            0xC3..=0xDF => {
                 self.skip(3)?;
                 Event::Write { chip: Chip::Unknown(cmd), port: 0, addr: 0, data: 0 }
             }
@@ -833,6 +867,38 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn parses_rf5c_ram_paths() {
+        // Рипы Mega CD грузят сэмплы командой 0x68 из блока данных типа
+        // 0x02, а не побайтово. Раньше она пропускалась, и в ОЗУ чипа не
+        // приезжало ни байта: чип играл по пустой памяти.
+        let body = [
+            // блок данных типа 0x02 на четыре байта
+            0x67, 0x66, 0x02, 0x04, 0x00, 0x00, 0x00, 1, 2, 3, 4,
+            // 0x68: источник 1, приёмник 0x0200, длина 3
+            0x68, 0x66, 0x02, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00,
+            // 0xC1 — тот же путь, что 0xC2: смещение 16 бит, затем байт
+            0xC1, 0x34, 0x12, 0x5A,
+            0x66,
+        ];
+        let d = synth_vgm(&body, None);
+        let h = Header::parse(&d).unwrap();
+        let mut r = Reader::new(&d, h.data_offset);
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::DataBlock { kind: 0x02, start: h.data_offset + 7, len: 4 }
+        );
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::PcmRamWrite { kind: 0x02, src: 1, dst: 0x0200, len: 3 }
+        );
+        assert_eq!(
+            r.next_event().unwrap(),
+            Event::Rf5cMem { offset: 0x1234, data: 0x5A }
+        );
+        assert_eq!(r.next_event().unwrap(), Event::End);
     }
 
     #[test]

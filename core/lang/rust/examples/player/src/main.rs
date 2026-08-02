@@ -189,6 +189,7 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.k051649 != 0 { add("SCC"); }
     if c.okim6295 != 0 { add("OKIM6295"); }
     if c.k053260 != 0 { add("K053260"); }
+    if c.rf5c164 != 0 || c.rf5c68 != 0 { add("RF5C164"); }
     if c.ymf262 != 0 { add("OPL3"); }
     if c.ym3812 != 0 { add("OPL2"); }
     if c.ym3526 != 0 { add("OPL"); }
@@ -209,7 +210,6 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.pwm != 0 { off("PWM"); }
     if c.upd7759 != 0 { off("uPD7759"); }
     if c.wonderswan != 0 { off("WonderSwan"); }
-    if c.rf5c164 != 0 || c.rf5c68 != 0 { off("RF5C164"); }
     // Второго экземпляра чипа в железе нет. Раньше его записи молча
     // терялись, и половина музыки dual-chip файла исчезала без следа.
     if c.second_chip { off("2nd chip"); }
@@ -293,6 +293,9 @@ const EXT_HUC: u32 = 0x0300_0000;
 const EXT_GB: u32 = 0x0400_0000;
 const EXT_SNST: u32 = 0x0500_0000;
 const EXT_FDS: u32 = 0x0600_0000;
+const EXT_RF5C: u32 = 0x0700_0000;
+const EXT_RF5C_PTR: u32 = 0x0800_0000;
+const EXT_RF5C_RAM: u32 = 0x0900_0000;
 const EXT_OKIM: u32 = 0x0100_0000;
 const EXT_K060: u32 = 0x0200_0000;
 
@@ -2266,6 +2269,20 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // 14 кГц, задокументированная на NESdev. Включаем только там, где это
     // действительно Famicom.
     nes_filter_set(nes_clk != 0);
+    // RF5C164 (Mega CD) и его аркадный родич RF5C68. Отсчёт чип выдаёт раз
+    // в 384 такта своей тактовой; гейн предварительный, калибруется методом
+    // задачи 69.
+    let rf5c_clk = if header.clocks.rf5c164 != 0 {
+        header.clocks.rf5c164
+    } else {
+        header.clocks.rf5c68
+    };
+    if rf5c_clk != 0 {
+        chipbox_write(0x33, ((((rf5c_clk / 384) as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+    }
+    // Гейн 255, а не 64: модуль делит сумму восьми каналов на четыре ради
+    // запаса по разрядности, и без компенсации мы тише эталона ровно на 12 дБ.
+    chipbox_write(0x32, if rf5c_clk != 0 { 255 } else { 0 });
     // Гейн дисковой приставки, откалиброван по методу задачи 69:
     // синтетический файл, где сначала звучит импульсный канал APU, потом
     // волновая таблица FDS — оба в одном файле, поэтому множитель
@@ -2343,6 +2360,16 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // Маска стерео Game Gear: биты 0-3 — правая сторона каналов 0..3,
     // биты 4-7 — левая. 0xFF означает «всё в оба уха».
     let mut gg_mask: u8 = 0xFF;
+    // Куда ляжет следующий байт ОЗУ RF5C164, если указатель не разрывать
+    let mut rf5c_ptr: u16 = 0xFFFF;
+    // Банк сэмплов RF5C: блоки типа 0x01/0x02 лежат в файле целиком, а
+    // команда 0x68 копирует из них куски в ОЗУ чипа по ходу трека.
+    let mut rf5c_bank: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // Окно записи в ОЗУ — 4 КБ, страницу задаёт регистр 0x07 при сброшенном
+    // бите 6. Оно накладывается на ВСЕ пути записи: команды 0xC1/0xC2, блоки
+    // 0xC0/0xC1 и заливку 0x68 (libvgm, DoRAMOfsPatches). Без него рип
+    // Sonic CD лил все сэмплы в первые 4 КБ поверх друг друга.
+    let mut rf5c_wbank: u32 = 0;
     // Стерео включаем только там, где файл его объявил: у T6W28 (Neo Geo
     // Pocket) или у файла с маской Game Gear. Обычные моно-файлы идут
     // прежней дорогой через sn_sound и звучат бит в бит как раньше.
@@ -2415,6 +2442,50 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 // Регистры APU Game Boy $FF10-$FF3F: в VGM адрес идёт
                 // смещением от $FF10, чипу нужен полный младший байт.
                 sink.push(OP_EXT | EXT_GB | ((addr as u32) + 0x10) << 8 | data as u32);
+            }
+            Ok(Event::Write { chip: Chip::Rf5c164, addr, data, .. }) => {
+                if addr & 0x7F == 0x07 && data & 0x40 == 0 {
+                    rf5c_wbank = (data & 0x0F) as u32;
+                }
+                sink.push(OP_EXT | EXT_RF5C | (addr as u32 & 0xF) << 8 | data as u32);
+            }
+            // Байт в ОЗУ сэмплов. Указатель шлём только когда он разорван:
+            // рипы пишут длинными подряд идущими кусками, и слать пару на
+            // каждый байт значило бы удвоить очередь на ровном месте.
+            Ok(Event::Rf5cMem { offset, data: d }) => {
+                let offset = (offset & 0x0FFF) | (rf5c_wbank as u16) << 12;
+                if offset != rf5c_ptr {
+                    sink.push(OP_EXT | EXT_RF5C_PTR | offset as u32);
+                }
+                sink.push(OP_EXT | EXT_RF5C_RAM | d as u32);
+                rf5c_ptr = offset.wrapping_add(1);
+            }
+            Ok(Event::DataBlock { kind: 0x01 | 0x02, start, len }) => {
+                rf5c_bank.extend_from_slice(&data[start..start + len]);
+            }
+            // Заливка из банка: у Sonic CD это единственный путь сэмплов
+            Ok(Event::PcmRamWrite { kind: 0x01 | 0x02, src, dst, len }) => {
+                // Эталон вылезающую за банк заливку не обрезает, а игнорирует
+                let from = src as usize;
+                let n = len as usize;
+                if from < rf5c_bank.len() && n <= rf5c_bank.len() - from {
+                    let dst = (dst | rf5c_wbank << 12) & 0xFFFF;
+                    sink.push(OP_EXT | EXT_RF5C_PTR | dst);
+                    for &b in &rf5c_bank[from..from + n] {
+                        sink.push(OP_EXT | EXT_RF5C_RAM | b as u32);
+                    }
+                    rf5c_ptr = (dst as u16).wrapping_add(n as u16);
+                }
+            }
+            // Дамп ОЗУ блоком: смещение 16 бит, дальше тело
+            Ok(Event::DataBlock { kind: 0xC0 | 0xC1, start, len }) if len >= 2 => {
+                let block = &data[start..start + len];
+                let a = (block[0] as u32 | (block[1] as u32) << 8 | rf5c_wbank << 12) & 0xFFFF;
+                sink.push(OP_EXT | EXT_RF5C_PTR | a);
+                for &b in &block[2..] {
+                    sink.push(OP_EXT | EXT_RF5C_RAM | b as u32);
+                }
+                rf5c_ptr = (a as u16).wrapping_add(len as u16 - 2);
             }
             Ok(Event::Write { chip: Chip::HuC6280, addr, data, .. }) => {
                 sink.push(OP_EXT | EXT_HUC | ((addr & 0xF) as u32) << 8 | data as u32);

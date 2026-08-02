@@ -153,6 +153,9 @@ module chipbox #(
   localparam [31:0] DEFAULT_PCM_PHASE_INC = 32'((64'd8_000_000 << 32) / CLK_HZ);
   localparam [31:0] DEFAULT_ADPCM_PHASE_INC = 32'((64'd8_000_000 << 32) / CLK_HZ);
   localparam [31:0] DEFAULT_NES_PHASE_INC = 32'((64'd1_789_773 << 32) / CLK_HZ);
+  // ОЗУ сэмплов RF5C164 (Mega CD): 64 КБ по байтовому адресу 0x300000.
+  // В блочную память не влезает — там свободно 14 блоков из нужных 64.
+  localparam [21:0] RF5C_BASE_WORD = 22'h18_0000;  // байт 0x300000
   localparam [21:0] NES_BASE_WORD = 22'h300000;  // 0x600000 байт
   localparam [21:0] NSF_BASE_WORD = 22'h380000;  // 0x700000 байт, до 1 МБ
 
@@ -184,11 +187,13 @@ module chipbox #(
   reg [31:0] nes_phase_inc = DEFAULT_NES_PHASE_INC;
   reg [7:0] apu_gain = 8'd64;
   reg [7:0] fds_gain = 8'd64;
+  reg [7:0] rf5c_gain = 8'd64;
   reg [7:0] gb_gain = 8'd64;
 `ifdef M4_HAS_HOME
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
   reg [7:0] scc_gain = 8'd64;
   reg [31:0] huc_phase_inc = DEFAULT_HUC_PHASE_INC;
+  reg [31:0] rf5c_phase_inc = DEFAULT_RF5C_PHASE_INC;
   reg [7:0] huc_gain = 8'd64;
 `endif
 `ifdef M4_HAS_ARCADE
@@ -274,6 +279,9 @@ module chipbox #(
   // Konami SCC (K051649): phiM ~1.79 МГц
   localparam [31:0] DEFAULT_SCC_PHASE_INC = 32'((64'd1_789_772 << 32) / CLK_HZ);
   localparam [31:0] DEFAULT_HUC_PHASE_INC = 32'((64'd3_579_545 << 32) / CLK_HZ);
+  // RF5C164 выдаёт отсчёт раз в 384 такта своей тактовой: у Mega CD
+  // это 12.5 МГц, то есть 32552 Гц.
+  localparam [31:0] DEFAULT_RF5C_PHASE_INC = 32'((64'd32_552 << 32) / CLK_HZ);
   // OKIM6295: клок ~1 МГц; ROM сэмплов в PSRAM с байта 0x100000 (окно
   // 0x100000-0x3FFFFF свободно между SegaPCM<=512К и ADPCM_BASE 0x400000)
   localparam [31:0] DEFAULT_OKIM_PHASE_INC = 32'((64'd1_000_000 << 32) / CLK_HZ);
@@ -325,6 +333,24 @@ module chipbox #(
   // Обслуживание ROM-чтений GBS (SM83)
   reg gbs_pending = 0;
   reg gbs_wait_data = 0;
+  // RF5C164: запрос чтения ОЗУ сэмплов и ожидание ответа
+  reg rf5c_pending = 0;
+  reg rf5c_wait = 0;
+  reg rf5c_lane = 0;
+  // Указатель записи в ОЗУ сэмплов и однотактовый запрос от секвенсора
+  reg [15:0] rf5c_ram_ptr = 0;
+  reg [7:0] rf5c_ram_data = 0;
+  reg rf5c_wr_req = 0;
+  // Диагностика: сколько записей в регистры приняли, сколько байт легло
+  // в ОЗУ и сколько чтений обслужил арбитр. Читается по 6'h22.
+  reg [15:0] rf5c_dbg_reg = 0, rf5c_dbg_ram = 0, rf5c_dbg_rd = 0;
+`ifdef M4_SIM
+  // Пик модуля выхода чипа. Только для стенда: в железе это лишний
+  // компаратор на каждом такте микшера, а площади у нас в обрез.
+  reg [15:0] rf5c_dbg_pk = 0;
+`else
+  wire [15:0] rf5c_dbg_pk = 0;
+`endif
   reg gbs_lane = 0;
 
   // Обслуживание чтений NSF-ROM для 6502
@@ -444,6 +470,17 @@ module chipbox #(
       gbs_wait_data <= 0;
       gbs_fetch <= gbs_fetch + 1'b1;
     end
+
+    // RF5C164: модуль поднимает mem_rd на такт, мы ставим запрос и потом
+    // отдаём ему байт вместе с однотактовым valid.
+    rf5c_mem_valid <= 0;
+    if (rf5c_mem_rd && !rf5c_pending && !rf5c_wait) rf5c_pending <= 1;
+    if (mem_rdata_valid && rf5c_wait) begin
+      rf5c_dbg_rd <= rf5c_dbg_rd + 1'b1;
+      rf5c_mem_data <= rf5c_lane ? mem_rdata[15:8] : mem_rdata[7:0];
+      rf5c_mem_valid <= 1;
+      rf5c_wait <= 0;
+    end
 `endif
 
 `ifdef M4_HAS_ARCADE
@@ -492,6 +529,16 @@ module chipbox #(
       fsm_wr_byte_l <= fsm_wr_data;
     end
 `ifdef M4_HAS_HOME
+    else if (rf5c_wr_req && !fsm_wr_pending) begin
+      // ОЗУ сэмплов RF5C164: рипы Mega CD пишут в него ПО ХОДУ трека,
+      // поэтому запись идёт через очередь команд, а не заливкой.
+      rf5c_dbg_ram <= rf5c_dbg_ram + 1'b1;
+      fsm_wr_pending <= 1;
+      fsm_wr_word <= RF5C_BASE_WORD + {7'b0, rf5c_ram_ptr[15:1]};
+      fsm_wr_lane <= rf5c_ram_ptr[0];
+      fsm_wr_byte_l <= rf5c_ram_data;
+      rf5c_ram_ptr <= rf5c_ram_ptr + 16'd1;
+    end
     else if (sid_wr_req && !fsm_wr_pending) begin
       fsm_wr_pending <= 1;
       fsm_wr_word <= NSF_BASE_WORD + {7'b0, sid_wr_addr[15:1]};
@@ -556,6 +603,9 @@ module chipbox #(
     // ROM SegaPCM > DMC > CPU NSF > ADPCM-поток > записи секвенсора > загрузка
     if (!mem_busy && !mem_rd && !mem_wr
         && !dmc_wait_data && !nsf_inflight && !gbs_wait_data && !dbg_wait
+`ifdef M4_HAS_HOME
+        && !rf5c_wait
+`endif
 `ifdef M4_HAS_ARCADE
         && !rom_wait_data && !pf_wait_data && !okim_wait && !k060_wait
 `endif
@@ -598,6 +648,12 @@ module chipbox #(
         gbs_lane <= gbs_rom_addr[0];
         gbs_pending <= 0;
         gbs_wait_data <= 1;
+      end else if (rf5c_pending) begin
+        mem_rd <= 1;
+        mem_addr <= RF5C_BASE_WORD + {7'b0, rf5c_mem_addr[15:1]};
+        rf5c_lane <= rf5c_mem_addr[0];
+        rf5c_pending <= 0;
+        rf5c_wait <= 1;
 `endif
       end else if (fsm_wr_pending) begin
         mem_wr <= 1;
@@ -701,6 +757,8 @@ module chipbox #(
           6'h2E: {sn_sr15, sn_fb_mask} <= data_write[16:0];
           6'h2F: sn_stereo_en <= data_write[0];
           6'h31: fds_gain <= data_write[7:0];
+          6'h32: rf5c_gain <= data_write[7:0];
+          6'h33: rf5c_phase_inc <= data_write;
 `endif
 `ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
@@ -781,6 +839,8 @@ module chipbox #(
           5'h1D: data_read <= {gbs_fetch, nsf_fetch};
           5'h1E: data_read <= {gbs_ticks, gbs_sndwr};
           6'h20: data_read <= {8'b0, slot_upd_info};
+          6'h22: data_read <= {rf5c_dbg_rd, rf5c_dbg_ram};
+          6'h23: data_read <= {rf5c_dbg_pk, rf5c_dbg_reg};
           5'h1F: data_read <= {23'b0, dbg_rd_valid, dbg_rd_data};
           5'h1A: begin
             data_read <= {vu_r, vu_l};
@@ -894,6 +954,14 @@ module chipbox #(
   end
 
 `ifdef M4_HAS_HOME
+  // Отсчётный строб RF5C164 (32.5 кГц)
+  reg [31:0] rf5c_cen_phase = 0;
+  reg cen_rf5c = 0;
+  always @(posedge clk) begin
+    cen_rf5c <= 0;
+    if (!pause_r) {cen_rf5c, rf5c_cen_phase} <= {1'b0, rf5c_cen_phase} + {1'b0, rf5c_phase_inc};
+  end
+
   // Клок Konami SCC (~1.79 МГц)
   reg [31:0] scc_cen_phase = 0;
   reg cen_scc = 0;
@@ -1995,6 +2063,32 @@ module chipbox #(
   wire signed [16:0] apu_wide = {2'b00, apu_sample[15:1]}
       + {3'b000, vrc6_out, 8'b0};  // выход APU беззнаковый, VRC6 0..61 << 8
 
+  // RF5C164 — PCM дисковой приставки Mega CD. ОЗУ сэмплов в PSRAM,
+  // чтения идут через общий арбитр наравне с прочими потребителями.
+  reg [3:0] rf5c_addr = 0;
+  reg [7:0] rf5c_din = 0;
+  reg rf5c_wr = 0;
+  wire [15:0] rf5c_mem_addr;
+  wire rf5c_mem_rd;
+  reg [7:0] rf5c_mem_data = 0;
+  reg rf5c_mem_valid = 0;
+  wire signed [15:0] rf5c_l, rf5c_r;
+
+  rf5c164 rf5c_i (
+      .clk(clk),
+      .cen(cen_rf5c),
+      .rst(chip_reset),
+      .wr(rf5c_wr),
+      .addr(rf5c_addr),
+      .din(rf5c_din),
+      .mem_addr(rf5c_mem_addr),
+      .mem_rd(rf5c_mem_rd),
+      .mem_data(rf5c_mem_data),
+      .mem_valid(rf5c_mem_valid),
+      .snd_l(rf5c_l),
+      .snd_r(rf5c_r)
+  );
+
   // Дисковая приставка Famicom: волновая таблица со своим модулятором.
   // Отдельным каналом, а не подмешиванием в APU: выход у него тоже
   // однополярный и требует своего блокера, а расширять общий путь APU
@@ -2076,6 +2170,11 @@ module chipbox #(
   wire signed [8:0] g_adpcm = {1'b0, mix_gains[31:24]};
   wire signed [8:0] g_apu = {1'b0, apu_gain};
   wire signed [8:0] g_fds = {1'b0, fds_gain};
+  // Выход RF5C164 уже знаковый и симметричный — DC-блокер ему не нужен.
+  wire signed [8:0] g_rf5c = {1'b0, rf5c_gain};
+`ifdef M4_SIM
+  wire [15:0] rf5c_abs = rf5c_l[15] ? -rf5c_l : rf5c_l;
+`endif
   // выход FDS 0..2016, поднимаем до общей шкалы
   wire signed [16:0] fds_wide = {fds_snd[15], fds_snd} <<< 4;
   wire signed [8:0] g_gb = {1'b0, gb_gain};
@@ -2145,7 +2244,7 @@ module chipbox #(
   // Конвейер: произведения регистрируются (разгрузка длинного пути),
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ay_g;
-  reg signed [25:0] apu_g, fds_g, opl_l_g, opl_r_g;
+  reg signed [25:0] apu_g, fds_g, rf5c_l_g, rf5c_r_g, opl_l_g, opl_r_g;
 `ifdef M4_HAS_HOME
   reg signed [25:0] gbl_g, gbr_g, sid_g;
 `else
@@ -2174,6 +2273,11 @@ module chipbox #(
 `endif
     apu_g <= (apu_hp * g_apu) >>> 6;
     fds_g <= (fds_hp * g_fds) >>> 6;
+`ifdef M4_SIM
+    if (rf5c_abs > rf5c_dbg_pk) rf5c_dbg_pk <= rf5c_abs;
+`endif
+    rf5c_l_g <= (rf5c_l * g_rf5c) >>> 6;
+    rf5c_r_g <= (rf5c_r * g_rf5c) >>> 6;
 `ifdef M4_HAS_HOME
     gbl_g <= (gbl_hp * g_gb) >>> 6;
     gbr_g <= (gbr_hp * g_gb) >>> 6;
@@ -2199,8 +2303,8 @@ module chipbox #(
 `endif
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + fds_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + fds_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
+  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + fds_g + rf5c_l_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
+  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + fds_g + rf5c_r_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
@@ -2441,6 +2545,9 @@ module chipbox #(
   localparam EXT_GB   = 4'h4; // прямая запись в APU Game Boy (VGM)
   localparam EXT_SNST = 4'h5; // аттенюации SN76489 по сторонам (стерео)
   localparam EXT_FDS  = 4'h6; // звуковой канал дисковой приставки Famicom
+  localparam EXT_RF5C = 4'h7; // регистры RF5C164 (Mega CD)
+  localparam EXT_RF5C_PTR = 4'h8; // указатель записи в ОЗУ RF5C164
+  localparam EXT_RF5C_RAM = 4'h9; // байт в ОЗУ RF5C164
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -2468,6 +2575,7 @@ module chipbox #(
   localparam S_OKIM = 5'd23;   // импульс wrn OKIM6295 (один такт)
   localparam S_K060_A = 5'd24; // строб K053260 ассерчен, ждём cen
   localparam S_K060_Z = 5'd25; // строб снят
+  localparam S_RF5CRAM = 5'd27; // байт в ОЗУ RF5C164: ждём канал записи
 
   // Отображение (порт VGM 0xD2, регистр aa) -> адрес MSX ABLO (0x9800+)
   function automatic [7:0] scc_ablo_map(input [2:0] port, input [7:0] r);
@@ -2510,6 +2618,7 @@ module chipbox #(
 `ifdef M4_HAS_HOME
     huc_wr <= 0;   // однотактовый строб: гасится там же, где взводится
     fds_wr <= 0;
+    rf5c_wr <= 0;
 `endif
     if (reset || soft_reset_req) begin
       rd_ptr <= 0;
@@ -2551,6 +2660,7 @@ module chipbox #(
       str_stop <= 0;
 `endif
       fsm_wr_req <= 0;
+      rf5c_wr_req <= 0;
       if (tick) tick_count <= tick_count + 1'b1;
 
       case (state)
@@ -2688,6 +2798,21 @@ module chipbox #(
                   fds_addr <= fifo_q[15:8];
                   fds_din  <= fifo_q[7:0];
                   fds_wr   <= 1;
+                end
+                EXT_RF5C: begin
+                  rf5c_addr <= fifo_q[11:8];
+                  rf5c_din  <= fifo_q[7:0];
+                  rf5c_wr   <= 1;
+                  rf5c_dbg_reg <= rf5c_dbg_reg + 1'b1;
+                end
+                EXT_RF5C_PTR: rf5c_ram_ptr <= fifo_q[15:0];
+                EXT_RF5C_RAM: begin
+                  // Байт кладём в ОЗУ через тот же канал записи, что и
+                  // страницы DPCM, и ЖДЁМ его освобождения отдельным
+                  // состоянием. Без ожидания при заливке тысяч байт подряд
+                  // канал почти всегда занят, и байты молча терялись.
+                  rf5c_ram_data <= fifo_q[7:0];
+                  state <= S_RF5CRAM;
                 end
                 EXT_SCC: begin
                   // порт 7 = разблокировка BR2 (ABHI=0x12, DB=0x3F)
@@ -2853,6 +2978,14 @@ module chipbox #(
           if (scc_wait >= 4'd2) state <= S_IDLE;
         end
 `endif
+
+        // Байт в ОЗУ сэмплов RF5C164: ждём свободного канала записи
+        S_RF5CRAM: begin
+          if (!fsm_wr_pending && !fsm_wr_req && !rf5c_wr_req) begin
+            rf5c_wr_req <= 1;
+            state <= S_IDLE;
+          end
+        end
 
         // Байт DPCM в окно NES-RAM: ждём свободного канала записи
         S_NESRAM: begin

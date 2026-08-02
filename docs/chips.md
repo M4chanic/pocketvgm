@@ -26,6 +26,11 @@ game plays but is incomplete — those cases are called out.
 | Game Boy DMG APU | ~4 | Game Boy (GBS) | VerilogBoy |
 | SCC / K051649 | ~6 | MSX (Konami) | IKASCC |
 | YMF262 (OPL3) | ~1 | PC AdLib, General MIDI synth | opl3_fpga |
+| YM2203 (OPN) | ~5 | PC-88/98, MSX | jt12 + jt49 |
+| YM2608 (OPNA) | ~11 | NEC PC-8801/98 | jt12 + jt49 |
+| HuC6280 PSG | ~7 | PC Engine / TG-16 | custom |
+| Famicom Disk System | ~2 | FDS | custom |
+| RF5C164 / RF5C68 | ~2 | Sega Mega CD / CD 32X | custom |
 
 ### Arcade
 
@@ -44,16 +49,8 @@ music already plays through the arcade FM/ADPCM path.
 
 ### Home (current focus)
 
-1. **OPL2/OPL3 VGM routing (YM3812 / YM3526 / YMF262)** — ~13 packs. The OPL3
-   silicon is already on the FPGA (used for MIDI); this is firmware-only VGM
-   command routing. Unlocks PC AdLib: Doom, Monkey Island 2, Dune, Ys II.
-2. **YM2413 (OPLL)** + **VRC7** — ~5 packs. MSX and NES; OPL with a fixed
+1. **YM2413 (OPLL)** + **VRC7** — ~5 packs. MSX and NES; OPL with a fixed
    instrument ROM, cheap once OPL routing exists.
-3. **YM2608 (OPNA)** — ~11 packs. NEC PC-8801/98: The Scheme, YU-NO,
-   Grounseed, Snatcher. OPN2 + SSG + ADPCM + rhythm; reuses jt12/jt49 blocks.
-4. **YM2203 (OPN)** — ~5 packs. PC-88/98, MSX arcade: Sorcerian, EVE, Xenon.
-5. **HuC6280** — ~7 packs. PC Engine / TG-16: Devil Crash, Soldier Blade,
-   Aldynes, Bomberman '94. Wavetable, CPU-integrated.
 
 ### Arcade (deferred — progress preserved)
 
@@ -64,7 +61,12 @@ music already plays through the arcade FM/ADPCM path.
 - **C140 / C219** (Namco: Dragon Saber #1, Rolling Thunder 2) and **K054539**
   (Konami: X-Men, Xexex) — no open RTL exists; would need a custom core from
   the MAME model.
-- QSound, YM2610 (Neo Geo), C352 (Namco), RF5C68/164, YMF278B — larger/harder.
+- QSound, YM2610 (Neo Geo), C352 (Namco), YMF278B — larger/harder.
+
+The RF5C164 keeps its 64 KB of sample RAM in PSRAM, not in block RAM: 64 KB
+would take 64 M10K blocks and only fourteen are free. The module drives an
+address and waits for a byte; the chipbox arbiter serves it, as with OKIM6295
+and K053260.
 
 ## FPGA area
 

@@ -1526,6 +1526,14 @@ int main(int argc, char** argv) {
     bool sn_t6w28 = (rd32(d, 0x0C) & 0x80000000) != 0;
     bool sn_stereo = sn_t6w28;
     uint8_t gg_mask = 0xFF;
+    uint32_t rf5c_ptr = 0xFFFF;
+    std::vector<uint8_t> rf5c_bank;   // блоки типа 0x01/0x02, источник для 0x68
+    // Окно записи в ОЗУ — 4 КБ, страницу задаёт регистр 0x07 при сброшенном
+    // бите 6. Оно накладывается на ВСЕ пути записи: и на команды 0xC1/0xC2,
+    // и на блоки 0xC0/0xC1, и на заливку 0x68 (libvgm, DoRAMOfsPatches).
+    // Без этого рип Sonic CD лил все сэмплы в первые 4 КБ поверх друг друга.
+    uint32_t rf5c_wbank = 0;
+    size_t rf5c_regs = 0, rf5c_ram = 0;
     size_t pos = data_off;
     // OPL-семейство: YM3812 (0x50), YM3526 (0x54), YMF262 (0x5C).
     // OPL2-файлы задают 3.58 МГц — ядро тактуется x4 (как в фирмвари).
@@ -1542,9 +1550,12 @@ int main(int argc, char** argv) {
     uint32_t ym2608_clk = hdr_end >= 0x4C ? rd32(d, 0x48) & 0x3FFFFFFF : 0;
     uint32_t ym2203_clk = hdr_end >= 0x48 ? rd32(d, 0x44) & 0x3FFFFFFF : 0;
     uint32_t opn_clk = ym2608_clk ? ym2608_clk : ym2203_clk;
+    uint32_t rf5c_clk = rd32(d, 0x6C) & 0x3FFFFFFF;
+    if (!rf5c_clk) rf5c_clk = rd32(d, 0x40) & 0x3FFFFFFF;   // родич RF5C68
 
     if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk
-        && !scc_clk && !k060_clk && !huc_clk && !opn_clk && !gb_clk_hdr) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
+        && !scc_clk && !k060_clk && !huc_clk && !opn_clk && !gb_clk_hdr
+        && !rf5c_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
 
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
@@ -1711,6 +1722,25 @@ int main(int argc, char** argv) {
             pos += 2;
         }
         // HuC6280: 0xB9 рег знач -> OP_EXT|EXT_HUC
+        else if (cmd == 0xB1) {
+            // RF5C164: регистры чипа
+            if (d[pos] & 0x80) drop2++;
+            else {
+                if ((d[pos] & 0x7F) == 0x07 && !(d[pos+1] & 0x40)) rf5c_wbank = d[pos+1] & 0x0F;
+                cmds.push_back(0xF7000000u | (d[pos] & 0xF) << 8 | d[pos+1]); rf5c_regs++;
+            }
+            pos += 2;
+        }
+        else if (cmd == 0xC1 || cmd == 0xC2) {
+            // Байт в ОЗУ сэмплов RF5C164. Указатель шлём только на разрыве:
+            // рипы пишут подряд, и пара на каждый байт удвоила бы очередь.
+            uint32_t off = d[pos] | d[pos+1] << 8;
+            off = (off & 0x0FFF) | rf5c_wbank << 12;
+            if (off != rf5c_ptr) cmds.push_back(0xF8000000u | off);
+            cmds.push_back(0xF9000000u | d[pos+2]); rf5c_ram++;
+            rf5c_ptr = (uint16_t)(off + 1);
+            pos += 3;
+        }
         else if (cmd == 0xB9) {
             if (d[pos] & 0x80) drop2++;
             else cmds.push_back(0xF3000000u | (d[pos] & 0xF) << 8 | d[pos+1]);
@@ -1789,6 +1819,18 @@ int main(int argc, char** argv) {
                 b.start = (kind == 0x8E ? 0x200000u : 0x100000u) + rd32(d, body + 4);
                 b.bytes.assign(d.begin() + body + 8, d.begin() + body + len);
                 rom_blocks.push_back(std::move(b));
+            } else if (kind == 0x01 || kind == 0x02) {
+                // Банк сэмплов RF5C: сам по себе он ничего не играет,
+                // из него копирует команда 0x68
+                rf5c_bank.insert(rf5c_bank.end(), d.begin() + body, d.begin() + body + len);
+            } else if ((kind == 0xC0 || kind == 0xC1) && len >= 2) {
+                // Дамп ОЗУ RF5C164: смещение 16 бит, дальше тело
+                uint32_t a = (d[body] | d[body+1] << 8) | rf5c_wbank << 12;
+                cmds.push_back(0xF8000000u | (a & 0xFFFF));
+                for (uint32_t i = 2; i < len; i++) {
+                    cmds.push_back(0xF9000000u | d[body + i]); rf5c_ram++;
+                }
+                rf5c_ptr = (uint16_t)(a + len - 2);
             } else if (kind == 0xC2 && len >= 2) {
                 // DPCM-страница NES: [u16 адрес][данные] — синхронно с потоком
                 uint32_t a = (d[body] | d[body+1] << 8) & 0x7FFF;
@@ -1823,7 +1865,27 @@ int main(int argc, char** argv) {
             pos += 4;
         }
         else if (cmd >= 0x51 && cmd <= 0x5F) pos += 2;
-        else if (cmd == 0x68) pos += 11;
+        else if (cmd == 0x68) {
+            // PCM RAM write: 0x66, тип, источник 24 бита, приёмник 24, длина 24.
+            // Рипы Mega CD грузят сэмплы ТОЛЬКО так — раньше команда молча
+            // пропускалась, и в ОЗУ чипа не приезжало ни байта.
+            uint8_t kind = d[pos + 1];
+            uint32_t src = d[pos+2] | d[pos+3] << 8 | d[pos+4] << 16;
+            uint32_t dst = d[pos+5] | d[pos+6] << 8 | d[pos+7] << 16;
+            uint32_t len = d[pos+8] | d[pos+9] << 8 | d[pos+10] << 16;
+            if (!len) len = 0x1000000;
+            // Эталон вылезающую за банк заливку не обрезает, а игнорирует целиком
+            if ((kind == 0x01 || kind == 0x02) && src < rf5c_bank.size()
+                && len <= rf5c_bank.size() - src) {
+                dst |= rf5c_wbank << 12;
+                cmds.push_back(0xF8000000u | (dst & 0xFFFF));
+                for (uint32_t i = 0; i < len; i++) {
+                    cmds.push_back(0xF9000000u | rf5c_bank[src + i]); rf5c_ram++;
+                }
+                rf5c_ptr = (uint16_t)(dst + len);
+            }
+            pos += 11;
+        }
         else if (cmd >= 0x90 && cmd <= 0x95) { static const int L[] = {4,4,5,10,1,4}; pos += L[cmd-0x90]; }
         // 0xA1-0xAF — зеркало 0x51-0x5F для ВТОРОГО экземпляра FM-чипа
         // (0xA2/0xA3 — второй YM2612 и т.д.). Регистровое поле у них
@@ -1848,6 +1910,8 @@ int main(int argc, char** argv) {
     if (stream_warn) fprintf(stderr, "ВНИМАНИЕ: %zu необработанных DAC-стрим команд\n", stream_warn);
     if (drop2) fprintf(stderr, "ВНИМАНИЕ: %zu записей ко ВТОРОМУ экземпляру чипа отброшено "
                                "(второго экземпляра в железе нет)\n", drop2);
+    if (rf5c_regs || rf5c_ram)
+        fprintf(stderr, "RF5C164: записей в регистры %zu, байт в ОЗУ %zu\n", rf5c_regs, rf5c_ram);
     if (drop_gg) fprintf(stderr, "ВНИМАНИЕ: %zu масок стерео Game Gear отброшено "
                                  "(стерео PSG не воспроизводится)\n", drop_gg);
 
@@ -1883,6 +1947,13 @@ int main(int argc, char** argv) {
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
     tb.wb(0x2C, true, fm_clk ? 0u : 3u);
     tb.wb(0x2D, true, nes_clk ? nes_flt_opt : 3u);
+    // RF5C164 (Mega CD) и родич RF5C68: отсчёт раз в 384 такта тактовой
+    if (rf5c_clk)
+        tb.wb(0x33, true, (uint32_t)((double)(rf5c_clk / 384) / CLK_HZ * 4294967296.0 + 0.5));
+    // Гейн 255, а не 64: модуль делит сумму восьми каналов на четыре, чтобы
+    // при всех громких каналах не упереться в потолок 16 бит. Эталон такого
+    // деления не делает, и без компенсации мы играли ровно на 12 дБ тише.
+    tb.wb(0x32, true, rf5c_clk ? 255u : 0u);
     // Гейн дисковой приставки: старший бит поля NES APU. Значение
     // откалибровано по отношению к APU против эталона, см. фирмварь.
     tb.wb(0x31, true, (rd32(d, 0x84) & 0x80000000u) ? 46u : 0u);
@@ -1991,6 +2062,12 @@ int main(int argc, char** argv) {
     // Счётчик выборок DMC: отличает «канал молчит, потому что нечего
     // играть» от «канал просит данные, а они не приходят»
     if (nes_clk) fprintf(stderr, "DMC: выборок из памяти %u\n", tb.wb(0x19, false) >> 16);
+    if (rf5c_clk) {
+        uint32_t v = tb.wb(0x22, false), r = tb.wb(0x23, false);
+        fprintf(stderr, "RF5C164 в чипе: регистров %u, байт в ОЗУ %u, чтений памяти %u\n",
+                r & 0xFFFF, v & 0xFFFF, v >> 16);
+        fprintf(stderr, "RF5C164 пик выхода чипа: %u (гейн %u)\n", r >> 16, 255u);
+    }
     fprintf(stderr, "готово: %zu сэмплов @ %u Гц → %s\n", tb.pcm.size() / 2, rate, out);
     return 0;
 }

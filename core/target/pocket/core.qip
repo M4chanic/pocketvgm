@@ -49,6 +49,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE    [file join $::quartus(qip_path
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/msm6258.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/vrc6.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/fds.sv"]
+set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/rf5c164.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/vendor/nes/apu.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/savestate_stub.sv"]
 set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/verilog-6502/cpu.v"]
