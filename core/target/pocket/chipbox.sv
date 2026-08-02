@@ -192,6 +192,14 @@ module chipbox #(
   // Вне M4_HAS_HOME вместе со своим стробом: модуль rf5c164 живёт в обоих
   // вариантах, значит и делитель его отсчётов должен быть в обоих.
   reg [31:0] rf5c_phase_inc = DEFAULT_RF5C_PHASE_INC;
+
+  // Сведение в моно из меню ядра. Наушники у Pocket стерео, но часть
+  // рипов сделана с жёсткой панорамой (у Mega Drive это норма: FM-канал
+  // целиком уводится в одну сторону), и в наушниках такое слушать тяжело.
+  //
+  // Тоже вне гейта: сведение применяется в ОБОИХ вариантах, и в аркадном
+  // ветвь `else` ссылается на этот же регистр.
+  reg mono_en = 0;
 `ifdef M4_HAS_HOME
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
   reg [7:0] scc_gain = 8'd64;
@@ -765,6 +773,9 @@ module chipbox #(
           5'h15: {sn_gain, fm_gain} <= data_write[15:0];
           5'h16: fm_phase_inc <= data_write;
           5'h17: sn_phase_inc <= data_write;
+          // Сведение в моно — вне гейта: пункт «Output» есть в меню обоих
+          // ядер, значит и регистр должен приниматься обоими
+          6'h30: mono_en <= data_write[0];
 `ifdef M4_HAS_HOME
           6'h21: scc_phase_inc <= data_write;
           6'h22: scc_gain <= data_write[7:0];
@@ -777,7 +788,6 @@ module chipbox #(
           6'h2D: nes_flt_mode <= data_write[1:0];
           6'h2E: {sn_sr15, sn_fb_mask} <= data_write[16:0];
           6'h2F: sn_stereo_en <= data_write[0];
-          6'h30: mono_en <= data_write[0];
           6'h31: fds_gain <= data_write[7:0];
           6'h32: rf5c_gain <= data_write[7:0];
           6'h33: rf5c_phase_inc <= data_write;
@@ -2368,11 +2378,6 @@ module chipbox #(
   //
   // Режим ставит фирмварь: он нужен файлам Mega Drive, но не OPN-рипам
   // с PC-98, которые ходят через тот же jt12. 3 = фильтр выключен.
-  // Сведение в моно из меню ядра. Наушники у Pocket стерео, но часть
-  // рипов сделана с жёсткой панорамой (у Mega Drive это норма: FM-канал
-  // целиком уводится в одну сторону), и в наушниках такое слушать тяжело.
-  reg mono_en = 0;
-
   reg [1:0] md_lpf_mode = 2'd3;
   reg signed [17:0] lpf_a2, lpf_b1, lpf_b2;
   always @(*) begin

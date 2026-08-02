@@ -75,27 +75,51 @@ DECL_NAME = re.compile(r"\b([A-Za-z_]\w*)\s*(?:=[^,;]*)?(?=\s*[,;]|\s*$)")
 WORD = re.compile(r"\b([A-Za-z_]\w*)\b")
 
 
+def _sat(frame, assign):
+    """Компилируется ли участок с таким стеком при данном наборе гейтов."""
+    for lit in frame:
+        want = not lit.startswith("!")
+        name = lit if want else lit[1:]
+        if assign.get(name, False) != want:
+            return False
+    return True
+
+
 def check_gated(path: Path) -> list[str]:
-    """Сигналы, объявленные под `ifdef, но используемые снаружи.
+    """Сигналы, объявленные под `ifdef, но используемые там, где их нет.
 
     Аркадный вариант собирается без M4_HAS_HOME. Если объявление сидит под
     этим гейтом, а ссылка на него — нет, Quartus падает: в проекте задан
     default_nettype none, и неявный провод заводить нельзя. Verilator это
     НЕ ловит — директива живёт в настройках Quartus, а не в исходнике, и
     он молча создаёт провод. Так упала сборка на cen_rf5c.
+
+    Проверка честная, а не по внутреннему гейту: гейтов в файле единицы,
+    поэтому перебираются ВСЕ их сочетания. Ссылка считается опасной, если
+    существует набор, при котором она компилируется, а ни одно объявление
+    нет. Это разом покрывает и вложенные `ifdef, и объявления, сделанные
+    в обеих ветках `ifdef/`else.
+
+    Первая версия смотрела только на использование ВНЕ гейтов и потому
+    пропустила mono_en: он был объявлен под M4_HAS_HOME, а ветка `else
+    того же ifdef на него ссылалась. Аркадная сборка 0.2.9 упала на этом.
     """
     stack: list[str] = []
-    declared: dict[str, set] = {}   # имя -> множество гейтов объявления
-    used_open: set[str] = set()     # имена, встреченные ВНЕ гейтов
+    declared: dict[str, list] = {}
+    used: dict[str, list] = {}
+    names: set[str] = set()
     for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
         t = line.strip()
         if t.startswith("`ifdef") or t.startswith("`ifndef"):
             parts = t.split()
-            stack.append(parts[1] if len(parts) > 1 else "?")
+            g = parts[1] if len(parts) > 1 else "?"
+            stack.append(g if t.startswith("`ifdef") else "!" + g)
+            names.add(g)
             continue
         if t.startswith("`else"):
             if stack:
-                stack[-1] = "!" + stack[-1]
+                cur = stack[-1]
+                stack[-1] = cur[1:] if cur.startswith("!") else "!" + cur
             continue
         if t.startswith("`endif"):
             if stack:
@@ -104,27 +128,46 @@ def check_gated(path: Path) -> list[str]:
         if t.startswith("//"):
             continue
         code = re.sub(r"//.*", "", line)
+        frame = frozenset(stack)
         m = DECL.match(code)
         if m:
             # отбрасываем разрядность и тип, остаются только имена
             tail = re.sub(r"\[[^\]]*\]", "", m.group(1))
             tail = re.sub(r"\b(?:signed|unsigned)\b", "", tail)
             for nm in DECL_NAME.findall(tail):
-                declared.setdefault(nm, set()).add(stack[-1] if stack else "")
-        if not stack:
-            # Имя порта в подключении (.cen(sig)) — не ссылка на сигнал
-            used_open.update(WORD.findall(re.sub(r"\.\s*\w+\s*\(", "(", code)))
+                declared.setdefault(nm, set()).add(frame)
+        # Имя порта в подключении (.cen(sig)) — не ссылка на сигнал
+        for nm in WORD.findall(re.sub(r"\.\s*\w+\s*\(", "(", code)):
+            used.setdefault(nm, set()).add(frame)
+
+    # Настоящих вариантов сборки три, а не 2^n: наверху chipbox.sv стоит
+    # `ifdef M4_SIM -> define HOME и ARCADE, `elsif M4_ARCADE -> ARCADE,
+    # иначе HOME. Перебирать сочетания вслепую значило бы ругаться на
+    # заведомо невозможное «M4_SIM без M4_HAS_HOME».
+    combos = [
+        {"M4_SIM": True, "M4_HAS_HOME": True, "M4_HAS_ARCADE": True},
+        {"M4_ARCADE": True, "M4_HAS_ARCADE": True},
+        {"M4_HAS_HOME": True},
+    ]
+    gates = sorted(names)
 
     out = []
-    for name, gates in sorted(declared.items()):
-        if name not in used_open:
+    for name, decls in sorted(declared.items()):
+        bad = None
+        for u in used.get(name, ()):  # noqa: B007
+            for a in combos:
+                if _sat(u, a) and not any(_sat(d, a) for d in decls):
+                    bad = (u, a)
+                    break
+            if bad:
+                break
+        if not bad:
             continue
-        # объявлено где-то без гейта, либо и под G, и под !G — тогда есть всегда
-        if "" in gates or any(g.startswith("!") and g[1:] in gates for g in gates):
-            continue
-        gate = sorted(gates)[0]
-        out.append(f"{path}: '{name}' объявлен только под `ifdef {gate}, "
-                   f"а используется вне гейта")
+        u, a = bad
+        on = ", ".join(g for g in gates if a.get(g, False)) or "ничего"
+        where = "вне гейтов" if not u else "под " + ", ".join(sorted(u))
+        out.append(f"{path}: '{name}' используется {where}, "
+                   f"но при наборе [{on}] не объявлен")
     return out
 
 
