@@ -159,6 +159,8 @@ static bool out_stage = true;
 // По умолчанию выключен — ровно как в меню ядра, чтобы стенд играл то же,
 // что железо. Для замеров включается ключом --nes-filter.
 static uint32_t nes_flt_opt = 3;
+// Сведение в моно, как пункт «Output» в меню ядра. Ключ --mono.
+static uint32_t mono_opt = 0;
 
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
     size_t n_in = pcm.size() / 2;
@@ -1470,6 +1472,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--nsf-selftest")) selftest = true;
         else if (!strcmp(argv[i], "--no-out-stage")) { out_stage = false; }
         else if (!strcmp(argv[i], "--nes-filter") && i + 1 < argc) { nes_flt_opt = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--mono")) { mono_opt = 1; }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--vu-selftest")) { return vu_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
@@ -1947,6 +1950,7 @@ int main(int argc, char** argv) {
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
     tb.wb(0x2C, true, fm_clk ? 0u : 3u);
     tb.wb(0x2D, true, nes_clk ? nes_flt_opt : 3u);
+    tb.wb(0x30, true, mono_opt);
     // RF5C164 (Mega CD) и родич RF5C68: отсчёт раз в 384 такта тактовой
     if (rf5c_clk)
         tb.wb(0x33, true, (uint32_t)((double)(rf5c_clk / 384) / CLK_HZ * 4294967296.0 + 0.5));

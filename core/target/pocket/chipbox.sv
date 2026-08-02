@@ -777,6 +777,7 @@ module chipbox #(
           6'h2D: nes_flt_mode <= data_write[1:0];
           6'h2E: {sn_sr15, sn_fb_mask} <= data_write[16:0];
           6'h2F: sn_stereo_en <= data_write[0];
+          6'h30: mono_en <= data_write[0];
           6'h31: fds_gain <= data_write[7:0];
           6'h32: rf5c_gain <= data_write[7:0];
           6'h33: rf5c_phase_inc <= data_write;
@@ -2367,6 +2368,11 @@ module chipbox #(
   //
   // Режим ставит фирмварь: он нужен файлам Mega Drive, но не OPN-рипам
   // с PC-98, которые ходят через тот же jt12. 3 = фильтр выключен.
+  // Сведение в моно из меню ядра. Наушники у Pocket стерео, но часть
+  // рипов сделана с жёсткой панорамой (у Mega Drive это норма: FM-канал
+  // целиком уводится в одну сторону), и в наушниках такое слушать тяжело.
+  reg mono_en = 0;
+
   reg [1:0] md_lpf_mode = 2'd3;
   reg signed [17:0] lpf_a2, lpf_b1, lpf_b2;
   always @(*) begin
@@ -2432,7 +2438,24 @@ module chipbox #(
   endfunction
 `endif
 
+  // Полусумма каналов. Складываем в СЕМНАДЦАТИ разрядах: два числа по
+  // 16 бит со знаком дают 17, и без расширения громкая противофаза
+  // переполнилась бы ровно там, где моно и нужно.
+  function automatic signed [15:0] mono_of(input signed [15:0] a,
+                                           input signed [15:0] b);
+    reg signed [16:0] sum;
+    begin
+      sum = {a[15], a} + {b[15], b};
+      mono_of = sum[16:1];
+    end
+  endfunction
+
 `ifdef M4_HAS_HOME
+  // Готовый отсчёт до сведения в моно: фильтр NES выключен — берём выход
+  // тракта Mega Drive, иначе выход тракта NES.
+  wire signed [15:0] out_pre_l = nes_flt_mode == 2'd3 ? md_out_l : sat16_nf(nf_lp_l);
+  wire signed [15:0] out_pre_r = nes_flt_mode == 2'd3 ? md_out_r : sat16_nf(nf_lp_r);
+
   // Выход тракта Mega Drive — он же вход тракта NES
   wire signed [15:0] md_out_l = md_lpf_mode == 2'd3 ? sat16(avg_l) : lpf_y_l;
   wire signed [15:0] md_out_r = md_lpf_mode == 2'd3 ? sat16(avg_r) : lpf_y_r;
@@ -2507,11 +2530,11 @@ module chipbox #(
         nf_h2x_r <= nf_s1_r;
         nf_h2y_r <= nf_s2_r;
         nf_lp_r <= nf_lp_r + nf_lp14k(nf_pick_r - nf_lp_r);
-        chip_left <= nes_flt_mode == 2'd3 ? md_out_l : sat16_nf(nf_lp_l);
-        chip_right <= nes_flt_mode == 2'd3 ? md_out_r : sat16_nf(nf_lp_r);
+        chip_left  <= mono_en ? mono_of(out_pre_l, out_pre_r) : out_pre_l;
+        chip_right <= mono_en ? mono_of(out_pre_l, out_pre_r) : out_pre_r;
 `else
-        chip_left <= sat16(avg_l);
-        chip_right <= sat16(avg_r);
+        chip_left  <= mono_en ? mono_of(sat16(avg_l), sat16(avg_r)) : sat16(avg_l);
+        chip_right <= mono_en ? mono_of(sat16(avg_l), sat16(avg_r)) : sat16(avg_r);
 `endif
         chip_sample_toggle <= ~chip_sample_toggle;
       end

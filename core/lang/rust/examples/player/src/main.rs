@@ -335,6 +335,7 @@ fn vu_tick(last: &mut u32) {
         ui::vu(v as u16, (v >> 16) as u16);
         md_filter_tick();
         nes_filter_tick();
+        mono_tick();
     }
 }
 
@@ -443,6 +444,32 @@ fn bump(c: &core::sync::atomic::AtomicU32) {
 fn dev_mode() -> bool {
     let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
     p.APF_INTERACT.interact2.read().bits() & 1 != 0
+}
+
+/// Сведение в моно из меню ядра (переменная по адресу 0x1000_010C):
+/// 0 стерео, 1 моно.
+///
+/// Нужно потому, что часть рипов сделана с жёсткой панорамой — у Mega
+/// Drive это норма, FM-канал целиком уводится в одну сторону, — и в
+/// наушниках такое слушать тяжело.
+fn mono_mode() -> u32 {
+    let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
+    p.APF_INTERACT.interact3.read().bits() & 1
+}
+
+/// Перечитывается на ходу, как режимы фильтров: сравнить стерео и моно на
+/// слух иначе можно было бы только переключая трек. Значение по сбросу
+/// заведомо неверное, чтобы первый же тик записал регистр.
+static MONO_CUR: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(u32::MAX);
+
+fn mono_tick() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let m = mono_mode();
+    if m != MONO_CUR.load(Relaxed) {
+        MONO_CUR.store(m, Relaxed);
+        chipbox_write(0x30, m);
+    }
 }
 
 /// Режим выходного фильтра Mega Drive из меню ядра (interact.json,

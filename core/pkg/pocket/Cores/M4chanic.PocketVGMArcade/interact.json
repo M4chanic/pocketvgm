@@ -1,7 +1,28 @@
 {
   "interact": {
     "magic": "APF_VER_1",
-    "variables": [],
+    "variables": [
+      {
+        "name": "Output",
+        "id": 1,
+        "type": "list",
+        "enabled": true,
+        "persist": true,
+        "writeonly": true,
+        "address": "0x1000010C",
+        "defaultval": 0,
+        "options": [
+          {
+            "value": 0,
+            "name": "Stereo"
+          },
+          {
+            "value": 1,
+            "name": "Mono"
+          }
+        ]
+      }
+    ],
     "messages": []
   }
 }
