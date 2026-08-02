@@ -19,10 +19,18 @@ GPL-2) не делает ничего, кроме записей в регист
 frame/(framelen/15) и на последних кадрах переполняется в младшие четыре
 бита. Это не ошибка, так делает железо, и эталонная запись такая же.
 
+Поддержаны два семейства:
+    gen — Mega Drive, профиль mdfblocksGEN.mfn, 3531 кадр (59 с)
+    pce — PC Engine / TG-16, профиль mdfblocksPCE.mfn, 971 кадр (16 с)
+
 Использование:
-    python3 scripts/mdfourier_vgm.py выход.vgm
+    python3 scripts/mdfourier_vgm.py выход.vgm [--system gen|pce]
     sim/chipbox_tb/chipbox_tb выход.vgm -o наш.wav -t 60
     mdfourier -P профили/mdfblocksGEN.mfn -r железо.flac -c наш.wav -C
+
+Свой синхроимпульс mdfourier у нас может не найти: выходной фильтр
+приставки душит его, и он оказывается ниже порога. Тогда границы задаются
+вручную ключом -m, а позиции печатает этот скрипт при сборке.
 """
 
 import struct
@@ -41,6 +49,29 @@ FRAME_SAMPLES = 736
 FRAMELEN = 20          # кадров на один тон, как вызывается в ROM
 PULSE_TRAIN_FREQ = 8820
 
+# --- PC Engine / TG-16 -------------------------------------------------
+# Кадр NTSC там 16.714522 мс (так записано и в профиле), это 737.11
+# отсчёта шкалы VGM. HuC6280 работает на той же тактовой, что и SN76489.
+HUC_CLOCK = 3579545
+PCE_FRAME_SAMPLES = 737
+PCE_PULSE_DIV = 13     # PULSE_TRAIN_FREQ у PCE это делитель, а не герцы
+
+# Волновые таблицы из tests_audio_aux.c. Канал 0 играет синус в один
+# период на таблицу, канал 1 — в четыре: так один и тот же ход по
+# делителю даёт две разные сетки частот.
+PCE_SINE1X = [
+    0x11, 0x14, 0x17, 0x1a, 0x1c, 0x1e, 0x1f, 0x1f,
+    0x1f, 0x1f, 0x1e, 0x1c, 0x1a, 0x17, 0x14, 0x11,
+    0x0e, 0x0b, 0x08, 0x05, 0x03, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x01, 0x03, 0x05, 0x08, 0x0b, 0x0e,
+]
+PCE_SINE4X = [
+    0x16, 0x1e, 0x1e, 0x16, 0x09, 0x01, 0x01, 0x09,
+    0x16, 0x1e, 0x1e, 0x16, 0x09, 0x01, 0x01, 0x09,
+    0x16, 0x1e, 0x1e, 0x16, 0x09, 0x01, 0x01, 0x09,
+    0x16, 0x1e, 0x1e, 0x16, 0x09, 0x01, 0x01, 0x09,
+]
+
 # Таблица высот из mdfourier.c. Это прямо 11-битный F-number YM2612,
 # а не герцы: старшие три бита уходят в регистр 0xA4, младшие восемь в 0xA0.
 PITCHES = [277, 293, 311, 329, 349, 369, 391, 415, 439, 465, 493, 522]
@@ -58,9 +89,11 @@ NF_CLOCK2, NF_CLOCK4, NF_CLOCK8, NF_TONE3 = 0, 1, 2, 3
 class Vgm:
     """Накопитель команд VGM со счётчиком отсчётов."""
 
-    def __init__(self):
+    def __init__(self, frame_samples=FRAME_SAMPLES):
         self.buf = bytearray()
         self.samples = 0
+        self.frame_samples = frame_samples
+        self.frames = 0
 
     # --- YM2612 -------------------------------------------------------
     def ym(self, part, reg, val):
@@ -70,9 +103,14 @@ class Vgm:
     def psg(self, data):
         self.buf += bytes((0x50, data & 0xFF))
 
+    # --- HuC6280 (PC Engine) -------------------------------------------
+    def huc(self, reg, val):
+        self.buf += bytes((0xB9, reg & 0xFF, val & 0xFF))
+
     def wait_frame(self):
-        self.buf += b"\x61" + struct.pack("<H", FRAME_SAMPLES)
-        self.samples += FRAME_SAMPLES
+        self.buf += b"\x61" + struct.pack("<H", self.frame_samples)
+        self.samples += self.frame_samples
+        self.frames += 1
 
     def end(self):
         self.buf += b"\x66"
@@ -280,12 +318,117 @@ def execute_noise(v, framelen):
     psg_stop(v)
 
 
+# ----------------------------------------------------------------------
+# PC Engine / TG-16. Регистры HuC6280 (tests_audio_aux.c): 0x00 выбор
+# канала, 0x01 общий баланс, 0x02/0x03 делитель, 0x04 управление,
+# 0x05 баланс канала, 0x06 волновая таблица, 0x07 шум.
+
+def huc_load_wave(v, chan, wave):
+    v.huc(0x00, chan)
+    v.huc(0x04, 0x00)
+    for b in wave:
+        v.huc(0x06, b)
+    v.huc(0x01, 0xFF)
+    v.huc(0x07, 0x00)
+
+
+def huc_play_center(v, chan):
+    v.huc(0x00, chan)
+    v.huc(0x05, 0xFF)
+    v.huc(0x04, 0x9F)          # канал включён, громкость 31
+
+
+def huc_stop_audio(v, chan):
+    v.huc(0x00, chan)
+    v.huc(0x05, 0x00)
+    v.huc(0x04, 0x00)
+
+
+def huc_stop_all(v):
+    for chan in range(6):
+        huc_stop_audio(v, chan)
+
+
+def huc_set_wave_freq(v, chan, div):
+    v.huc(0x00, chan)
+    v.huc(0x02, div & 0xFF)
+    v.huc(0x03, (div >> 8) & 0xFF)
+
+
+def huc_set_noise_freq(v, chan, freq):
+    v.huc(0x00, chan)
+    v.huc(0x07, 0x80 | ((freq & 0x1F) ^ 0x1F))
+
+
+def huc_stop_noise(v, chan):
+    v.huc(0x00, chan)
+    v.huc(0x07, 0x00)
+    v.huc(0x04, 0x00)
+
+
+def pce_pulse_train(v, chan=0):
+    huc_set_wave_freq(v, chan, PCE_PULSE_DIV)
+    for _ in range(10):
+        huc_play_center(v, chan)
+        v.wait_frame()
+        huc_stop_audio(v, chan)
+        v.wait_frame()
+
+
+def pce_silence(v):
+    for _ in range(20):
+        v.wait_frame()
+
+
+def pce_ramp(v, chan):
+    """Свип делителя 2044 -> 10 шагом 6: 340 кадров, 340 частот."""
+    huc_play_center(v, chan)
+    d = 2044
+    while d > 4:
+        huc_set_wave_freq(v, chan, d)
+        v.wait_frame()
+        d -= 6
+    huc_stop_audio(v, chan)
+
+
+def build_pce():
+    v = Vgm(PCE_FRAME_SAMPLES)
+    huc_load_wave(v, 0, PCE_SINE1X)
+    huc_load_wave(v, 1, PCE_SINE4X)
+    huc_stop_all(v)
+    v.wait_frame()
+
+    sync1 = v.frames
+    pce_pulse_train(v)
+    pce_silence(v)
+
+    pce_ramp(v, 0)             # синус в один период на таблицу
+    pce_ramp(v, 1)             # синус в четыре
+
+    huc_play_center(v, 4)
+    huc_set_noise_freq(v, 4, 0)
+    for _ in range(200):
+        v.wait_frame()
+    huc_stop_noise(v, 4)
+
+    pce_silence(v)
+    sync2 = v.frames
+    pce_pulse_train(v)
+
+    huc_stop_all(v)
+    for _ in range(10):
+        v.wait_frame()
+    v.end()
+    return v, sync1, sync2
+
+
 def build():
     v = Vgm()
     ym_init(v)
     psg_reset(v)
     v.wait_frame()
 
+    sync1 = v.frames
     execute_pulse_train(v)
     execute_silence(v)
 
@@ -295,6 +438,7 @@ def build():
     execute_noise(v, FRAMELEN)
 
     execute_silence(v)
+    sync2 = v.frames
     execute_pulse_train(v)
 
     # Хвост тишины: без него последний синхроимпульс упирается в конец
@@ -304,36 +448,54 @@ def build():
     for _ in range(10):
         v.wait_frame()
     v.end()
-    return v
+    return v, sync1, sync2
 
 
-def write_vgm(path, v):
+def write_vgm(path, v, system):
     data_off = 0x100
     hdr = bytearray(data_off)
     hdr[0x00:0x04] = b"Vgm "
     struct.pack_into("<I", hdr, 0x04, data_off + len(v.buf) - 4)   # EOF от 0x04
     struct.pack_into("<I", hdr, 0x08, 0x00000161)                  # версия 1.61
-    struct.pack_into("<I", hdr, 0x0C, PSG_CLOCK)
+    if system == "pce":
+        struct.pack_into("<I", hdr, 0xA4, HUC_CLOCK)
+    else:
+        struct.pack_into("<I", hdr, 0x0C, PSG_CLOCK)
+        struct.pack_into("<H", hdr, 0x28, 0x0009)      # обратная связь шума
+        hdr[0x2A] = 16                                 # разрядность сдвига
+        hdr[0x2B] = 0
+        struct.pack_into("<I", hdr, 0x2C, YM_CLOCK)
     struct.pack_into("<I", hdr, 0x18, v.samples)
     struct.pack_into("<I", hdr, 0x24, 60)                          # частота кадров
-    struct.pack_into("<H", hdr, 0x28, 0x0009)                      # обратная связь шума
-    hdr[0x2A] = 16                                                 # разрядность регистра сдвига
-    hdr[0x2B] = 0
-    struct.pack_into("<I", hdr, 0x2C, YM_CLOCK)
     struct.pack_into("<I", hdr, 0x34, data_off - 0x34)
     with open(path, "wb") as f:
         f.write(bytes(hdr) + bytes(v.buf))
 
 
 def main():
-    if len(sys.argv) != 2:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    system = "gen"
+    for a in sys.argv[1:]:
+        if a.startswith("--system="):
+            system = a.split("=", 1)[1]
+    if "--system" in sys.argv:
+        system = sys.argv[sys.argv.index("--system") + 1]
+        args = [a for a in args if a != system]
+    if len(args) != 1 or system not in ("gen", "pce"):
         print(__doc__)
         return 1
-    v = build()
-    write_vgm(sys.argv[1], v)
-    frames = v.samples // FRAME_SAMPLES
-    print("записан %s: %d кадров, %.1f с, %d байт команд"
-          % (sys.argv[1], frames, v.samples / 44100.0, len(v.buf)))
+    path = args[0]
+
+    v, sync1, sync2 = build_pce() if system == "pce" else build()
+    write_vgm(path, v, system)
+    print("записан %s (%s): %d кадров, %.1f с, %d байт команд"
+          % (path, system, v.frames, v.samples / 44100.0, len(v.buf)))
+    # Позиции импульсов для ручной синхронизации mdfourier: свой сигнал он
+    # часто не находит, потому что выходной фильтр приставки его душит.
+    for rate in (48000,):
+        a = round(sync1 * v.frame_samples / 44100.0 * rate)
+        b = round(sync2 * v.frame_samples / 44100.0 * rate)
+        print("  границы для рендера %d Гц:  -m c:%d:%d" % (rate, a, b))
     return 0
 
 
