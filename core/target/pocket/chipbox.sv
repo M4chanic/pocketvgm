@@ -337,10 +337,24 @@ module chipbox #(
   reg rf5c_pending = 0;
   reg rf5c_wait = 0;
   reg rf5c_lane = 0;
-  // Указатель записи в ОЗУ сэмплов и однотактовый запрос от секвенсора
+  // Указатель записи в ОЗУ сэмплов и однотактовый запрос от секвенсора.
+  //
+  // Владелец указателя ОДИН — автомат записи ниже. Секвенсор очереди не
+  // трогает его напрямую, а кладёт значение в rf5c_ptr_val и щёлкает
+  // rf5c_ptr_tog. Иначе получаются два драйвера на один регистр: Verilog
+  // это стерпит, Verilator промолчит (у него MULTIDRIVEN только при
+  // РАЗНОЙ тактовой, а здесь оба блока на posedge clk), а Quartus
+  // отвергнет с «Can't resolve multiple constant drivers» через сорок
+  // минут после пуша. Так и вышло.
   reg [15:0] rf5c_ram_ptr = 0;
+  reg [15:0] rf5c_ptr_val = 0;
+  reg rf5c_ptr_tog = 0;
+  reg rf5c_ptr_tog_d = 0;
   reg [7:0] rf5c_ram_data = 0;
   reg rf5c_wr_req = 0;
+  // Такт, в котором указатель перезагружается: запись байта в этот такт
+  // придержим, иначе она уйдёт по старому адресу.
+  wire rf5c_ptr_loading = rf5c_ptr_tog != rf5c_ptr_tog_d;
   // Диагностика: сколько записей в регистры приняли, сколько байт легло
   // в ОЗУ и сколько чтений обслужил арбитр. Читается по 6'h22.
   reg [15:0] rf5c_dbg_reg = 0, rf5c_dbg_ram = 0, rf5c_dbg_rd = 0;
@@ -389,6 +403,11 @@ module chipbox #(
 
   always @(posedge clk) begin
     ack <= 0;
+`ifdef M4_HAS_HOME
+    // Перезагрузка указателя RF5C164 — здесь и только здесь
+    rf5c_ptr_tog_d <= rf5c_ptr_tog;
+    if (rf5c_ptr_loading) rf5c_ram_ptr <= rf5c_ptr_val;
+`endif
     // Транзакция шины обслуживается РОВНО ОДИН РАЗ.
     //
     // Условие было «stb && cyc && !ack», но ack — импульс: он сам себя
@@ -529,7 +548,7 @@ module chipbox #(
       fsm_wr_byte_l <= fsm_wr_data;
     end
 `ifdef M4_HAS_HOME
-    else if (rf5c_wr_req && !fsm_wr_pending) begin
+    else if (rf5c_wr_req && !fsm_wr_pending && !rf5c_ptr_loading) begin
       // ОЗУ сэмплов RF5C164: рипы Mega CD пишут в него ПО ХОДУ трека,
       // поэтому запись идёт через очередь команд, а не заливкой.
       rf5c_dbg_ram <= rf5c_dbg_ram + 1'b1;
@@ -2805,7 +2824,10 @@ module chipbox #(
                   rf5c_wr   <= 1;
                   rf5c_dbg_reg <= rf5c_dbg_reg + 1'b1;
                 end
-                EXT_RF5C_PTR: rf5c_ram_ptr <= fifo_q[15:0];
+                EXT_RF5C_PTR: begin
+                  rf5c_ptr_val <= fifo_q[15:0];
+                  rf5c_ptr_tog <= ~rf5c_ptr_tog;
+                end
                 EXT_RF5C_RAM: begin
                   // Байт кладём в ОЗУ через тот же канал записи, что и
                   // страницы DPCM, и ЖДЁМ его освобождения отдельным
