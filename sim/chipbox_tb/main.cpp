@@ -2033,6 +2033,14 @@ int main(int argc, char** argv) {
         cmds.insert(cmds.begin(), pre.begin(), pre.end());
     }
 
+    // NES: то же и по той же причине. $4015 разрешает каналы и по
+    // включению нулевой; у части рипов запись осталась за кадром лога, и
+    // такие файлы молчали целиком. Эталон делает ровно это (libvgm,
+    // np_nes_apu.c: UNMUTE_ON_RESET пишет 0x0F и включена по умолчанию).
+    if (nes_clk) {
+        cmds.insert(cmds.begin(), 0x90000000u | 0x15u << 8 | 0x0Fu);
+    }
+
     // Загрузка сэмпл-ROM и ADPCM-банка через WB (как это будет делать фирмварь)
     for (auto& b : rom_blocks) {
         tb.wb(8, true, b.start);

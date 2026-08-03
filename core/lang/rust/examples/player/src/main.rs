@@ -2113,6 +2113,12 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         && header.clocks.ym2203 == 0
         && header.clocks.ym2608 == 0
         && header.clocks.gb_dmg == 0
+        // RF5C164/RF5C68 забыли внести, когда добавляли сам чип: условие
+        // правилось в стенде и не правилось здесь. Рипы Mega CD, где
+        // кроме него ничего нет (Sonic CD), отвергались до начала игры с
+        // сообщением «нет поддержанных чипов».
+        && header.clocks.rf5c164 == 0
+        && header.clocks.rf5c68 == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
@@ -2419,6 +2425,22 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         for (reg, val) in [(0x26u32, 0x80u32), (0x24, 0x77), (0x25, 0xF3)] {
             sink.push(OP_EXT | EXT_GB | reg << 8 | val);
         }
+    }
+
+    // NES: то же правило и по той же причине.
+    //
+    // $4015 разрешает каналы, и по включению он нулевой — каналы молчат.
+    // Драйвер игры пишет его при своей инициализации, но у части рипов
+    // запись осталась ЗА кадром лога: с устройства пришло «таймер идёт,
+    // музыки нет» по Castlevania, Excitebike, Battletoads, Zelda и
+    // Metroid. Проверка по корпусу: у обоих молчащих файлов записи $4015
+    // нет вовсе, у обоих играющих — есть (TMNT III пишет 0F, Arumana 0B).
+    //
+    // Эталон делает ровно это: в libvgm (np_nes_apu.c, np_nes_dmc.c) есть
+    // UNMUTE_ON_RESET, по сбросу пишущая $4015 = 0x0F, и она включена по
+    // умолчанию. Файл, который пишет регистр сам, просто перекроет наше.
+    if header.clocks.nes_apu != 0 {
+        sink.push(OP_APU | 0x15 << 8 | 0x0F);
     }
     let mut reader = Reader::new(data, header.data_offset);
     let mut loops: u32 = 0;
