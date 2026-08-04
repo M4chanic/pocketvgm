@@ -6,7 +6,7 @@ directories.
 | Module | Upstream | Commit | License / local patches |
 |---|---|---|---|
 | jt51 (YM2151) | https://github.com/jotego/jt51 | 4a47f666b67b52b9016f390bcfe3255da0128762 | GPL-3.0 |
-| jt49 (AY-3-8910/YM2149) | https://github.com/jotego/jt49 | 7f6abfd08a2af9a92dbd5b32c71ea773248a77e2 | GPL-3.0 |
+| jt49 (AY-3-8910/YM2149) | https://github.com/jotego/jt49 | 7f6abfd08a2af9a92dbd5b32c71ea773248a77e2 | GPL-3.0; таблицы громкости comp=0 и comp=1 заменены моделями чипов из libvgm (у jt49 там сжатие динамики, а не модель) |
 | openfpga-litex (base core) | https://github.com/agg23/openfpga-litex | c21570d85260856c10f7b11c9e4d233c0fe65748 | MIT; m4pocket patch: the FpuCore module inside the generated VexRiscv cluster is replaced by a stub (outputs tied off, cmd_ready high). It cost 2564 ALMs — 14% of the device — and the firmware is built for rv32imac, so no floating-point instruction ever reaches it. Verified: 0 F/D instructions in the player binary. |
 | apu.sv + regs_savestates.sv (NES APU) | https://github.com/MiSTer-devel/NES_MiSTer | 7f598210af8efb09237818d8a4d03e402daf9705 | GPL-3.0; 2 Verilator fixes (inlined constants, split dma_address) |
 | verilog-6502 (Arlet Ottens) | https://github.com/Arlet/verilog-6502 | e930327ffecc5062bfce70bbcfba2bbfa6de6e4c | permissive (keep copyright) |
