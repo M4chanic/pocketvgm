@@ -89,6 +89,10 @@
             "name": "Stereo"
           },
           {
+            "value": 2,
+            "name": "Narrow"
+          },
+          {
             "value": 1,
             "name": "Mono"
           }

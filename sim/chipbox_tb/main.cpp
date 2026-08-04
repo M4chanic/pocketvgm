@@ -159,7 +159,8 @@ static bool out_stage = true;
 // По умолчанию выключен — ровно как в меню ядра, чтобы стенд играл то же,
 // что железо. Для замеров включается ключом --nes-filter.
 static uint32_t nes_flt_opt = 3;
-// Сведение в моно, как пункт «Output» в меню ядра. Ключ --mono.
+// Режим вывода, как пункт «Output» в меню ядра (регистр 0x30):
+// 0 стерео, 1 моно (--mono), 2 суженная сцена (--narrow).
 static uint32_t mono_opt = 0;
 
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
@@ -1473,6 +1474,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--no-out-stage")) { out_stage = false; }
         else if (!strcmp(argv[i], "--nes-filter") && i + 1 < argc) { nes_flt_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--mono")) { mono_opt = 1; }
+        else if (!strcmp(argv[i], "--narrow")) { mono_opt = 2; }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--vu-selftest")) { return vu_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }

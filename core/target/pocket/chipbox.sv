@@ -193,13 +193,23 @@ module chipbox #(
   // вариантах, значит и делитель его отсчётов должен быть в обоих.
   reg [31:0] rf5c_phase_inc = DEFAULT_RF5C_PHASE_INC;
 
-  // Сведение в моно из меню ядра. Наушники у Pocket стерео, но часть
-  // рипов сделана с жёсткой панорамой (у Mega Drive это норма: FM-канал
-  // целиком уводится в одну сторону), и в наушниках такое слушать тяжело.
+  // Режим вывода из меню ядра: 0 стерео, 1 моно, 2 суженная сцена.
   //
-  // Тоже вне гейта: сведение применяется в ОБОИХ вариантах, и в аркадном
+  // Наушники у Pocket стерео, но часть рипов сделана с жёсткой панорамой
+  // (у Mega Drive это норма: FM-канал целиком уводится в одну сторону), и
+  // в наушниках такое слушать тяжело.
+  //
+  // Полусумма эту жёсткость снимает, но платит за неё балансом: голос,
+  // у которого включена одна сторона, после сведения оказывается ровно на
+  // 6 дБ тише центрированного. По рипам Konami это 2-5 каналов из шести,
+  // часть — все сто процентов времени, и на слух они действительно
+  // пропадают. Поднять их обратно нельзя: полная сумма требует до 6 дБ
+  // запаса, а у нас файлы и в стерео упираются в полную шкалу. Поэтому
+  // рядом с моно стоит режим сужения, где пик заведомо не растёт.
+  //
+  // Тоже вне гейта: режим применяется в ОБОИХ вариантах, и в аркадном
   // ветвь `else` ссылается на этот же регистр.
-  reg mono_en = 0;
+  reg [1:0] out_mode = 0;
 `ifdef M4_HAS_HOME
   reg [31:0] scc_phase_inc = DEFAULT_SCC_PHASE_INC;
   reg [7:0] scc_gain = 8'd64;
@@ -773,9 +783,9 @@ module chipbox #(
           5'h15: {sn_gain, fm_gain} <= data_write[15:0];
           5'h16: fm_phase_inc <= data_write;
           5'h17: sn_phase_inc <= data_write;
-          // Сведение в моно — вне гейта: пункт «Output» есть в меню обоих
+          // Режим вывода — вне гейта: пункт «Output» есть в меню обоих
           // ядер, значит и регистр должен приниматься обоими
-          6'h30: mono_en <= data_write[0];
+          6'h30: out_mode <= data_write[1:0];
 `ifdef M4_HAS_HOME
           6'h21: scc_phase_inc <= data_write;
           6'h22: scc_gain <= data_write[7:0];
@@ -2455,6 +2465,26 @@ module chipbox #(
     end
   endfunction
 
+  // Сужение сцены: три четверти своего канала и четверть чужого. Жёстко
+  // панорамированный голос теряет 2.5 дБ вместо шести и становится слышен
+  // обоими ушами, а пик заведомо не превышает исходного — значит запаса по
+  // уровню такой режим не требует, в отличие от полной суммы.
+  //
+  // Считаем в ВОСЕМНАДЦАТИ разрядах и не умножением внутри конкатенации:
+  // там самоопределённый контекст, ширина берётся по операнду и произведение
+  // молча обрезается (на этом уже терялся выход RF5C164). Присваивание в
+  // signed reg расширяет по знаку само, поэтому здесь просто три сложения.
+  function automatic signed [15:0] narrow_of(input signed [15:0] own,
+                                             input signed [15:0] other);
+    reg signed [17:0] a, b, sum;
+    begin
+      a = own;
+      b = other;
+      sum = a + a + a + b;   // край: 4 * -32768 = -131072, ровно 18 бит
+      narrow_of = sum[17:2];
+    end
+  endfunction
+
 `ifdef M4_HAS_HOME
   // Готовый отсчёт до сведения в моно: фильтр NES выключен — берём выход
   // тракта Mega Drive, иначе выход тракта NES.
@@ -2535,11 +2565,19 @@ module chipbox #(
         nf_h2x_r <= nf_s1_r;
         nf_h2y_r <= nf_s2_r;
         nf_lp_r <= nf_lp_r + nf_lp14k(nf_pick_r - nf_lp_r);
-        chip_left  <= mono_en ? mono_of(out_pre_l, out_pre_r) : out_pre_l;
-        chip_right <= mono_en ? mono_of(out_pre_l, out_pre_r) : out_pre_r;
+        chip_left  <= out_mode == 2'd1 ? mono_of(out_pre_l, out_pre_r)
+                    : out_mode == 2'd2 ? narrow_of(out_pre_l, out_pre_r)
+                    : out_pre_l;
+        chip_right <= out_mode == 2'd1 ? mono_of(out_pre_l, out_pre_r)
+                    : out_mode == 2'd2 ? narrow_of(out_pre_r, out_pre_l)
+                    : out_pre_r;
 `else
-        chip_left  <= mono_en ? mono_of(sat16(avg_l), sat16(avg_r)) : sat16(avg_l);
-        chip_right <= mono_en ? mono_of(sat16(avg_l), sat16(avg_r)) : sat16(avg_r);
+        chip_left  <= out_mode == 2'd1 ? mono_of(sat16(avg_l), sat16(avg_r))
+                    : out_mode == 2'd2 ? narrow_of(sat16(avg_l), sat16(avg_r))
+                    : sat16(avg_l);
+        chip_right <= out_mode == 2'd1 ? mono_of(sat16(avg_l), sat16(avg_r))
+                    : out_mode == 2'd2 ? narrow_of(sat16(avg_r), sat16(avg_l))
+                    : sat16(avg_r);
 `endif
         chip_sample_toggle <= ~chip_sample_toggle;
       end
