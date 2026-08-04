@@ -580,6 +580,33 @@ fn diag_ff(buf: &mut [u8; 16]) -> &str {
         buf[n + 2] = b'0' + (md_filter_mode() & 3) as u8;
         n += 3;
     }
+    // Время загрузки: L<чтение слота>/<распаковка> в миллисекундах.
+    // Показываем только у файлов, где оно вообще заметно.
+    let lms = LOAD_MS.load(Relaxed);
+    let dms = DEC_MS.load(Relaxed);
+    if lms + dms >= 100 && n + 12 <= buf.len() {
+        buf[n] = b' ';
+        buf[n + 1] = b'L';
+        n += 2;
+        let mut put = |v: u32, b: &mut [u8; 16], n: &mut usize| {
+            let mut d = 1000;
+            let mut go = false;
+            while d > 0 {
+                let c = v / d % 10;
+                if c != 0 || go || d == 1 {
+                    b[*n] = b'0' + c as u8;
+                    *n += 1;
+                    go = true;
+                }
+                d /= 10;
+            }
+        };
+        put(lms.min(9999), buf, &mut n);
+        buf[n] = b'/';
+        n += 1;
+        put(dms.min(9999), buf, &mut n);
+    }
+
     // Отброшенное: d — записи второму экземпляру чипа, g — маски стерео
     // Game Gear. Показываем только когда есть что показать.
     let d2 = DROP2.load(Relaxed).min(9);
@@ -2024,10 +2051,27 @@ fn main() -> ! {
     }
 }
 
+/// Сколько миллисекунд заняли чтение слота и распаковка последнего файла.
+///
+/// Крупные файлы грузятся заметно долго (задача 89), а из чего складывается
+/// это время — с устройства не видно: чтение идёт мостом APF, распаковка
+/// считается софткором. Обе половины теперь меряются и показываются в
+/// служебной строке как `Lчтение/распаковка`. Счётчик chipbox 0x18 идёт на
+/// 44100, отсюда и миллисекунды.
+static LOAD_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static DEC_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn ticks_ms(from: u32) -> u32 {
+    chipbox_read(0x18).wrapping_sub(from) / 44
+}
+
 /// Чтение содержимого слота в staging-буфер
 fn load_slot(size: u32) -> &'static [u8] {
+    let t0 = chipbox_read(0x18);
     File::request_read(0, size, STAGE_BASE, files::slot());
     File::block_op_complete();
+    LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
+    DEC_MS.store(0, core::sync::atomic::Ordering::Relaxed);
     unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) }
 }
 
@@ -2058,8 +2102,10 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // .vgz распаковываем в кучу; сырой .vgm играем прямо из staging-буфера
     let decompressed;
     let data: &[u8] = if staged.len() >= 2 && staged[0..2] == vgm_core::GZIP_MAGIC {
+        let t0 = chipbox_read(0x18);
         match decompress(staged) {
             Ok(v) => {
+                DEC_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
                 decompressed = v;
                 &decompressed
             }
