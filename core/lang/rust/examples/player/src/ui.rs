@@ -411,13 +411,18 @@ pub fn screen(
     }
     text(12, 210, "A pause   B stop   R ffwd", DIM, 1);
     text(12, 226, "menu: core settings > music", DIM, 1);
-    // активный data-слот (диагностика «какой Load сработал»)
-    let sn = match crate::files::slot() {
-        2 => "s2",
-        3 => "s3",
-        _ => "s1",
-    };
-    text(W - 12 - 16, 226, sn, DIM, 1);
+    // Активный data-слот («какой Load сработал»). Это диагностика, и
+    // висеть на экране у всех подряд она не должна: с устройства пришло
+    // «s1 и s2 не выключаются». Прячем вместе с остальной служебной
+    // разметкой по пункту меню Developer info.
+    if crate::dev_mode() {
+        let sn = match crate::files::slot() {
+            2 => "s2",
+            3 => "s3",
+            _ => "s1",
+        };
+        text(W - 12 - 16, 226, sn, DIM, 1);
+    }
 }
 
 fn put_num(buf: &mut [u8; 16], n: &mut usize, v: u32) {
