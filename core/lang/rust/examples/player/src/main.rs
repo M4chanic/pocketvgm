@@ -2025,10 +2025,25 @@ fn main() -> ! {
             false
         };
         let ctl = if !opened {
-            // код ошибки APF и хвост пути — для диагностики с экрана
-            let tail = files::tail(&path, 26);
+            // Код ошибки APF, СЛОТ и хвост пути — для диагностики с экрана.
+            //
+            // Код печатается целиком: раньше стояло `% 8`, и коды 8 и 9
+            // показывались как 0 и 1, то есть отчёт с устройства мог
+            // указывать на несуществующую причину.
+            //
+            // Слот важен потому, что openfile ищет путь В ТЕКУЩЕМ слоте, а
+            // слотов три (расширения разнесены из-за лимита APF в четыре
+            // на слот). Плейлист, ссылающийся на файлы другой группы, их
+            // не откроет, и по одному коду ошибки это не отличить.
+            let tail = files::tail(&path, 22);
             let mut msg = String::from("open err ");
-            msg.push((b'0' + (files::last_err() % 8) as u8) as char);
+            let e = files::last_err();
+            if e >= 10 {
+                msg.push((b'0' + (e / 10 % 10) as u8) as char);
+            }
+            msg.push((b'0' + (e % 10) as u8) as char);
+            msg.push_str(" s");
+            msg.push((b'0' + (files::slot() % 10) as u8) as char);
             msg.push_str(": ");
             msg.push_str(tail);
             error_wait("error", &msg)

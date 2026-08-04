@@ -10,8 +10,13 @@ use litex_openfpga::litex_pac as pac;
 /// Буфер параметр/ответ-структур (SDRAM, между staging и кучей)
 const STRUCT_BUF: u32 = 0x4170_0000;
 
-/// Активный data-слот (1 — vgm/vgz/gbs/m3u, 2 — nsf/sid/mid): расширения
-/// разнесены по двум слотам из-за лимита APF в 4 расширения на слот
+/// Активный data-слот. Слотов ТРИ (Sega / Nintendo / Computer):
+/// расширения разнесены между ними из-за лимита APF в 4 расширения на
+/// слот. Комментарий про два слота устарел — выбор слота на старте см. в
+/// main.rs, там же отпечатки содержимого и заначка в PSRAM.
+///
+/// Важно для плейлистов: openfile ищет путь В ЭТОМ слоте, поэтому m3u,
+/// ссылающийся на файлы другой группы, открыть их не сможет.
 static SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 /// Код результата последней файловой операции APF (0 = ok)
 static LAST_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
