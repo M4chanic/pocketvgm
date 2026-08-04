@@ -162,6 +162,10 @@ static uint32_t nes_flt_opt = 3;
 // Режим вывода, как пункт «Output» в меню ядра (регистр 0x30):
 // 0 стерео, 1 моно (--mono), 2 суженная сцена (--narrow).
 static uint32_t mono_opt = 0;
+// Гейн APU для замеров запаса по уровню. По умолчанию 0 — берётся значение
+// фирмвари (80). Ключ --apu-gain N позволяет снять пик БЕЗ ограничения:
+// на 120 громкие рипы NES упираются в шкалу, и настоящий пик не виден.
+static uint32_t apu_gain_opt = 0;
 
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
     size_t n_in = pcm.size() / 2;
@@ -538,7 +542,7 @@ static int nsf_file(const char* path, const char* out, double seconds) {
 
     Tb tb;
     mute_all(tb);
-    tb.wb(0xC, true, 120);   // см. комментарий в фирмвари: APU шёл на ~5 дБ ниже эталона
+    tb.wb(0xC, true, 80);    // см. комментарий в фирмвари: APU шёл на ~5 дБ ниже эталона
     tb.wb(0x2D, true, nes_flt_opt);   // выходной тракт NES, см. --nes-filter
     tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
@@ -586,7 +590,7 @@ static int vrc6_selftest(const char* out, double seconds) {
 
     Tb tb;
     mute_all(tb);
-    tb.wb(0xC, true, 120);   // канал APU (VRC6 подмешан в него), уровень см. в фирмвари
+    tb.wb(0xC, true, 80);    // канал APU (VRC6 подмешан в него), уровень см. в фирмвари
     tb.wb(0x2D, true, nes_flt_opt);
     tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
@@ -1475,6 +1479,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--nes-filter") && i + 1 < argc) { nes_flt_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--mono")) { mono_opt = 1; }
         else if (!strcmp(argv[i], "--narrow")) { mono_opt = 2; }
+        else if (!strcmp(argv[i], "--apu-gain") && i + 1 < argc) { apu_gain_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--vu-selftest")) { return vu_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
@@ -1946,7 +1951,7 @@ int main(int argc, char** argv) {
                  | gain_of((ay_clk || opn_clk) ? 64u : 0u, ssg_id) << 8
                  | gain_of(ym_clk ? 64u : 0u, 0x03));
     tb.wb(0xC, true, gain_of(opl_clk ? 16u : 0u, opl_id) << 24
-                   | gain_of(nes_clk ? 120u : 0u, 0x14)
+                   | gain_of(nes_clk ? (apu_gain_opt ? apu_gain_opt : 80u) : 0u, 0x14)
                    | gain_of(gb_clk_hdr ? 64u : 0u, 0x13) << 8);
     // Выходной ФНЧ Mega Drive: только для файлов с YM2612 — у OPN-рипов
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
