@@ -1945,10 +1945,9 @@ int main(int argc, char** argv) {
     uint8_t opl_id = ymf262_clk ? 0x0C : (ym3526_clk ? 0x0A : 0x09);
     tb.wb(6, true, gain_of(adpcm_clk ? 64u : 0u, 0x17) << 24
                  | gain_of(pcm_clk ? 34u : 0u, 0x04) << 16
-                 // SSG внутри OPN вдвое тише отдельного AY — libvgm делит
-                 // громкость парной части составного чипа пополам. См.
-                 // подробный комментарий в фирмвари.
-                 | gain_of((ay_clk || opn_clk) ? 64u : 0u, ssg_id) << 8
+                 // Отдельный AY 64, SSG внутри OPN 47: отношение FM к SSG
+                 // сводится по эталону, см. подробный разбор в фирмвари.
+                 | gain_of(ay_clk ? 64u : (opn_clk ? 47u : 0u), ssg_id) << 8
                  | gain_of(ym_clk ? 64u : 0u, 0x03));
     tb.wb(0xC, true, gain_of(opl_clk ? 16u : 0u, opl_id) << 24
                    | gain_of(nes_clk ? (apu_gain_opt ? apu_gain_opt : 80u) : 0u, 0x14)
