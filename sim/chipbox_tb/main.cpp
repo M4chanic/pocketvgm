@@ -1956,7 +1956,7 @@ int main(int argc, char** argv) {
                  | gain_of(ym_clk ? 64u : 0u, 0x03));
     tb.wb(0xC, true, gain_of(opl_clk ? 16u : 0u, opl_id) << 24
                    | gain_of(nes_clk ? (apu_gain_opt ? apu_gain_opt : 80u) : 0u, 0x14)
-                   | gain_of(gb_clk_hdr ? 64u : 0u, 0x13) << 8);
+                   | gain_of(gb_clk_hdr ? 110u : 0u, 0x13) << 8);   // уровень см. в фирмвари
     // Выходной ФНЧ Mega Drive: только для файлов с YM2612 — у OPN-рипов
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
     tb.wb(0x2C, true, fm_clk ? 0u : 3u);
