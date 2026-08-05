@@ -166,6 +166,10 @@ static uint32_t mono_opt = 0;
 // фирмвари (80). Ключ --apu-gain N позволяет снять пик БЕЗ ограничения:
 // на 120 громкие рипы NES упираются в шкалу, и настоящий пик не виден.
 static uint32_t apu_gain_opt = 0;
+// То же для HuC6280 (регистр 0x28), ключ --huc-gain N. Нужен по той же
+// причине: на рабочем множителе громкие рипы с CD упираются в шкалу, и
+// настоящий пик из рендера не виден.
+static uint32_t huc_gain_opt = 0;
 
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
     size_t n_in = pcm.size() / 2;
@@ -1480,6 +1484,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--mono")) { mono_opt = 1; }
         else if (!strcmp(argv[i], "--narrow")) { mono_opt = 2; }
         else if (!strcmp(argv[i], "--apu-gain") && i + 1 < argc) { apu_gain_opt = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--huc-gain") && i + 1 < argc) { huc_gain_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--vu-selftest")) { return vu_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
@@ -1982,7 +1987,7 @@ int main(int argc, char** argv) {
     }
     if (huc_clk) {
         tb.wb(0x27, true, (uint32_t)((double)huc_clk / CLK_HZ * 4294967296.0 + 0.5));
-        tb.wb(0x28, true, gain_of(180, 0x1B));   // уровень см. в фирмвари
+        tb.wb(0x28, true, gain_of(huc_gain_opt ? huc_gain_opt : 150u, 0x1B));   // уровень см. в фирмвари
     }
     if (opn_clk) {
         // Делители сняты с эталона (libvgm, fmopn.c): FM идёт с частотой
