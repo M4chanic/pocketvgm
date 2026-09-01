@@ -2053,7 +2053,28 @@ fn main() -> ! {
                 error_wait("error", "empty file")
             } else {
                 let data = load_slot(fsize);
-                dispatch(data, &pl)
+                // openfile у APF «успешен» и для НЕСУЩЕСТВУЮЩЕГО пути: код
+                // результата нулевой, а слот сохраняет прежнее содержимое.
+                // Тогда плеер брался играть сам плейлист и говорил
+                // «unknown format», что уводит в сторону — искать надо не
+                // формат трека, а почему не разрешился путь.
+                //
+                // Отличить можно прямо здесь: если в буфере лежит тот же
+                // текст, что мы уже разобрали как m3u, значит трек не
+                // открылся. Сравниваем начало — этого хватает, полное
+                // сравнение стоило бы лишнего прохода по мегабайтам.
+                let stale = is_m3u
+                    && data.len() >= 16
+                    && staged.len() >= 16
+                    && data[..16] == staged[..16];
+                if stale {
+                    let tail = files::tail(&path, 20);
+                    let mut msg = String::from("track not found: ");
+                    msg.push_str(tail);
+                    error_wait("m3u", &msg)
+                } else {
+                    dispatch(data, &pl)
+                }
             }
         };
 
