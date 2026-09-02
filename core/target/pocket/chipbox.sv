@@ -2709,7 +2709,7 @@ module chipbox #(
   localparam S_SCC_Z = 5'd22;  // строб снят, ждём восстановления
   localparam S_OKIM = 5'd23;   // импульс wrn OKIM6295 (один такт)
   localparam S_K060_A = 5'd24; // строб K053260 ассерчен, ждём cen
-  localparam S_K060_Z = 5'd25; // строб снят
+  localparam S_K060_Z = 5'd29; // строб снят (25 занят S_GBEXT: в M4_SIM оба живут в одном case)
   localparam S_RF5CRAM = 5'd27; // байт в ОЗУ RF5C164: ждём канал записи
 
   // Отображение (порт VGM 0xD2, регистр aa) -> адрес MSX ABLO (0x9800+)
