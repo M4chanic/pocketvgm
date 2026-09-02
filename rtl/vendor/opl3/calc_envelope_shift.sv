@@ -161,7 +161,7 @@ module calc_envelope_shift
 
     always_ff @(posedge clk)
         // once per sample, after operators are done
-        if (sample_clk_en_p[3] && bank_num_p[3] == 1 && op_num_p[3] == 17) begin
+        if (sample_clk_en_p[3] && bank_num_p[3] == NUM_BANKS - 1 && op_num_p[3] == 17) begin // m4pocket: was bank 1; with NUM_BANKS=1 the timer never ticked
             if (eg_state) begin
                 unique casez (eg_timer)
                 'b0_0000_0000_0000: eg_add <= 0;
