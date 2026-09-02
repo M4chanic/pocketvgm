@@ -14,3 +14,6 @@ Test/
 CLAUDE.md
 screenshots/
 __pycache__/
+sim/opl3_tb/opl3_tb
+sim/opll_tb/opll_tb
+*.raw

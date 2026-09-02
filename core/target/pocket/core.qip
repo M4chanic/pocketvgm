@@ -70,6 +70,7 @@ set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_p
 set_global_assignment -name VERILOG_FILE             [file join $::quartus(qip_path) "../../../rtl/vendor/verilogboy/edgedet.v"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/gbsbox.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/huc6280_psg.sv"]
+set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/chipbox/opll2opl.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/vendor/c64sid/sid_top.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/vendor/c64sid/sid_voice.sv"]
 set_global_assignment -name SYSTEMVERILOG_FILE       [file join $::quartus(qip_path) "../../../rtl/vendor/c64sid/sid_envelope.sv"]

@@ -271,6 +271,12 @@ module chipbox #(
   // VRC6 (контрол бит 7): экспаншен-чипы NSF, записи $9xxx-$Bxxx от 6502
   reg vrc6_en = 0;
   reg vrc6_wr = 0;
+`ifdef M4_HAS_HOME
+  // OPLL (YM2413/VRC7) на OPL3 через транслятор opll2opl, рег 0x34:
+  // [0] набор патчей (1 = VRC7), [1] декод $9010/$9030 на шине 6502 (NSF)
+  reg opll_set = 0;
+  reg vrc7_nsf_en = 0;
+`endif
   reg [1:0] vrc6_blk = 0;
   reg [1:0] vrc6_rsel = 0;
   reg [7:0] vrc6_din = 0;
@@ -801,6 +807,7 @@ module chipbox #(
           6'h31: fds_gain <= data_write[7:0];
           6'h32: rf5c_gain <= data_write[7:0];
           6'h33: rf5c_phase_inc <= data_write;
+          6'h34: {vrc7_nsf_en, opll_set} <= data_write[1:0];
 `endif
 `ifdef M4_HAS_ARCADE
           6'h23: okim_phase_inc <= data_write;
@@ -873,6 +880,7 @@ module chipbox #(
           6'h29: data_read <= {24'b0, gb_rom_dbg_data};
           6'h2A: data_read <= gb_snd_touched[31:0];
           6'h2B: data_read <= {16'b0, gb_snd_touched[47:32]};
+          6'h34: data_read <= {30'b0, vrc7_nsf_en, opll_set};
 `endif
           5'h18: data_read <= tick_count;
           5'h19: data_read <= {dmc_cnt, pf_cnt};
@@ -1565,6 +1573,9 @@ module chipbox #(
     if (play_tick_carry) play_pending <= 1;
 
     vrc6_wr <= 0;
+`ifdef M4_HAS_HOME
+    vrc7_cpu_wr <= 0;
+`endif
     if (cpu_reset) begin
       cpu_di_ready <= 1;
       p_acks <= 0;
@@ -1700,6 +1711,15 @@ module chipbox #(
             p_acks <= p_acks + 1'b1;
           end
           else if (cpu_ab_l[15:3] == 13'b0101111111111) nsf_banks[cpu_ab_l[2:0]] <= cpu_do_l;
+`ifdef M4_HAS_HOME
+          // VRC7: $9010 — адрес регистра OPLL, $9030 — данные
+          else if (vrc7_nsf_en && cpu_ab_l[15:12] == 4'h9 && cpu_ab_l[5:4] == 2'b01)
+            vrc7_alatch <= cpu_do_l;
+          else if (vrc7_nsf_en && cpu_ab_l[15:12] == 4'h9 && cpu_ab_l[5:4] == 2'b11) begin
+            vrc7_cpu_wr <= 1;
+            vrc7_cpu_data <= cpu_do_l;
+          end
+`endif
           else if (vrc6_en && cpu_ab_l[15:12] >= 4'h9 && cpu_ab_l[15:12] <= 4'hB) begin
             // VRC6: $9000-$9003 pulse1, $A000-$A002 pulse2, $B000-$B002 пила
             vrc6_wr <= 1;
@@ -2044,6 +2064,41 @@ module chipbox #(
     opl_r_s1 <= sat16_21(opl_r24[23:3]);
     opl_r_s <= opl_r_s1;
   end
+
+`ifdef M4_HAS_HOME
+  // OPLL (YM2413/VRC7) -> OPL2: транслятор принимает записи OPLL из
+  // секвенсора (VGM) или прямо с шины 6502 (NSF, $9010/$9030) и отдаёт
+  // секвенсору записи OPL2, которые тот проталкивает в OPL3 тем же
+  // циклом, что и OP_OPL3. Оба источника не пересекаются: в NSF очередь
+  // команд пуста.
+  reg        opll_wr_seq = 0;
+  reg  [7:0] opll_addr_seq = 0;
+  reg  [7:0] opll_data_seq = 0;
+  reg        vrc7_cpu_wr = 0;
+  reg  [7:0] vrc7_alatch = 0;
+  reg  [7:0] vrc7_cpu_data = 0;
+  reg        opll_ack = 0;
+  wire       opll_busy;
+  wire       opll_full;
+  wire       opll_ovalid;
+  wire [7:0] opll_oreg;
+  wire [7:0] opll_oval;
+
+  opll2opl opll (
+      .clk(clk),
+      .rst(chip_reset),
+      .vrc7(opll_set),
+      .wr(opll_wr_seq | vrc7_cpu_wr),
+      .addr(vrc7_cpu_wr ? vrc7_alatch : opll_addr_seq),
+      .data(vrc7_cpu_wr ? vrc7_cpu_data : opll_data_seq),
+      .busy(opll_busy),
+      .full(opll_full),
+      .out_valid(opll_ovalid),
+      .out_reg(opll_oreg),
+      .out_val(opll_oval),
+      .out_ack(opll_ack)
+  );
+`endif
 
   // --------------------------------------------------------------------
   // Выходной микс чипов: YM (знаковый, стерео) + AY (беззнаковый моно,
@@ -2683,6 +2738,7 @@ module chipbox #(
   localparam EXT_RF5C = 4'h7; // регистры RF5C164 (Mega CD)
   localparam EXT_RF5C_PTR = 4'h8; // указатель записи в ОЗУ RF5C164
   localparam EXT_RF5C_RAM = 4'h9; // байт в ОЗУ RF5C164
+  localparam EXT_OPLL = 4'hA; // регистр OPLL (YM2413/VRC7) -> транслятор в OPL2
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -2711,6 +2767,7 @@ module chipbox #(
   localparam S_K060_A = 5'd24; // строб K053260 ассерчен, ждём cen
   localparam S_K060_Z = 5'd29; // строб снят (25 занят S_GBEXT: в M4_SIM оба живут в одном case)
   localparam S_RF5CRAM = 5'd27; // байт в ОЗУ RF5C164: ждём канал записи
+  localparam S_OPLL_PUSH = 5'd26; // очередь транслятора OPLL полна: сперва разгружаем её
 
   // Отображение (порт VGM 0xD2, регистр aa) -> адрес MSX ABLO (0x9800+)
   function automatic [7:0] scc_ablo_map(input [2:0] port, input [7:0] r);
@@ -2731,6 +2788,7 @@ module chipbox #(
   reg [7:0] opl_reg_l = 0;
   reg [7:0] opl_val_l = 0;
   reg opl_bank_l = 0;
+  reg opl_ret_push = 0;  // после записи OPL3 вернуться в S_OPLL_PUSH
 
   reg [4:0] state = S_IDLE;
   reg [3:0] scc_wait = 0;
@@ -2747,13 +2805,19 @@ module chipbox #(
 
   wire [31:0] tick_diff = tick_target - tick_count;
   wire time_pending = !tick_diff[31] && tick_diff != 0;
+`ifdef M4_HAS_HOME
+  wire seq_busy = state != S_IDLE || time_pending || !fifo_empty || opll_busy;
+`else
   wire seq_busy = state != S_IDLE || time_pending || !fifo_empty;
+`endif
 
   always @(posedge clk) begin
 `ifdef M4_HAS_HOME
     huc_wr <= 0;   // однотактовый строб: гасится там же, где взводится
     fds_wr <= 0;
     rf5c_wr <= 0;
+    opll_wr_seq <= 0;
+    opll_ack <= 0;
 `endif
     if (reset || soft_reset_req) begin
       rd_ptr <= 0;
@@ -2803,6 +2867,20 @@ module chipbox #(
 `ifdef M4_HAS_ARCADE
           ym_cs_n <= 1;
           ym_wr_n <= 1;
+`endif
+`ifdef M4_HAS_HOME
+          // Записи OPL2 от транслятора OPLL — раньше очереди команд:
+          // они порождены командой, которая уже прошла
+          if (opll_ovalid && !opll_ack) begin
+            opll_ack <= 1;
+            opl_addr <= 2'd0;
+            opl_din <= opll_oreg;
+            opl_val_l <= opll_oval;
+            opl_cs_n <= 0;
+            opl_wr_n <= 0;
+            opl_phase_cnt <= 2;
+            state <= S_OPL_A;
+          end else
 `endif
           if (fifo_empty) begin
             if (!time_pending) tick_target <= tick_count;
@@ -2917,6 +2995,7 @@ module chipbox #(
                   gb_ext_wait <= 7'd127;
                   state <= S_GBEXT;
                 end
+                EXT_OPLL: state <= S_OPLL_PUSH;
                 EXT_HUC: begin
                   huc_addr <= fifo_q[11:8];
                   huc_din  <= fifo_q[7:0];
@@ -3029,9 +3108,33 @@ module chipbox #(
           else begin
             opl_cs_n <= 1;
             opl_wr_n <= 1;
-            state <= S_IDLE;
+            opl_ret_push <= 0;
+            state <= opl_ret_push ? S_OPLL_PUSH : S_IDLE;
           end
         end
+
+`ifdef M4_HAS_HOME
+        // Команда OPLL: кладём в очередь транслятора; если она полна,
+        // разгружаем его выход сами — иначе взаимная блокировка
+        S_OPLL_PUSH: begin
+          if (!opll_full) begin
+            opll_wr_seq <= 1;
+            opll_addr_seq <= fifo_q[15:8];
+            opll_data_seq <= fifo_q[7:0];
+            state <= S_IDLE;
+          end else if (opll_ovalid && !opll_ack) begin
+            opll_ack <= 1;
+            opl_addr <= 2'd0;
+            opl_din <= opll_oreg;
+            opl_val_l <= opll_oval;
+            opl_cs_n <= 0;
+            opl_wr_n <= 0;
+            opl_phase_cnt <= 2;
+            opl_ret_push <= 1;
+            state <= S_OPL_A;
+          end
+        end
+`endif
 
         // YM2612: busy-протокол как у jt51 (адрес, затем данные)
         S_G_POLL_A, S_G_POLL_D: begin

@@ -31,6 +31,7 @@ game plays but is incomplete — those cases are called out.
 | HuC6280 PSG | ~7 | PC Engine / TG-16 | custom |
 | Famicom Disk System | ~2 | FDS | custom |
 | RF5C164 / RF5C68 | ~2 | Sega Mega CD / CD 32X | custom |
+| YM2413 (OPLL) / VRC7 | ~5 | MSX-Music, NES (Lagrange Point) | opl3_fpga + custom register translator |
 
 ### Arcade
 
@@ -49,8 +50,11 @@ music already plays through the arcade FM/ADPCM path.
 
 ### Home (current focus)
 
-1. **YM2413 (OPLL)** + **VRC7** — ~5 packs. MSX and NES; OPL with a fixed
-   instrument ROM, cheap once OPL routing exists.
+Nothing queued. The OPLL is served by a register translator in front of the
+OPL3: instrument ROM, 4-bit channel volume, 9-bit F-number and the OPLL
+key-off rules (sustain release rate 5, percussive 7, frozen modulator) are
+rewritten into OPL2 operator registers; the DAMP phase before a retrigger is
+not reproduced.
 
 ### Arcade (deferred — progress preserved)
 

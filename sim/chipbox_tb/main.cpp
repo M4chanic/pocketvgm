@@ -170,6 +170,7 @@ static uint32_t apu_gain_opt = 0;
 // причине: на рабочем множителе громкие рипы с CD упираются в шкалу, и
 // настоящий пик из рендера не виден.
 static uint32_t huc_gain_opt = 0;
+static uint32_t opll_gain_opt = 0;   // --opll-gain: гейн OPLL (YM2413/VRC7) на OPL3
 
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
     size_t n_in = pcm.size() / 2;
@@ -1485,6 +1486,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--narrow")) { mono_opt = 2; }
         else if (!strcmp(argv[i], "--apu-gain") && i + 1 < argc) { apu_gain_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--huc-gain") && i + 1 < argc) { huc_gain_opt = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--opll-gain") && i + 1 < argc) { opll_gain_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--vu-selftest")) { return vu_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
@@ -1551,13 +1553,20 @@ int main(int argc, char** argv) {
     size_t rf5c_regs = 0, rf5c_ram = 0;
     size_t pos = data_off;
     // OPL-семейство: YM3812 (0x50), YM3526 (0x54), YMF262 (0x5C).
-    // OPL2-файлы задают 3.58 МГц — ядро тактуется x4 (как в фирмвари).
+    // Полуклок ядра: 25.4545 МГц при номинале, масштаб от тактовой файла
+    // (OPL2 x64/9, OPL3 x16/9) — см. разбор в фирмвари.
     uint32_t ym3812_clk = hdr_end >= 0x54 ? rd32(d, 0x50) & 0x3FFFFFFF : 0;
     uint32_t ym3526_clk = hdr_end >= 0x58 ? rd32(d, 0x54) & 0x3FFFFFFF : 0;
     uint32_t ymf262_clk = hdr_end >= 0x60 ? rd32(d, 0x5C) & 0x3FFFFFFF : 0;
-    uint32_t opl_clk = ymf262_clk ? ymf262_clk
-                     : ym3812_clk ? ym3812_clk * 4
-                     : ym3526_clk ? ym3526_clk * 4 : 0;
+    // OPLL (YM2413, бит 31 — VRC7): транслятор в chipbox переводит в OPL2,
+    // тактовая как у OPL2; при наличии настоящего OPL в файле OPLL молчит
+    uint32_t ym2413_clk = rd32(d, 0x10) & 0x3FFFFFFF;
+    bool vrc7 = (rd32(d, 0x10) & 0x80000000u) != 0;
+    bool opll = ym2413_clk && !ymf262_clk && !ym3812_clk && !ym3526_clk;
+    uint32_t opl_clk = ymf262_clk ? (uint32_t)((uint64_t)ymf262_clk * 16 / 9)
+                     : ym3812_clk ? (uint32_t)((uint64_t)ym3812_clk * 64 / 9)
+                     : ym3526_clk ? (uint32_t)((uint64_t)ym3526_clk * 64 / 9)
+                     : ym2413_clk ? (uint32_t)((uint64_t)ym2413_clk * 64 / 9) : 0;
     uint32_t scc_clk  = hdr_end >= 0xA0 ? rd32(d, 0x9C) & 0x3FFFFFFF : 0;
     uint32_t k060_clk = hdr_end >= 0xB0 ? rd32(d, 0xAC) & 0x3FFFFFFF : 0;
     uint32_t huc_clk  = hdr_end >= 0xA8 ? rd32(d, 0xA4) & 0x3FFFFFFF : 0;
@@ -1570,7 +1579,7 @@ int main(int argc, char** argv) {
 
     if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk
         && !scc_clk && !k060_clk && !huc_clk && !opn_clk && !gb_clk_hdr
-        && !rf5c_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
+        && !rf5c_clk && !ym2413_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
 
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
@@ -1722,6 +1731,11 @@ int main(int argc, char** argv) {
         }
         else if (cmd == 0x5F) {
             cmds.push_back(0xC0000000u | 0x10000u | d[pos] << 8 | d[pos+1]); pos += 2;
+        }
+        // OPLL (YM2413/VRC7): 0x51 рег знач -> OP_EXT|EXT_OPLL, транслятор в OPL2
+        else if (cmd == 0x51) {
+            if (opll) cmds.push_back(0xF0000000u | 0x0A000000u | d[pos] << 8 | d[pos+1]);
+            pos += 2;
         }
         // SCC (K051649): 0xD2 порт рег знач -> OP_EXT|EXT_SCC
         else if (cmd == 0xD2) {
@@ -1947,14 +1961,15 @@ int main(int argc, char** argv) {
     // (SSG) — тот же номер с битом 7, и рипы задают баланс именно там.
     uint8_t fm_id = fm_clk ? 0x02 : (ym2608_clk ? 0x07 : 0x06);
     uint8_t ssg_id = ym2608_clk ? 0x87 : (ym2203_clk ? 0x86 : 0x12);
-    uint8_t opl_id = ymf262_clk ? 0x0C : (ym3526_clk ? 0x0A : 0x09);
+    uint8_t opl_id = ymf262_clk ? 0x0C : (ym3526_clk ? 0x0A : (opll ? 0x01 : 0x09));
+    uint32_t opl_base = opll ? (opll_gain_opt ? opll_gain_opt : 11u) : 16u;   // OPLL см. фирмварь
     tb.wb(6, true, gain_of(adpcm_clk ? 64u : 0u, 0x17) << 24
                  | gain_of(pcm_clk ? 34u : 0u, 0x04) << 16
                  // Отдельный AY 64, SSG внутри OPN 47: отношение FM к SSG
                  // сводится по эталону, см. подробный разбор в фирмвари.
                  | gain_of(ay_clk ? 64u : (opn_clk ? 47u : 0u), ssg_id) << 8
                  | gain_of(ym_clk ? 64u : 0u, 0x03));
-    tb.wb(0xC, true, gain_of(opl_clk ? 16u : 0u, opl_id) << 24
+    tb.wb(0xC, true, gain_of(opl_clk ? opl_base : 0u, opl_id) << 24
                    | gain_of(nes_clk ? (apu_gain_opt ? apu_gain_opt : 80u) : 0u, 0x14)
                    | gain_of(gb_clk_hdr ? 110u : 0u, 0x13) << 8);   // уровень см. в фирмвари
     // Выходной ФНЧ Mega Drive: только для файлов с YM2612 — у OPN-рипов
@@ -1973,6 +1988,7 @@ int main(int argc, char** argv) {
     // откалибровано по отношению к APU против эталона, см. фирмварь.
     tb.wb(0x31, true, (rd32(d, 0x84) & 0x80000000u) ? 46u : 0u);
     if (opl_clk) tb.wb(0x14, true, (uint32_t)((double)opl_clk / CLK_HZ * 4294967296.0 + 0.5));
+    tb.wb(0x34, true, (opll && vrc7) ? 1u : 0u);   // набор патчей OPLL: 1 = VRC7
     if (scc_clk) {
         // Заголовок VGM несёт половину шинной частоты MSX: у эталона
         // (libvgm, k051649.c) шаг считается от clock*2, и нота выходит

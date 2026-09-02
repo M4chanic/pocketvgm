@@ -11,7 +11,7 @@ GB       := $(addprefix $(VB_HDL)/,cpu.v alu.v control.v regfile.v singlereg.v \
             sound.v sound_channel_mix.v sound_length_ctr.v sound_noise.v \
             sound_square.v sound_vol_env.v sound_wave.v edgedet.v)
 GB       += ../../rtl/chipbox/gbsbox.sv
-HUC      := ../../rtl/chipbox/huc6280_psg.sv ../../rtl/chipbox/rf5c164.sv
+HUC      := ../../rtl/chipbox/huc6280_psg.sv ../../rtl/chipbox/rf5c164.sv ../../rtl/chipbox/opll2opl.sv
 SID      := $(wildcard ../../rtl/vendor/c64sid/sid_*.sv)
 GEN      := $(wildcard ../../rtl/vendor/jt12/*.v) $(wildcard ../../rtl/vendor/jt89/*.v)
 OPL      := ../../rtl/vendor/opl3/opl3_pkg.sv $(filter-out ../../rtl/vendor/opl3/opl3_pkg.sv,$(wildcard ../../rtl/vendor/opl3/*.sv)) ../../rtl/vendor/opl3/afifo.v

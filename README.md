@@ -44,7 +44,7 @@ default Console bitstream; the second needs the Arcade one.
 |---|---|---|
 | Sega Mega Drive / Genesis | `.vgm` `.vgz` `.gym` | YM2612 + SN76489 |
 | Sega Master System, Game Gear | `.vgm` `.vgz` | SN76489 |
-| NES / Famicom | `.nsf` `.vgm` | NES APU + DMC, VRC6, Sunsoft 5B |
+| NES / Famicom | `.nsf` `.vgm` | NES APU + DMC, VRC6, VRC7, Sunsoft 5B |
 | Game Boy | `.gbs` | SM83 + Game Boy APU |
 | Commodore 64 | `.sid` | SID 6581/8580 + 6502 |
 | PC Engine / TurboGrafx-16 | `.vgm` `.vgz` | HuC6280 |
@@ -97,6 +97,7 @@ play in full.
 | OKIM6295 | arcade | [jt6295](https://github.com/jotego/jt6295) |
 | K053260 | Konami arcade | [jtcores](https://github.com/jotego/jtcores) (2 of 4 channels, for area) |
 | YMF262 (OPL3, OPL2 subset) | General MIDI synthesis (GENMIDI patches from Freedoom) | [opl3_fpga](https://github.com/gtaylormb/opl3_fpga) |
+| YM2413 (OPLL) / VRC7 | MSX-Music, NES (Lagrange Point) | register translation onto opl3_fpga, patch ROM from libvgm |
 
 Upstream sources and commits of the vendored RTL are listed in
 [`rtl/vendor/VENDOR.md`](rtl/vendor/VENDOR.md).
@@ -136,7 +137,7 @@ just picked through Load — then it plays straight away.
 - `core/` — the openFPGA core: `core_top.sv`, `chipbox.sv` (chip bus),
   Quartus project, `pkg/pocket/` — SD card files (json, assets)
 - `core/lang/rust/examples/player/` — the Rust player/UI (RISC-V soft core)
-- `rtl/chipbox/` — custom modules: GBS box (SM83+APU), VRC6, MSM6258
+- `rtl/chipbox/` — custom modules: GBS box (SM83+APU), VRC6, MSM6258, OPLL-to-OPL2 translator
 - `rtl/vendor/` — vendored chip RTL (see `VENDOR.md`, mostly GPL-3.0)
 - `firmware/vgm-core/` — shared Rust parser library (format parsers,
   inflate, MD5 for HVSC song lengths)

@@ -39,6 +39,6 @@ int main(int argc, char** argv) {
         printf("%.0f ", sqrt(s / win));
     }
     printf("\nсэмплов %zu\n", samples.size());
-    if (argc > 1) { FILE* f = fopen(argv[1], "wb"); for (int v : samples) { short s = v; fwrite(&s, 2, 1, f); } fclose(f); }
+    if (argc > 1) { FILE* f = fopen(argv[1], "wb"); for (int v : samples) { short s = v >> 8; fwrite(&s, 2, 1, f); } fclose(f); }
     return 0;
 }

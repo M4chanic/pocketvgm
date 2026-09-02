@@ -23,6 +23,7 @@ NormalizeOverallVolume домножает громкости ВСЕХ чипов
     make -C sim/chipbox_tb CLK=57120000
     python3 scripts/gain_ratio.py opn      YM2203: FM против SSG
     python3 scripts/gain_ratio.py md       Mega Drive: YM2612 против SN76489
+    python3 scripts/gain_ratio.py vrc7     Famicom: NES APU против VRC7 (OPLL на OPL3)
 """
 
 import math
@@ -197,7 +198,44 @@ def build_fds(path, loud):
     return ("APU", "FDS")
 
 
-BUILDERS = {"opn": build_opn, "md": build_md, "fds": build_fds}
+def opll_regs(vol, block=4, fnum=0x16B, vrc7=True):
+    """OPLL (YM2413/VRC7): чистый синус на первом канале.
+
+    Пользовательский патч: модулятор заглушен (TL 63), у несущей
+    мгновенная атака и без спада; громкость канала vol (0 громче всего).
+    """
+    w = bytearray()
+    patch = (0x21, 0x21, 0x3F, 0x00, 0xF0, 0xF0, 0x07, 0x07)
+    regs = list(enumerate(patch))
+    regs += [(0x30, vol & 0x0F), (0x10, fnum & 0xFF),
+             (0x20, 0x10 | (block << 1) | (fnum >> 8))]
+    for a, d in regs:
+        w += bytes([0x51, a, d])
+    return w
+
+
+def opll_off():
+    return bytes([0x51, 0x20, 0x00])
+
+
+def build_vrc7(path, loud):
+    """Famicom с VRC7: сначала импульсный канал APU, потом синус OPLL."""
+    w = bytearray()
+    w += apu_regs(15 if loud else 7)
+    wait(w, SEG)
+    w += apu_off()
+    w += opll_regs(0 if loud else 4)
+    wait(w, SEG)
+    w += opll_off()
+    wait(w, 0.1)
+    w.append(0x66)
+    # старший бит поля YM2413 — признак VRC7
+    path.write_bytes(bytes(hdr([(0x84, 1_789_773), (0x10, 3_579_545 | 0x80000000)],
+                               2 * SEG + 0.1)) + bytes(w))
+    return ("APU", "VRC7")
+
+
+BUILDERS = {"opn": build_opn, "md": build_md, "fds": build_fds, "vrc7": build_vrc7}
 
 
 def rms(xs):
@@ -231,6 +269,11 @@ def main():
         sys.exit(f"нет стенда {TB}; make -C sim/chipbox_tb CLK=57120000")
     ref_bin = next((p for p in (VGM2WAV, TMP / "libvgm" / "build" / "bin" / "vgm2wav")
                     if p.exists()), None)
+    if ref_bin is None:
+        # тот же поиск, что у ab_suite (ставит libvgm рядом с корнем)
+        import ab_suite
+        ab_suite.find_tools()
+        ref_bin = Path(ab_suite.VGM2WAV) if ab_suite.VGM2WAV else None
     if ref_bin is None:
         sys.exit("не найден vgm2wav; путь задаётся в шапке скрипта")
 

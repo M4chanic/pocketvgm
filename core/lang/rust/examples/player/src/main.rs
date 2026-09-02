@@ -193,6 +193,7 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.ymf262 != 0 { add("OPL3"); }
     if c.ym3812 != 0 { add("OPL2"); }
     if c.ym3526 != 0 { add("OPL"); }
+    if c.ym2413 != 0 { add(if c.vrc7 { "VRC7" } else { "YM2413" }); }
     if c.gb_dmg != 0 { add("GB APU"); }
     if c.huc6280 != 0 { add("HuC6280"); }
     if c.ym2608 != 0 { add("YM2608"); }
@@ -296,6 +297,13 @@ const EXT_FDS: u32 = 0x0600_0000;
 const EXT_RF5C: u32 = 0x0700_0000;
 const EXT_RF5C_PTR: u32 = 0x0800_0000;
 const EXT_RF5C_RAM: u32 = 0x0900_0000;
+/// Регистр OPLL (YM2413/VRC7): транслятор в chipbox переводит в OPL2
+const EXT_OPLL: u32 = 0x0A00_0000;
+/// Гейн OPLL на OPL3 (VGM и NSF). Снят синтетическим синусом против NES
+/// APU (gain_ratio.py vrc7, стенд на тактовой железа): на 16 наш VRC7
+/// был громче эталона на 3.5 дБ при обеих громкостях (0 и 4), то есть
+/// это чистый множитель, а не форма шкалы. 16 / 10^(3.5/20) = 10.7.
+const OPLL_GAIN: u32 = 11;
 const EXT_OKIM: u32 = 0x0100_0000;
 const EXT_K060: u32 = 0x0200_0000;
 
@@ -1135,9 +1143,18 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     println!("NSF: {} (песня {})", name.trim_end_matches('\0'), song + 1);
     let has_5b = expansion & 0x20 != 0;
     let has_vrc6 = expansion & 0x01 != 0;
-    if expansion & !(0x20 | 0x01) != 0 {
+    let has_vrc7 = expansion & 0x02 != 0;
+    if expansion & !(0x20 | 0x01 | 0x02) != 0 {
         println!("ВНИМАНИЕ: NSF просит expansion-чипы 0x{expansion:02x} — сыграет только поддержанное");
     }
+    // VRC7: 6502 пишет в $9010/$9030, транслятор переводит в OPL2 — рег
+    // 0x34: [1] декод шины, [0] набор патчей VRC7; OPL3 тактуется как
+    // OPL2 (3.58 МГц x4). Гейны {OPL, -, -, APU} одни на все песни.
+    chipbox_write(0x34, if has_vrc7 { 3 } else { 0 });
+    if has_vrc7 {
+        chipbox_write(0x14, (((3_579_545u64 * 64 / 9) << 32) / CHIPBOX_CLK_HZ) as u32);
+    }
+    let mix_c: u32 = 80 | if has_vrc7 { OPLL_GAIN << 24 } else { 0 };
     if load < 0x8000 {
         println!("NSF с load-адресом {load:#06x} < $8000 не поддержан");
         return error_wait("NSF", "load address < $8000 unsupported");
@@ -1174,7 +1191,7 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     // Было 120, но на нём громкие рипы упирались в полную шкалу; разбор и
     // числа — рядом с гейном APU на пути VGM. Здесь то же значение: чип
     // один и тот же, и один трек не должен звучать по-разному в VGM и NSF.
-    chipbox_write(0xC, 80);
+    chipbox_write(0xC, mix_c);
     // NSF — это всегда Famicom, тракт включаем по режиму из меню
     nes_filter_set(true);
     chipbox_write(0x15, 0);
@@ -1183,11 +1200,12 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     let artist = core::str::from_utf8(&data[0x2E..0x4E]).unwrap_or("");
     // VRC6 включается битом 7 контрол-регистра (декод $9xxx-$Bxxx в chipbox)
     let mode: u32 = 6 | if has_vrc6 { 0x80 } else { 0 };
-    let chips = match (has_5b, has_vrc6) {
-        (true, true) => "2A03+5B+VRC6",
-        (true, false) => "2A03+5B",
-        (false, true) => "2A03+VRC6",
-        (false, false) => "2A03",
+    let chips = match (has_5b, has_vrc6, has_vrc7) {
+        (true, true, _) => "2A03+5B+VRC6",
+        (true, false, _) => "2A03+5B",
+        (false, true, _) => "2A03+VRC6",
+        (false, false, true) => "2A03+VRC7",
+        (false, false, false) => "2A03",
     };
     let draw = |s: u8| {
         ui::screen(
@@ -1263,7 +1281,7 @@ fn nsf_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         ctrl_reset(); // сброс чипов
         // гейны заново: стоп (hold) их глушит
         chipbox_write(6, if has_5b { 64 << 8 } else { 0 });
-        chipbox_write(0xC, 64);
+        chipbox_write(0xC, mix_c);
         chipbox_write(0x15, 0);
         ctrl_mode(mode); // nsf_mode | cpu_run (| vrc6_en)
         println!("NSF: песня {}", s + 1);
@@ -2210,6 +2228,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         // сообщением «нет поддержанных чипов».
         && header.clocks.rf5c164 == 0
         && header.clocks.rf5c68 == 0
+        && header.clocks.ym2413 == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
@@ -2262,21 +2281,36 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         chipbox_write(0x21, (((scc_clk as u64 * 2) << 32) / CHIPBOX_CLK_HZ) as u32);
         chipbox_write(0x22, gain_of(header, 64, 0x19)); // scc_gain
     }
-    // OPL-семейство (YM3812/YM3526/YMF262) играет на нашем OPL3. Клок OPL3
-    // номинально 14.32 МГц, но ядро тактуется master-клоком x2 (25.45 МГц
-    // по умолчанию); OPL2-файлы задают 3.58 МГц — пересчитываем в x4.
+    // OPL-семейство (YM3812/YM3526/YMF262) играет на нашем OPL3. Регистр
+    // 0x14 задаёт частоту ПОЛУКЛОКА ядра, а ядро (opl3_fpga с делителем
+    // 256, см. VENDOR.md) выдаёт номинальные 49716 Гц при 12.727 МГц, то
+    // есть при полуклоке 25.4545 МГц. Тактовая из файла лишь масштабирует
+    // это число: 3.579545 МГц OPL2 -> x64/9, 14.31818 МГц OPL3 -> x16/9.
+    // Раньше OPL2-файлы ставили 3.58 x4 = 14.318 МГц, и ядро шло на
+    // 7.16 МГц: все рипы AdLib звучали на 0.5625 частоты (-10 полутонов);
+    // замерено синтетическим тоном, tone_check.py.
     let opl_clk = if header.clocks.ymf262 != 0 {
-        header.clocks.ymf262
+        header.clocks.ymf262 as u64 * 16 / 9
     } else if header.clocks.ym3812 != 0 {
-        header.clocks.ym3812 * 4
+        header.clocks.ym3812 as u64 * 64 / 9
     } else if header.clocks.ym3526 != 0 {
-        header.clocks.ym3526 * 4
+        header.clocks.ym3526 as u64 * 64 / 9
+    } else if header.clocks.ym2413 != 0 {
+        // OPLL (YM2413/VRC7): своего чипа нет, регистры переводит в OPL2
+        // транслятор в chipbox (opll2opl). Тактовая та же, что у OPL2.
+        // Файл с OPLL и OPL разом на один OPL3 не ляжет — OPL в приоритете.
+        header.clocks.ym2413 as u64 * 64 / 9
     } else {
         0
     };
     if opl_clk != 0 {
-        chipbox_write(0x14, (((opl_clk as u64) << 32) / CHIPBOX_CLK_HZ) as u32);
+        chipbox_write(0x14, ((opl_clk << 32) / CHIPBOX_CLK_HZ) as u32);
     }
+    let opll = header.clocks.ym2413 != 0
+        && header.clocks.ymf262 == 0
+        && header.clocks.ym3812 == 0
+        && header.clocks.ym3526 == 0;
+    chipbox_write(0x34, if opll && header.clocks.vrc7 { 1 } else { 0 });
     // OPN (YM2203/YM2608): своего RTL нет, но FM-часть регистрово
     // совместима с нашим YM2612, а SSG — это jt49. Делители сняты с
     // эталона (libvgm, fmopn.c): частота FM равна clock/(72*pre), SSG
@@ -2527,12 +2561,14 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         0x0C
     } else if header.clocks.ym3526 != 0 {
         0x0A
+    } else if opll {
+        0x01
     } else {
         0x09
     };
     chipbox_write(
         0xC,
-        gain_of(header, if opl_clk != 0 { 16 } else { 0 }, opl_id) << 24
+        gain_of(header, if opll { OPLL_GAIN } else if opl_clk != 0 { 16 } else { 0 }, opl_id) << 24
             | gain_of(header, if nes_clk != 0 { 80 } else { 0 }, 0x14)
             // Game Boy: 110, а не 64 (2026-08-05). Ступенчатый тон на
             // ТАКТОВОЙ ЖЕЛЕЗА показал ровный недобор 4.66 дБ на всех
@@ -2694,6 +2730,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                     chipbox_write(0x2F, 1);
                 }
                 sn_push_att(&mut sink, &sn_att, mask);
+            }
+            Ok(Event::Write { chip: Chip::Ym2413, addr, data, .. }) => {
+                if opll {
+                    sink.push(OP_EXT | EXT_OPLL | (addr as u32) << 8 | data as u32);
+                }
             }
             Ok(Event::Write { chip: Chip::Opl, port, addr, data }) => {
                 // OPL2/OPL3 играем на нашем OPL3: port = банк регистров

@@ -39,6 +39,9 @@ CHIPS = {
     "ym2608": (0x56, 0x48, 7_987_200),
     "ay8910": (0xA0, 0x74, 1_789_772),
     "scc": (0xD2, 0x9C, 1_789_772),
+    "vrc7": (0x51, 0x10, 3_579_545 | 0x80000000),   # бит 31 — VRC7
+    "ym2413": (0x51, 0x10, 3_579_545),
+    "ym3812": (0x5A, 0x50, 3_579_545),
 }
 
 
@@ -127,6 +130,33 @@ def scc_note(path, period, secs=2.0):
     open(path, "wb").write(bytes(header(off, clk, secs)) + bytes(w + tail(secs)))
 
 
+def opll_note(path, chip, block, fnum, secs=2.0):
+    """Синус на первом канале OPLL: пользовательский патч с заглушенным
+    модулятором, несущая с мгновенной атакой."""
+    cmd, off, clk = CHIPS[chip]
+    w = bytearray()
+    patch = (0x21, 0x21, 0x3F, 0x00, 0xF0, 0xF0, 0x07, 0x07)
+    regs = list(enumerate(patch))
+    regs += [(0x30, 0x00), (0x10, fnum & 0xFF),
+             (0x20, 0x10 | (block << 1) | (fnum >> 8))]
+    for a, d in regs:
+        w += bytes([cmd, a, d])
+    open(path, "wb").write(bytes(header(off, clk, secs)) + bytes(w + tail(secs)))
+
+
+def opl2_note(path, block, fnum, secs=2.0):
+    """Синус на первом канале OPL2: модулятор заглушен, несущая с
+    мгновенной атакой и без спада."""
+    cmd, off, clk = CHIPS["ym3812"]
+    w = bytearray()
+    regs = [(0x01, 0x20), (0x20, 0x21), (0x23, 0x21), (0x40, 0x3F), (0x43, 0x00),
+            (0x60, 0xF0), (0x63, 0xF0), (0x80, 0x07), (0x83, 0x07), (0xC0, 0x00),
+            (0xA0, fnum & 0xFF), (0xB0, 0x20 | (block << 2) | (fnum >> 8))]
+    for a, d in regs:
+        w += bytes([cmd, a, d])
+    open(path, "wb").write(bytes(header(off, clk, secs)) + bytes(w + tail(secs)))
+
+
 def peak(path, secs):
     """Частота самого сильного тона, сетка 1/48 октавы."""
     s, rate = ab.read_wav(path, secs)
@@ -196,6 +226,16 @@ def main():
         for period in (256, 512):
             scc_note(src, period)
             compare(v, f"scc период={period}")
+    for chip in ("vrc7", "ym2413"):
+        if only and chip != only:
+            continue
+        for block, fnum in ((4, 0x16B), (5, 0x1AC)):
+            opll_note(src, chip, block, fnum)
+            compare(v, f"{chip} block={block} fnum={fnum}")
+    if not only or only == "ym3812":
+        for block, fnum in ((4, 0x2D6), (5, 0x358)):
+            opl2_note(src, block, fnum)
+            compare(v, f"ym3812 block={block} fnum={fnum}")
     return 0
 
 
