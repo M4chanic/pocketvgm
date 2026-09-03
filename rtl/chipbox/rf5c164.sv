@@ -115,9 +115,20 @@ module rf5c164 (
   reg [2:0] step_idx = 0;
   reg [26:0] next_addr = 0;
 
-  wire [11:0] mul_l = {4'd0, pan[cur][3:0]} * env[cur];
-  wire [11:0] mul_r = {4'd0, pan[cur][7:4]} * env[cur];
-  wire [6:0] mag = mem_data[6:0];
+  // Байт памяти и произведение панорамы с огибающей берутся через
+  // регистр: от мультиплексора арбитра через два умножения, сумму и
+  // насыщение до выхода набегало 18.7 нс при периоде 17.5. Задержка в
+  // один такт на приём байта безобидна — между байтами сотни тактов.
+  reg [7:0] md = 0;
+  reg mv = 0;
+  reg [11:0] mul_l = 0, mul_r = 0;
+  always @(posedge clk) begin
+    md <= mem_data;
+    mv <= mem_valid;
+    mul_l <= {4'd0, pan[cur][3:0]} * env[cur];
+    mul_r <= {4'd0, pan[cur][7:4]} * env[cur];
+  end
+  wire [6:0] mag = md[6:0];
 
   // Произведение считается ШИРОКИМ и отдельной строкой.
   //
@@ -131,8 +142,8 @@ module rf5c164 (
   wire signed [20:0] amp_r = $signed({7'd0, prod_r[18:5]});
 
   // Знак-величина: старший бит задаёт сторону, остальные семь — амплитуду
-  wire signed [20:0] add_l = mem_data[7] ? amp_l : -amp_l;
-  wire signed [20:0] add_r = mem_data[7] ? amp_r : -amp_r;
+  wire signed [20:0] add_l = md[7] ? amp_l : -amp_l;
+  wire signed [20:0] add_r = md[7] ? amp_r : -amp_r;
 
   always @(posedge clk) begin
     step_ch <= 0;
@@ -163,8 +174,8 @@ module rf5c164 (
           end
         end
         S_WAIT:
-          if (mem_valid) begin
-            if (mem_data == 8'hFF) begin
+          if (mv) begin
+            if (md == 8'hFF) begin
               // Метка конца: прыжок на начало петли. Если и там метка,
               // канал считается мёртвым и молчит до следующего запуска.
               if (looped) begin
