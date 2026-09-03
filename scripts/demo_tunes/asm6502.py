@@ -4,7 +4,7 @@
 OPS = {
     ('LDA', 'imm'): 0xA9, ('LDA', 'abs'): 0xAD, ('LDA', 'indy'): 0xB1,
     ('STA', 'abs'): 0x8D, ('STA', 'zp'): 0x85,
-    ('LDY', 'imm'): 0xA0,
+    ('LDY', 'imm'): 0xA0, ('LDX', 'imm'): 0xA2, ('DEX', '-'): 0xCA,
     ('INY', '-'): 0xC8,
     ('DEC', 'zp'): 0xC6,
     ('INC', 'zp'): 0xE6,

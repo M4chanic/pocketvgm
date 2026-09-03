@@ -545,9 +545,15 @@ static int nsf_file(const char* path, const char* out, double seconds) {
     };
     static const uint8_t vecs[6] = {0x14, 0x50, 0x00, 0x50, 0x14, 0x50};
 
+    // Байт расширений $7B: бит 1 — VRC7. Транслятор OPLL получает записи
+    // с шины 6502 ($9010/$9030), рег 0x34 = 3; OPL3 тактуется как OPL2;
+    // гейн OPLL тот же, что в VGM-пути (см. фирмварь, OPLL_GAIN)
+    bool has_vrc7 = (d[0x7B] & 0x02) != 0;
     Tb tb;
     mute_all(tb);
-    tb.wb(0xC, true, 80);    // см. комментарий в фирмвари: APU шёл на ~5 дБ ниже эталона
+    tb.wb(0xC, true, 80 | (has_vrc7 ? (opll_gain_opt ? opll_gain_opt : 11u) << 24 : 0));
+    tb.wb(0x34, true, has_vrc7 ? 3u : 0u);
+    if (has_vrc7) tb.wb(0x14, true, (uint32_t)((double)(3579545ull * 64 / 9) / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0x2D, true, nes_flt_opt);   // выходной тракт NES, см. --nes-filter
     tb.wb(0xB, true, (uint32_t)(1789773.0 / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0xF, true, (uint32_t)(60.0 / CLK_HZ * 4294967296.0 + 0.5));
