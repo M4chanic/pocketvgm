@@ -216,12 +216,24 @@ module fds (
   // завернуть в диапазон -64..191
   wire signed [15:0] mod_wrap = mod_rnd >= 16'sd192 ? mod_rnd - 16'sd256
                               : mod_rnd < -16'sd64 ? mod_rnd + 16'sd256 : mod_rnd;
-  wire signed [23:0] mod_pitch = $signed({12'd0, freq_wav}) * mod_wrap;
+  // Две ступени регистров: первое умножение с округлением и завёрткой,
+  // потом второе. Одной цепочкой это давало путь 24 нс при периоде 17.5.
+  // Входы (mod_pos, огибающая, freq_wav) меняются по тику cen раз в 32
+  // такта, так что к следующему тику ступени давно сошлись; отличие от
+  // прежнего только если регистр записан за такт до тика — тогда новое
+  // значение войдёт в шаг тиком позже.
+  reg signed [15:0] mod_wrap_r = 0;
+  reg signed [23:0] mod_amount_r = 0;
+  wire signed [23:0] mod_pitch = $signed({12'd0, freq_wav}) * mod_wrap_r;
   // сдвиг на 6 с округлением к ближайшему
   wire signed [23:0] mod_final = (mod_pitch >>> 6) + ((mod_pitch[5:0] >= 6'd32) ? 24'sd1 : 24'sd0);
   wire signed [23:0] mod_amount = env_out_mod != 0 ? mod_final : 24'sd0;
+  always @(posedge clk) begin
+    mod_wrap_r <= mod_wrap;
+    mod_amount_r <= mod_amount;
+  end
   // Ширина с запасом: freq_wav до 4095, модуляция до примерно +-12000.
-  wire signed [15:0] wav_step = $signed({4'd0, freq_wav}) + mod_amount[15:0];
+  wire signed [15:0] wav_step = $signed({4'd0, freq_wav}) + mod_amount_r[15:0];
 
   wire [5:0] vol_capped = env_out_vol > 6'd32 ? 6'd32 : env_out_vol;
 
