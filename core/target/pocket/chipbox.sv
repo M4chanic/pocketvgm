@@ -2420,8 +2420,17 @@ module chipbox #(
 `endif
   end
 
-  wire signed [25:0] mix_l = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + fds_g + rf5c_l_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
-  wire signed [25:0] mix_r = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + fds_g + rf5c_r_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
+  // Сумма шестнадцати слагаемых считается своим тактом и регистрируется:
+  // дальше по подотсчёту идут усреднение, насыщение, фильтры и сведение,
+  // и всё это одной цепочкой от регистров гейнов до выхода давало 20 нс
+  // при периоде 17.5. Задержка в один такт (17 нс) на 48 кГц незаметна.
+  wire signed [25:0] mix_l_c = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + fds_g + rf5c_l_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
+  wire signed [25:0] mix_r_c = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + fds_g + rf5c_r_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
+  reg signed [25:0] mix_l = 0, mix_r = 0;
+  always @(posedge clk) begin
+    mix_l <= mix_l_c;
+    mix_r <= mix_r_c;
+  end
 
   function automatic signed [15:0] sat16(input signed [25:0] v);
     sat16 = v > 32767 ? 16'd32767 : v < -32768 ? -16'd32768 : v[15:0];
