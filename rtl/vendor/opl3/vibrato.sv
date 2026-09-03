@@ -47,37 +47,37 @@ module vibrato
 (
     input wire clk,
     input wire sample_clk_en,
+    input wire [BANK_NUM_WIDTH-1:0] bank_num,
+    input wire [OP_NUM_WIDTH-1:0] op_num,
     input wire [REG_FNUM_WIDTH-1:0] fnum,
     input wire dvb,
-    output logic [VIB_VAL_WIDTH-1:0] vib_val_p2 = 0
+    output logic signed [VIB_VAL_WIDTH:0] vib_val_p0
 );
+    // m4pocket: rewritten after Nuked OPL3 (die-verified). Upstream counted
+    // the LFO once per operator slot (36x too fast, 109 Hz here with one
+    // bank) and added the offset after the block shift and multiplier, so
+    // the depth shrank with the octave. The offset now goes to F-number
+    // before the shift, from a counter that steps once per sample.
     localparam VIBRATO_INDEX_WIDTH = 13;
 
-    logic [VIBRATO_INDEX_WIDTH-1:0] vibrato_index_p1 = 0;
-    logic [VIB_VAL_WIDTH-1:0] delta0_p1;
-    logic [VIB_VAL_WIDTH-1:0] delta1_p1;
-    logic [VIB_VAL_WIDTH-1:0] delta2_p1;
-    logic [REG_FNUM_WIDTH-1:0] fnum_p1 = 0;
-    logic dvb_p1 = 0;
-
-    always_ff @(posedge clk) begin
-        fnum_p1 <= fnum;
-        dvb_p1 <= dvb;
-    end
+    logic [VIBRATO_INDEX_WIDTH-1:0] vibrato_index = 0;
+    logic [2:0] pos;
+    logic [VIB_VAL_WIDTH-1:0] range0, range1, range2;
 
     /*
      * Low-Frequency Oscillator (LFO)
-     * 6.07Hz (Sample Freq/2**13)
+     * 6.07Hz (Sample Freq/2**13): one count per sample
      */
     always_ff @(posedge clk)
-        if (sample_clk_en)
-            vibrato_index_p1 <= vibrato_index_p1 + 1;
+        if (sample_clk_en && bank_num == 0 && op_num == 0)
+            vibrato_index <= vibrato_index + 1;
 
-    always_comb delta0_p1 = fnum_p1 >> 7;
-    always_comb delta1_p1 = ((vibrato_index_p1 >> 10) & 3) == 3 ? delta0_p1 >> 1 : delta0_p1;
-    always_comb delta2_p1 = !dvb_p1 ? delta1_p1 >> 1 : delta1_p1;
-
-    always_ff @(posedge clk)
-        vib_val_p2 <= ((vibrato_index_p1 >> 10) & 4) != 0 ? ~delta2_p1 : delta2_p1;
+    always_comb begin
+        pos = vibrato_index[12:10];
+        range0 = fnum >> 7;
+        range1 = (pos & 3) == 0 ? '0 : (pos & 1) ? range0 >> 1 : range0;
+        range2 = dvb ? range1 : range1 >> 1;
+        vib_val_p0 = pos[2] ? -$signed({1'b0, range2}) : $signed({1'b0, range2});
+    end
 endmodule
 `default_nettype wire
