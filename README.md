@@ -48,6 +48,7 @@ default Console bitstream; the second needs the Arcade one.
 | Game Boy | `.gbs` | SM83 + Game Boy APU |
 | Commodore 64 | `.sid` | SID 6581/8580 + 6502 |
 | PC Engine / TurboGrafx-16 | `.vgm` `.vgz` | HuC6280 |
+| Vectrex | `.vgm` `.vgz` | AY-3-8912 |
 | MSX | `.vgm` `.vgz` | AY-3-8910, Konami SCC |
 | NEC PC-88, PC-98 | `.vgm` `.vgz` | YM2203, YM2608 (melodic part) |
 | ZX Spectrum | `.vgm` `.vgz` | AY-3-8910 |

@@ -21,7 +21,7 @@ game plays but is incomplete — those cases are called out.
 | YM2612 / YM3438 (OPN2) | ~41 | Mega Drive / Genesis | jt12 |
 | SN76489 (PSG, incl. T6W28) | ~38 | Mega Drive, Master System, Game Gear | jt89 |
 | NES APU (2A03) + VRC6 | ~24 | NES / Famicom | NES_MiSTer + custom |
-| AY-3-8910 / YM2149 | ~14 | MSX, ZX Spectrum, Famicom 5B | jt49 |
+| AY-3-8910 / YM2149 | ~14 | MSX, ZX Spectrum, Famicom 5B, Vectrex | jt49 |
 | SID 6581/8580 | — | Commodore 64 (SID files) | C64_MiSTer |
 | Game Boy DMG APU | ~4 | Game Boy (GBS) | VerilogBoy |
 | SCC / K051649 | ~6 | MSX (Konami) | IKASCC |
