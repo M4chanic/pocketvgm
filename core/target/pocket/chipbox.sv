@@ -2501,6 +2501,8 @@ module chipbox #(
   localparam NF_W = 27;
   reg signed [NF_W-1:0] nf_h1x_l = 0, nf_h1y_l = 0, nf_h2x_l = 0, nf_h2y_l = 0, nf_lp_l = 0;
   reg signed [NF_W-1:0] nf_h1x_r = 0, nf_h1y_r = 0, nf_h2x_r = 0, nf_h2y_r = 0, nf_lp_r = 0;
+  reg signed [NF_W-1:0] nf_s1r_l = 0, nf_s1r_r = 0, nf_s2r_l = 0, nf_s2r_r = 0;  // ступени
+  reg [1:0] nf_st = 0;
 
   // Коэффициенты подобраны так, чтобы обойтись сдвигами и сложениями:
   // умножители в проекте на исходе. a = 1 - 3/256 даёт срез 90.6 Гц,
@@ -2569,10 +2571,10 @@ module chipbox #(
   wire signed [NF_W-1:0] nf_in_r = {{(NF_W - 24) {md_out_r[15]}}, md_out_r, 8'b0};
   wire signed [NF_W-1:0] nf_s1_l = nf_hp90(nf_h1y_l + nf_in_l - nf_h1x_l);
   wire signed [NF_W-1:0] nf_s1_r = nf_hp90(nf_h1y_r + nf_in_r - nf_h1x_r);
-  wire signed [NF_W-1:0] nf_s2_l = nf_hp440(nf_h2y_l + nf_s1_l - nf_h2x_l);
-  wire signed [NF_W-1:0] nf_s2_r = nf_hp440(nf_h2y_r + nf_s1_r - nf_h2x_r);
-  wire signed [NF_W-1:0] nf_pick_l = nes_flt_mode == 2'd0 ? nf_s2_l : nf_s1_l;
-  wire signed [NF_W-1:0] nf_pick_r = nes_flt_mode == 2'd0 ? nf_s2_r : nf_s1_r;
+  wire signed [NF_W-1:0] nf_s2_l = nf_hp440(nf_h2y_l + nf_s1r_l - nf_h2x_l);
+  wire signed [NF_W-1:0] nf_s2_r = nf_hp440(nf_h2y_r + nf_s1r_r - nf_h2x_r);
+  wire signed [NF_W-1:0] nf_pick_l = nes_flt_mode == 2'd0 ? nf_s2r_l : nf_s1r_l;
+  wire signed [NF_W-1:0] nf_pick_r = nes_flt_mode == 2'd0 ? nf_s2r_r : nf_s1r_r;
 `endif
 
   // Накопитель усреднения: держит первый подотсчёт до второго
@@ -2647,16 +2649,20 @@ module chipbox #(
         lpf_x0_r <= sat16(avg_r);
         // Тракт NES стоит за трактом Mega Drive. Оба сразу не включаются
         // никогда: режим ставит фирмварь по тому, какой это файл.
+        //
+        // Три ступени считаются в три такта, по одному умножению на
+        // такт: здесь первый ФВЧ, дальше второй и ФНЧ (nf_st). Одной
+        // цепочкой они давали путь 31 нс при периоде 17.5 — с этого
+        // коммита (5e030f7) slack главного клока и ушёл с −0.2 на −14.
+        // Результат тот же бит в бит: выход читается только на границе
+        // подотсчёта, а до неё 1190 тактов.
         nf_h1x_l <= nf_in_l;
         nf_h1y_l <= nf_s1_l;
-        nf_h2x_l <= nf_s1_l;
-        nf_h2y_l <= nf_s2_l;
-        nf_lp_l <= nf_lp_l + nf_lp14k(nf_pick_l - nf_lp_l);
+        nf_s1r_l <= nf_s1_l;
         nf_h1x_r <= nf_in_r;
         nf_h1y_r <= nf_s1_r;
-        nf_h2x_r <= nf_s1_r;
-        nf_h2y_r <= nf_s2_r;
-        nf_lp_r <= nf_lp_r + nf_lp14k(nf_pick_r - nf_lp_r);
+        nf_s1r_r <= nf_s1_r;
+        nf_st <= 2'd1;
         chip_left  <= out_mode == 2'd1 ? mono_of(out_pre_l, out_pre_r)
                     : out_mode == 2'd2 ? narrow_of(out_pre_l, out_pre_r)
                     : out_pre_l;
@@ -2676,6 +2682,22 @@ module chipbox #(
     end else begin
       sub_cnt <= sub_cnt + 1'b1;
     end
+`ifdef M4_HAS_HOME
+    // Ступени 2 и 3 фильтра NES, по такту на каждую
+    if (nf_st == 2'd1) begin
+      nf_h2x_l <= nf_s1r_l;
+      nf_h2y_l <= nf_s2_l;
+      nf_s2r_l <= nf_s2_l;
+      nf_h2x_r <= nf_s1r_r;
+      nf_h2y_r <= nf_s2_r;
+      nf_s2r_r <= nf_s2_r;
+      nf_st <= 2'd2;
+    end else if (nf_st == 2'd2) begin
+      nf_lp_l <= nf_lp_l + nf_lp14k(nf_pick_l - nf_lp_l);
+      nf_lp_r <= nf_lp_r + nf_lp14k(nf_pick_r - nf_lp_r);
+      nf_st <= 2'd0;
+    end
+`endif
 
     // пульсы доменов: смена выходного сэмпла GB/OPL
     gb_beat_prev <= gb_left_s;
