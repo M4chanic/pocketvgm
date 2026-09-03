@@ -51,8 +51,14 @@ module opll2opl (
   reg [15:0] q_mem [0:31];
   reg  [5:0] q_wr = 0;
   reg  [5:0] q_rd = 0;
+  reg [15:0] q_q = 0;         // синхронное чтение головы очереди: так
+                              // Quartus выводит память, а не 512 триггеров
   wire       q_empty = q_wr == q_rd;
   assign full = (q_wr - q_rd) == 6'd32;
+  always @(posedge clk) begin
+    if (wr && !full) q_mem[q_wr[4:0]] <= {addr, data};
+    q_q <= q_mem[q_rd[4:0]];
+  end
 
   // --------------------------------------------------------------------
   // ПЗУ патчей: два набора по 19 инструментов (0 — пользовательский,
@@ -224,6 +230,9 @@ module opll2opl (
   reg [1:0]  init_step = 0;
   reg        pre = 0;         // выдаётся запись-преамбула (0xBD), обход после неё
   reg [7:0]  pa = 0;
+  reg        q_fresh = 0;     // q_rd только что сдвинулся, q_q ещё старая
+  reg        q_avail = 0;     // !q_empty с задержкой на такт: запись в
+                              // пустую очередь доходит до q_q через два
 
   wire       rhy_ch = rhythm && ch >= 4'd6;
   wire [4:0] inst5  = rhy_ch ? 5'd10 + {1'b0, ch} : {1'b0, inst[ch]};
@@ -256,6 +265,8 @@ module opll2opl (
       inited <= 0;
       init_step <= 0;
       pre <= 0;
+      q_fresh <= 0;
+      q_avail <= 0;
       for (i = 0; i < 8; i = i + 1) user[i] <= 8'd0;
       for (i = 0; i < 9; i = i + 1) begin
         inst[i] <= 4'd0;
@@ -264,19 +275,19 @@ module opll2opl (
         blk[i]  <= 3'd0;
       end
     end else begin
-      if (wr && !full) begin
-        q_mem[q_wr[4:0]] <= {addr, data};
-        q_wr <= q_wr + 1'b1;
-      end
+      if (wr && !full) q_wr <= q_wr + 1'b1;
+      q_fresh <= 0;
+      q_avail <= !q_empty;
 
       case (st)
         S_IDLE: begin
           if (!inited) begin
             st <= S_INIT;
-          end else if (!q_empty) begin
-            c_addr <= q_mem[q_rd[4:0]][15:8];
-            c_data <= q_mem[q_rd[4:0]][7:0];
+          end else if (q_avail && !q_fresh) begin
+            c_addr <= q_q[15:8];
+            c_data <= q_q[7:0];
             q_rd <= q_rd + 1'b1;
+            q_fresh <= 1;
             st <= S_DEC;
           end
         end
