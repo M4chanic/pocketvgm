@@ -107,12 +107,12 @@ jobs:
           create_timing_netlist
           read_sdc
           update_timing_netlist
-          report_timing -setup -npaths 10 -detail full_path -file sta_paths.txt
+          report_timing -setup -npaths 10 -detail full_path -file /build/sta_paths.txt
           project_close
           TCL
           docker run --rm -v "$PWD":/build -w /build raetro/quartus:21.1 \
             quartus_sta -t sta_paths.tcl || true
-          head -120 sta_paths.txt || true
+          head -220 sta_paths.txt || true
 
       - name: Worst setup slack -> slack.txt
         run: |
