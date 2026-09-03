@@ -10,6 +10,7 @@
     make -C sim/opll_tb && make -C sim/opl3_tb
     python3 scripts/opll_fast.py файл.vgz 3            весь OPLL, 3 секунды
     python3 scripts/opll_fast.py файл.vgz 3 0b000100   только канал 2
+    python3 scripts/opll_fast.py файл.vgz 3 0x3ff      бит 9 — ритм-секция YM2413
 """
 import sys, gzip, struct, subprocess, math, wave, os, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +21,7 @@ ab_suite.find_tools()
 VGM2WAV = ab_suite.VGM2WAV
 if not VGM2WAV:
     sys.exit("нет vgm2wav — соберите libvgm, см. шапку ab_compare.py")
-src=sys.argv[1]; secs=float(sys.argv[2]); chmask=int(sys.argv[3],0) if len(sys.argv)>3 else 0x1ff
+src=sys.argv[1]; secs=float(sys.argv[2]); chmask=int(sys.argv[3],0) if len(sys.argv)>3 else 0x3ff
 d=bytearray(gzip.open(src).read() if src.endswith('z') else open(src,'rb').read())
 vrc7=(struct.unpack_from('<I',d,0x10)[0]>>31)&1
 off=0x34+struct.unpack_from('<I',d,0x34)[0]
@@ -34,6 +35,7 @@ while i<len(d) and t<secs*44100:
     if b==0x51:
         a,v=d[i+1],d[i+2]; keep=True
         if a>=0x10 and a<=0x38 and (a&0x0f)<9 and not (chmask>>(a&0x0f))&1: keep=False
+        if a==0x0E and not (chmask>>9)&1: keep=False   # бит 9 маски — ритм-секция
         if keep: flush(); lines.append('%02x %02x'%(a,v)); out+=d[i:i+3]
         i+=3
     elif b==0x61: n=struct.unpack_from('<H',d,i+1)[0]; t+=n; pend+=n; out+=d[i:i+3]; i+=3
@@ -47,7 +49,7 @@ while i<len(d) and t<secs*44100:
         else: out+=d[i:i+n]
         i+=n
 flush(); out.append(0x66); struct.pack_into('<I',out,4,len(out)-4)
-if len(out)>0x88: struct.pack_into('<I',out,0x84,0)   # без APU: у эталона он даёт постоянную составляющую
+if off>=0x88: struct.pack_into('<I',out,0x84,0)   # без APU (у эталона он даёт постоянную составляющую); у коротких заголовков поля нет
 open(f'{S}/of.vgm','wb').write(out)
 subprocess.run([str(VGM2WAV),'--samplerate','48000',f'{S}/of.vgm',f'{S}/of_ref.wav'],capture_output=True)
 p1=subprocess.run([f'{ROOT}/sim/opll_tb/opll_tb',str(vrc7),'step','q'],input='\n'.join(lines)+'\n',capture_output=True,text=True)
