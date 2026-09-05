@@ -243,7 +243,20 @@ impl Header {
             return Err(Error::BadOffset);
         }
         // Поля часов действительны только до начала данных.
-        let hdr_end = data_offset.min(0x100);
+        //
+        // И до extra header: его смещение (0xBC, VGM 1.70) вполне может
+        // указывать на 0xC0, то есть прямо на поля версии 1.71. У рипов
+        // с VRC7 так и есть, и размер extra header (12) читался как
+        // тактовая WonderSwan — на экране Lagrange Point появлялось
+        // «(no WonderSwan)».
+        let mut hdr_end = data_offset.min(0x100);
+        if hdr_end > 0xC0 {
+            let rel = rd32(d, 0xBC).unwrap_or(0) as usize;
+            if rel != 0 {
+                hdr_end = hdr_end.min(0xBC + rel);
+            }
+        }
+        let hdr_end = hdr_end;
 
         let loop_off_raw = rd32(d, 0x1C)?;
         let loop_offset = if loop_off_raw != 0 {
@@ -991,6 +1004,30 @@ mod tests {
         assert!(c.fds);
         // сам APU остаётся с честной частотой, без флага в старшем бите
         assert_eq!(c.nes_apu, 1_789_773);
+    }
+
+    /// Extra header (1.70) кладут прямо на поля 1.71, и тогда его размер
+    /// нельзя читать как тактовую. У рипов Lagrange Point смещение по
+    /// 0xBC равно 4, то есть заголовок начинается с 0xC0, а там по спеке
+    /// WonderSwan: на экране появлялось «(no WonderSwan)».
+    #[test]
+    fn extra_header_is_not_a_wonderswan_clock() {
+        let mut v = alloc::vec![0u8; 0x100];
+        v[0..4].copy_from_slice(VGM_MAGIC);
+        v[0x08..0x0C].copy_from_slice(&0x0170u32.to_le_bytes());
+        v[0x34..0x38].copy_from_slice(&(0x100u32 - 0x34).to_le_bytes());
+        v[0x10..0x14].copy_from_slice(&(3_579_545u32 | 0x8000_0000).to_le_bytes());
+        v[0xBC..0xC0].copy_from_slice(&4u32.to_le_bytes()); // extra header на 0xC0
+        v[0xC0..0xC4].copy_from_slice(&12u32.to_le_bytes()); // его размер
+        v.push(0x66);
+        let eof = (v.len() - 4) as u32;
+        v[0x04..0x08].copy_from_slice(&eof.to_le_bytes());
+
+        let c = Header::parse(&v).unwrap().clocks;
+        assert_eq!(c.wonderswan, 0);
+        // поля до extra header читаются как обычно
+        assert_eq!(c.ym2413, 3_579_545);
+        assert!(c.vrc7);
     }
 
     /// Маска стерео Game Gear — не запись в регистр PSG.
