@@ -2298,8 +2298,11 @@ module chipbox #(
   reg signed [18:0] gbl_hp_y = 0;
   reg signed [16:0] gbr_hp_x = 0;
   reg signed [18:0] gbr_hp_y = 0;
-  wire signed [16:0] gbl_wide = {1'b0, gb_left_s};
-  wire signed [16:0] gbr_wide = {1'b0, gb_right_s};
+  // Выход Game Boy теперь ЗНАКОВЫЙ: ЦАП приставки биполярный, см. правку
+  // в sound.v. Раньше здесь стоял ноль в старшем разряде, и знаковый
+  // сигнал читался бы как громадное положительное число.
+  wire signed [16:0] gbl_wide = {gb_left_s[15], gb_left_s};
+  wire signed [16:0] gbr_wide = {gb_right_s[15], gb_right_s};
 
   reg signed [16:0] sid_hp_x = 0;
   reg signed [18:0] sid_hp_y = 0;
@@ -2325,6 +2328,17 @@ module chipbox #(
   // «прилипает» и остаётся постоянный DC
   function automatic signed [18:0] hp_leak(input signed [18:0] y);
     hp_leak = (y >>> 11) != 0 ? (y >>> 11) : y > 0 ? 19'sd1 : y < 0 ? -19'sd1 : 19'sd0;
+  endfunction
+
+  // У Game Boy блокер свой и круче общего: на приставке выход развязан
+  // конденсатором с коэффициентом заряда 0.999958 на такт 4.194 МГц, то
+  // есть срез около 28 Гц (эталон SameBoy считает ровно это). Общие
+  // 7.5 Гц оставляли постоянную составляющую ноты висеть на десятки
+  // миллисекунд: при выключенном ЦАП выход уже точно ноль, а внутри ноты
+  // среднее уезжало на восьмую часть размаха. Сдвиг на 9 даёт
+  // 96000/(2*pi*512) = 29.8 Гц.
+  function automatic signed [18:0] hp_leak_gb(input signed [18:0] y);
+    hp_leak_gb = (y >>> 9) != 0 ? (y >>> 9) : y > 0 ? 19'sd1 : y < 0 ? -19'sd1 : 19'sd0;
   endfunction
 `ifdef M4_HAS_ARCADE
   wire signed [15:0] adpcm_l = adpcm_pan[0] ? 16'sd0 : adpcm_wide;
@@ -2685,9 +2699,9 @@ module chipbox #(
       fds_hp_y <= (fds_wide - fds_hp_x) + (fds_hp_y - hp_leak(fds_hp_y));
       fds_hp_x <= fds_wide;
 `ifdef M4_HAS_HOME
-      gbl_hp_y <= (gbl_wide - gbl_hp_x) + (gbl_hp_y - hp_leak(gbl_hp_y));
+      gbl_hp_y <= (gbl_wide - gbl_hp_x) + (gbl_hp_y - hp_leak_gb(gbl_hp_y));
       gbl_hp_x <= gbl_wide;
-      gbr_hp_y <= (gbr_wide - gbr_hp_x) + (gbr_hp_y - hp_leak(gbr_hp_y));
+      gbr_hp_y <= (gbr_wide - gbr_hp_x) + (gbr_hp_y - hp_leak_gb(gbr_hp_y));
       gbr_hp_x <= gbr_wide;
 `ifdef M4_HAS_SID
       sid_hp_y <= (sid_wide17 - sid_hp_x) + (sid_hp_y - hp_leak(sid_hp_y));

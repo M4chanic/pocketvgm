@@ -309,6 +309,9 @@ const EXT_RF5C_PTR: u32 = 0x0800_0000;
 const EXT_RF5C_RAM: u32 = 0x0900_0000;
 /// Регистр OPLL (YM2413/VRC7): транслятор в chipbox переводит в OPL2
 const EXT_OPLL: u32 = 0x0A00_0000;
+/// Гейн Game Boy — один и тот же для VGM и GBS, см. комментарий у записи
+/// регистра 0xC ниже.
+const GB_GAIN: u32 = 46;
 /// PWM Sega 32X: [14:12] регистр, [11:0] значение
 const EXT_PWM: u32 = 0x0B00_0000;
 /// Гейн OPLL на OPL3 (VGM и NSF). Снят синтетическим синусом против NES
@@ -1383,9 +1386,11 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     chipbox_write(0xF, ((num << 32) / (den * CHIPBOX_CLK_HZ)) as u32);
     let play_hz = num / den;
 
-    // Только GB в миксе
+    // Только GB в миксе. Гейн тот же, что у Game Boy в VGM: раньше здесь
+    // стояло 64 против 110 у VGM, то есть один и тот же чип звучал в GBS
+    // на 4.7 дБ тише, чем в логе регистров.
     mute_all_chips();
-    chipbox_write(0xC, 64 << 8);
+    chipbox_write(0xC, GB_GAIN << 8);
 
     let num_songs = data[0x04].max(1);
     println!("GBS: {num_songs} песен, rate {play_hz} Гц; D-pad влево/вправо — переключение");
@@ -1456,7 +1461,7 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
         ctrl_reset();
         // гейны заново: стоп (hold) их глушит
         mute_all_chips();
-        chipbox_write(0xC, 64 << 8);
+        chipbox_write(0xC, GB_GAIN << 8);
         ctrl_mode(0xC); // gbs_mode | cpu_run
         println!("GBS: песня {}", s + 1);
     }, draw)
@@ -2688,7 +2693,15 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         0xC,
         gain_of(header, if opll { OPLL_GAIN } else if opl_clk != 0 { 16 } else { 0 }, opl_id) << 24
             | gain_of(header, if nes_clk != 0 { 80 } else { 0 }, 0x14)
-            // Game Boy: 110, а не 64 (2026-08-05). Ступенчатый тон на
+            // Game Boy: 46 (2026-09-05), было 110. ЦАП стал биполярным
+            // (правка в sound.v по эталону SameBoy), и размах каждого
+            // канала удвоился, а множитель общей громкости стал 8 вместо
+            // 7 — вместе это +7.45 дБ, замерено на синтетическом файле:
+            //     шум:  эталон -22.95 дБ, наше -15.37
+            //     волна: эталон -22.41, наше -15.09
+            // 110 / 10^(7.45/20) = 46.
+            //
+            // История прежнего числа: 110, а не 64 (2026-08-05). Тон на
             // ТАКТОВОЙ ЖЕЛЕЗА показал ровный недобор 4.66 дБ на всех
             // громкостях при точном совпадении формы кривой:
             //     громкость 15  -4.66 дБ    громкость 4  -4.65
@@ -2705,7 +2718,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             // Мерить это на быстрой сборке нельзя: на 8 МГц выходило
             // -5.05 дБ и мнимый провал на громкости 1 (-29.14 вместо
             // -23.5). См. память measure-at-the-real-clock.
-            | gain_of(header, if header.clocks.gb_dmg != 0 { 110 } else { 0 }, 0x13) << 8,
+            | gain_of(header, if header.clocks.gb_dmg != 0 { GB_GAIN } else { 0 }, 0x13) << 8,
     );
     ctrl_reset();
     // Game Boy в VGM: рипа с кодом нет, играет поток записей в APU.

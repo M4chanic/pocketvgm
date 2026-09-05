@@ -1277,7 +1277,7 @@ static int gbs_file(const char* path, const char* out, double seconds, double gb
     tb.wb(0xF, true, (uint32_t)(play_hz / CLK_HZ * 4294967296.0 + 0.5));
     tb.wb(0x10, true, phase_inc(gb_hz, "клок Game Boy")); // gb_clk: по умолчанию как на железе (8.388608 МГц -> ÷2 = 4.194 МГц)
     mute_all(tb);
-    tb.wb(0xC, true, 64u << 8);
+    tb.wb(0xC, true, 46u << 8);   // как в фирмвари, см. GB_GAIN
 
     // стаб как в фирмвари: RST/IRQ-трамплины JP LOAD+n ($00-$60),
     // тело на $00A0 (бут-инъекция железа приводит PC туда с $0000)
@@ -1989,7 +1989,7 @@ int main(int argc, char** argv) {
                  | gain_of(ym_clk ? 64u : 0u, 0x03));
     tb.wb(0xC, true, gain_of(opl_clk ? opl_base : 0u, opl_id) << 24
                    | gain_of(nes_clk ? (apu_gain_opt ? apu_gain_opt : 80u) : 0u, 0x14)
-                   | gain_of(gb_clk_hdr ? 110u : 0u, 0x13) << 8);   // уровень см. в фирмвари
+                   | gain_of(gb_clk_hdr ? 46u : 0u, 0x13) << 8);   // уровень см. в фирмвари
     // Выходной ФНЧ Mega Drive: только для файлов с YM2612 — у OPN-рипов
     // тот же jt12, но фильтра приставки в тракте нет. 0 = Model 1
     tb.wb(0x2C, true, fm_clk ? 0u : 3u);

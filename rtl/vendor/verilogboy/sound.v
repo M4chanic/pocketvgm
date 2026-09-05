@@ -321,28 +321,57 @@ module sound(
     assign right = (sound_enable) ? {mixed_s02[5:0], 14'b0} : 20'b0; 
     */
     
-    // Unsigned mixer
-    reg [5:0] added_s01;
-    reg [5:0] added_s02;
+    // m4pocket: ЦАП как на приставке — биполярный, и выключенный канал
+    // даёт РОВНО ноль.
+    //
+    // Эталон (SameBoy, apu.c): вклад канала = (0xF - 2*sample), то есть
+    // от +15 при нулевом отсчёте до -15 при пятнадцатом, а если ЦАП
+    // канала выключен, вклад ноль — середина, а не край шкалы. Здесь
+    // каналы складывались беззнаковыми 0..15: «канал молчит» и «канал
+    // выключен» давали одно и то же значение с КРАЯ шкалы, поэтому
+    // каждое включение и выключение канала двигало постоянную
+    // составляющую, а DC-блокер превращал сдвиг в толчок на 20-40 Гц.
+    // Замерено на Densha de Go! (Game Boy Color), где драйвер гасит ЦАП
+    // после каждой ноты: в полосе 40-80 Гц выходило +15.7 дБ против
+    // эталона, на 20 Гц +21, и при этом не хватало 9 дБ в 2.5-5 кГц.
+    //
+    // Общая громкость тоже поправлена: множитель на приставке равен
+    // (NR50 + 1), то есть 1..8, а не 0..7 — при нулевой громкости
+    // приставка играет тихо, а не молчит.
+    wire ch1_dac = |reg_nr12[7:3];
+    wire ch2_dac = |reg_nr22[7:3];
+    wire ch3_dac = reg_nr30[7];
+    wire ch4_dac = |reg_nr42[7:3];
+
+    function automatic signed [7:0] dac_out(input dac_on, input [3:0] level);
+        dac_out = dac_on ? (8'sd15 - $signed({4'b0000, level})) - $signed({4'b0000, level})
+                         : 8'sd0;
+    endfunction
+
+    reg signed [7:0] added_s01;
+    reg signed [7:0] added_s02;
     always @(*)
     begin
-        added_s01 = 6'd0;
-        added_s02 = 6'd0;
-        if (s01_ch1_enable) added_s01 = added_s01 + {2'b0, ch1};
-        if (s01_ch2_enable) added_s01 = added_s01 + {2'b0, ch2};
-        if (s01_ch3_enable) added_s01 = added_s01 + {2'b0, ch3};
-        if (s01_ch4_enable) added_s01 = added_s01 + {2'b0, ch4};
-        if (s02_ch1_enable) added_s02 = added_s02 + {2'b0, ch1};
-        if (s02_ch2_enable) added_s02 = added_s02 + {2'b0, ch2};
-        if (s02_ch3_enable) added_s02 = added_s02 + {2'b0, ch3};
-        if (s02_ch4_enable) added_s02 = added_s02 + {2'b0, ch4};
+        added_s01 = 8'sd0;
+        added_s02 = 8'sd0;
+        if (s01_ch1_enable) added_s01 = added_s01 + dac_out(ch1_dac, ch1);
+        if (s01_ch2_enable) added_s01 = added_s01 + dac_out(ch2_dac, ch2);
+        if (s01_ch3_enable) added_s01 = added_s01 + dac_out(ch3_dac, ch3);
+        if (s01_ch4_enable) added_s01 = added_s01 + dac_out(ch4_dac, ch4);
+        if (s02_ch1_enable) added_s02 = added_s02 + dac_out(ch1_dac, ch1);
+        if (s02_ch2_enable) added_s02 = added_s02 + dac_out(ch2_dac, ch2);
+        if (s02_ch3_enable) added_s02 = added_s02 + dac_out(ch3_dac, ch3);
+        if (s02_ch4_enable) added_s02 = added_s02 + dac_out(ch4_dac, ch4);
     end
-    
-    wire [8:0] mixed_s01 = added_s01 * s01_output_level;
-    wire [8:0] mixed_s02 = added_s02 * s02_output_level;
-    
-    assign left  = (sound_enable) ? {1'b0, mixed_s01[8:0], 6'b0} : 16'b0;
-    assign right = (sound_enable) ? {1'b0, mixed_s02[8:0], 6'b0} : 16'b0; 
+
+    wire signed [4:0] vol_s01 = $signed({2'b00, s01_output_level}) + 5'sd1;
+    wire signed [4:0] vol_s02 = $signed({2'b00, s02_output_level}) + 5'sd1;
+    wire signed [12:0] mixed_s01 = added_s01 * vol_s01;
+    wire signed [12:0] mixed_s02 = added_s02 * vol_s02;
+
+    // -480..+480 -> +-30720 в 16 знаковых битах
+    assign left  = (sound_enable) ? {mixed_s01[9:0], 6'b0} : 16'b0;
+    assign right = (sound_enable) ? {mixed_s02[9:0], 6'b0} : 16'b0; 
     
     // Debug Output
     assign ch1_level = ch1;
