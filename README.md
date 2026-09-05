@@ -47,9 +47,11 @@ default Console bitstream; the second needs the Arcade one.
 | System | Formats | Chips used |
 |---|---|---|
 | Sega Mega Drive / Genesis | `.vgm` `.vgz` `.gym` | YM2612 + SN76489 |
+| Sega 32X | `.vgm` `.vgz` | YM2612 + SN76489 + PWM |
+| Sega Mega CD | `.vgm` `.vgz` | YM2612 + SN76489 + RF5C164 |
 | Sega Master System, Game Gear | `.vgm` `.vgz` | SN76489 |
 | NES / Famicom | `.nsf` `.vgm` | NES APU + DMC, VRC6, VRC7, Sunsoft 5B |
-| Game Boy | `.gbs` | SM83 + Game Boy APU |
+| Game Boy, Game Boy Color | `.gbs` `.vgm` `.vgz` | SM83 + Game Boy APU |
 | PC Engine / TurboGrafx-16 | `.vgm` `.vgz` | HuC6280 |
 | Vectrex | `.vgm` `.vgz` | AY-3-8912 |
 | MSX | `.vgm` `.vgz` | AY-3-8910, Konami SCC |
@@ -192,6 +194,8 @@ are listed in [`rtl/vendor/VENDOR.md`](rtl/vendor/VENDOR.md)):
   Game Boy APU
 - [Arlet/verilog-6502](https://github.com/Arlet/verilog-6502) — 6502 for NSF
 - [gtaylormb/opl3_fpga](https://github.com/gtaylormb/opl3_fpga) — YMF262 (OPL3)
+- [libvgm](https://github.com/ValleyBell/libvgm) — the reference renderer this
+  project measures against, and the source of the 32X PWM scaling (Gens/GS)
 - [agg23/openfpga-litex](https://github.com/agg23/openfpga-litex) — base core:
   RISC-V SoC, APF bridge, openFPGA infrastructure
 - [freedoom](https://github.com/freedoom/freedoom) — GENMIDI GM patches for

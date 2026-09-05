@@ -171,6 +171,7 @@ static uint32_t apu_gain_opt = 0;
 // настоящий пик из рендера не виден.
 static uint32_t huc_gain_opt = 0;
 static uint32_t opll_gain_opt = 0;   // --opll-gain: гейн OPLL (YM2413/VRC7) на OPL3
+static uint32_t pwm_gain_opt = 64;   // --pwm-gain: гейн PWM 32X
 
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
     size_t n_in = pcm.size() / 2;
@@ -1493,6 +1494,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--apu-gain") && i + 1 < argc) { apu_gain_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--huc-gain") && i + 1 < argc) { huc_gain_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--opll-gain") && i + 1 < argc) { opll_gain_opt = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--pwm-gain") && i + 1 < argc) { pwm_gain_opt = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--out-rate-selftest")) { return outrate_selftest(); }
         else if (!strcmp(argv[i], "--vu-selftest")) { return vu_selftest(); }
         else if (!strcmp(argv[i], "--apu-selftest")) { return apu_selftest("apu_st.wav", 1.0); }
@@ -1580,12 +1582,13 @@ int main(int argc, char** argv) {
     uint32_t ym2608_clk = hdr_end >= 0x4C ? rd32(d, 0x48) & 0x3FFFFFFF : 0;
     uint32_t ym2203_clk = hdr_end >= 0x48 ? rd32(d, 0x44) & 0x3FFFFFFF : 0;
     uint32_t opn_clk = ym2608_clk ? ym2608_clk : ym2203_clk;
+    uint32_t pwm_clk = rd32(d, 0x70) & 0x3FFFFFFF;   // PWM 32X
     uint32_t rf5c_clk = rd32(d, 0x6C) & 0x3FFFFFFF;
     if (!rf5c_clk) rf5c_clk = rd32(d, 0x40) & 0x3FFFFFFF;   // родич RF5C68
 
     if (!ym_clk && !ay_clk && !pcm_clk && !adpcm_clk && !nes_clk && !fm_clk && !sn_clk && !opl_clk
         && !scc_clk && !k060_clk && !huc_clk && !opn_clk && !gb_clk_hdr
-        && !rf5c_clk && !ym2413_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
+        && !rf5c_clk && !ym2413_clk && !pwm_clk) { fprintf(stderr, "в файле нет поддержанных чипов\n"); return 1; }
 
     // VGM → командные слова chipbox (это же будет делать фирмварь)
     // + отдельно собираем data-блоки SegaPCM ROM (тип 0x80)
@@ -1757,6 +1760,15 @@ int main(int argc, char** argv) {
             pos += 2;
         }
         // HuC6280: 0xB9 рег знач -> OP_EXT|EXT_HUC
+        // PWM Sega 32X: 0xB2 ad dd -> регистр a, значение 12 бит.
+        // Разбор сверен с libvgm (Cmd_Ofs4_Data12); бит 7 первого байта —
+        // второй экземпляр чипа.
+        else if (cmd == 0xB2) {
+            if (d[pos] & 0x80) drop2++;
+            else cmds.push_back(0xFB000000u | (uint32_t)((d[pos] >> 4) & 7) << 12
+                                | (uint32_t)(d[pos] & 0x0F) << 8 | d[pos+1]);
+            pos += 2;
+        }
         else if (cmd == 0xB1) {
             // RF5C164: регистры чипа
             if (d[pos] & 0x80) drop2++;
@@ -1990,6 +2002,7 @@ int main(int argc, char** argv) {
     // при всех громких каналах не упереться в потолок 16 бит. Эталон такого
     // деления не делает, и без компенсации мы играли ровно на 12 дБ тише.
     tb.wb(0x32, true, rf5c_clk ? 255u : 0u);
+    tb.wb(0x37, true, pwm_clk ? (uint32_t)pwm_gain_opt : 0u);
     // Гейн дисковой приставки: старший бит поля NES APU. Значение
     // откалибровано по отношению к APU против эталона, см. фирмварь.
     tb.wb(0x31, true, (rd32(d, 0x84) & 0x80000000u) ? 46u : 0u);

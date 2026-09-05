@@ -87,6 +87,11 @@ pub enum Event {
     /// битом 7 байта регистра, и этот бит доезжал до чипа: записи второго
     /// экземпляра садились на регистры ПЕРВОГО и дрались с ними.
     SecondChip { cmd: u8 },
+    /// Запись в регистр PWM Sega 32X (команда 0xB2).
+    ///
+    /// Значение двенадцатибитное, в Write оно не помещается: там байт.
+    /// Регистры: 0 управление, 1 период, 2 левый, 3 правый, 4 оба.
+    PwmWrite { reg: u8, value: u16 },
     /// Запись байта в ОЗУ сэмплов RF5C164 (команда 0xC2).
     ///
     /// Рипы Mega CD пишут сэмплы не только в начале трека, но и по ходу,
@@ -594,7 +599,22 @@ impl<'a> Reader<'a> {
                 self.skip(2)?;
                 Event::SecondChip { cmd }
             }
-            0xB0 | 0xB2 | 0xB5 | 0xB6 | 0xBB..=0xBF => {
+            // PWM 32X: смещение в старшем полубайте, значение 12 бит.
+            // Разбор сверен с libvgm (Cmd_Ofs4_Data12): бит 7 первого
+            // байта — второй экземпляр чипа, его у нас нет.
+            0xB2 => {
+                let b1 = self.u8()?;
+                let b2 = self.u8()?;
+                if b1 & 0x80 != 0 {
+                    Event::SecondChip { cmd }
+                } else {
+                    Event::PwmWrite {
+                        reg: (b1 >> 4) & 0x07,
+                        value: ((b1 as u16 & 0x0F) << 8) | b2 as u16,
+                    }
+                }
+            }
+            0xB0 | 0xB5 | 0xB6 | 0xBB..=0xBF => {
                 self.skip(2)?;
                 Event::Write { chip: Chip::Unknown(cmd), port: 0, addr: 0, data: 0 }
             }
@@ -1004,6 +1024,24 @@ mod tests {
         assert!(c.fds);
         // сам APU остаётся с честной частотой, без флага в старшем бите
         assert_eq!(c.nes_apu, 1_789_773);
+    }
+
+    /// Команда PWM: регистр в старшем полубайте, значение 12 бит.
+    #[test]
+    fn parses_pwm_write() {
+        let body = [0xB2, 0x42, 0x34, 0xB2, 0xC0, 0x11, 0x66];
+        let mut v = alloc::vec![0u8; 0x40];
+        v[0..4].copy_from_slice(VGM_MAGIC);
+        v[0x08..0x0C].copy_from_slice(&0x0161u32.to_le_bytes());
+        v[0x34..0x38].copy_from_slice(&(0x40u32 - 0x34).to_le_bytes());
+        v.extend_from_slice(&body);
+        let eof = (v.len() - 4) as u32;
+        v[0x04..0x08].copy_from_slice(&eof.to_le_bytes());
+        let h = Header::parse(&v).unwrap();
+        let mut r = Reader::new(&v, h.data_offset);
+        assert_eq!(r.next_event().unwrap(), Event::PwmWrite { reg: 4, value: 0x234 });
+        // бит 7 — второй экземпляр чипа, играть его нечем
+        assert_eq!(r.next_event().unwrap(), Event::SecondChip { cmd: 0xB2 });
     }
 
     /// Extra header (1.70) кладут прямо на поля 1.71, и тогда его размер

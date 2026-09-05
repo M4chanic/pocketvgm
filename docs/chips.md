@@ -30,6 +30,7 @@ game plays but is incomplete — those cases are called out.
 | HuC6280 PSG | ~7 | PC Engine / TG-16 | custom |
 | Famicom Disk System | ~2 | FDS | custom |
 | RF5C164 / RF5C68 | ~2 | Sega Mega CD / CD 32X | custom |
+| PWM (32X) | ~1 | Sega 32X | custom |
 | YM2413 (OPLL) / VRC7 | ~5 | MSX-Music, NES (Lagrange Point) | opl3_fpga + custom register translator |
 
 ### Arcade

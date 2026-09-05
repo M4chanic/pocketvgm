@@ -195,6 +195,7 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
     if c.okim6295 != 0 { add("OKIM6295"); }
     if c.k053260 != 0 { add("K053260"); }
     if c.rf5c164 != 0 || c.rf5c68 != 0 { add("RF5C164"); }
+    if c.pwm != 0 { add("PWM"); }
     if c.ymf262 != 0 { add("OPL3"); }
     if c.ym3812 != 0 { add("OPL2"); }
     if c.ym3526 != 0 { add("OPL"); }
@@ -213,7 +214,6 @@ fn vgm_desc(c: &vgm_core::Clocks) -> (&'static str, String) {
         }
         silent.push_str(name);
     };
-    if c.pwm != 0 { off("PWM"); }
     if c.upd7759 != 0 { off("uPD7759"); }
     if c.wonderswan != 0 { off("WonderSwan"); }
     // Второго экземпляра чипа в железе нет. Раньше его записи молча
@@ -309,6 +309,8 @@ const EXT_RF5C_PTR: u32 = 0x0800_0000;
 const EXT_RF5C_RAM: u32 = 0x0900_0000;
 /// Регистр OPLL (YM2413/VRC7): транслятор в chipbox переводит в OPL2
 const EXT_OPLL: u32 = 0x0A00_0000;
+/// PWM Sega 32X: [14:12] регистр, [11:0] значение
+const EXT_PWM: u32 = 0x0B00_0000;
 /// Гейн OPLL на OPL3 (VGM и NSF). Снят синтетическим синусом против NES
 /// APU (gain_ratio.py vrc7, стенд на тактовой железа): на 16 наш VRC7
 /// был громче эталона на 3.5 дБ при обеих громкостях (0 и 4), то есть
@@ -2340,6 +2342,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
         && header.clocks.rf5c164 == 0
         && header.clocks.rf5c68 == 0
         && header.clocks.ym2413 == 0
+        && header.clocks.pwm == 0
     {
         println!("В этом VGM нет поддержанных чипов");
         return error_wait("VGM", "no supported chips in this file");
@@ -2642,6 +2645,10 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // Гейн 255, а не 64: модуль делит сумму восьми каналов на четыре ради
     // запаса по разрядности, и без компенсации мы тише эталона ровно на 12 дБ.
     chipbox_write(0x32, if rf5c_clk != 0 { 255 } else { 0 });
+    // PWM 32X: чип без собственной тактовой сетки — уровень целиком
+    // задаётся значениями из потока, поэтому делителя ему не нужно, только
+    // гейн. Номер чипа в таблице громкостей — 0x11 (как у libvgm).
+    chipbox_write(0x37, if header.clocks.pwm != 0 { gain_of(header, 64, 0x11) } else { 0 });
     // Гейн дисковой приставки, откалиброван по методу задачи 69:
     // синтетический файл, где сначала звучит импульсный канал APU, потом
     // волновая таблица FDS — оба в одном файле, поэтому множитель
@@ -2865,6 +2872,10 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             // Байт в ОЗУ сэмплов. Указатель шлём только когда он разорван:
             // рипы пишут длинными подряд идущими кусками, и слать пару на
             // каждый байт значило бы удвоить очередь на ровном месте.
+            // PWM 32X: регистр и 12 бит значения одним словом
+            Ok(Event::PwmWrite { reg, value }) => {
+                sink.push(OP_EXT | EXT_PWM | (reg as u32) << 12 | value as u32);
+            }
             Ok(Event::Rf5cMem { offset, data: d }) => {
                 let offset = (offset & 0x0FFF) | (rf5c_wbank as u16) << 12;
                 if offset != rf5c_ptr {

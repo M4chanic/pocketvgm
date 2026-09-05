@@ -203,6 +203,7 @@ module chipbox #(
   reg [31:0] nes_phase_inc = DEFAULT_NES_PHASE_INC;
   reg [7:0] apu_gain = 8'd64;
   reg [7:0] fds_gain = 8'd64;
+  reg [7:0] pwm_gain = 8'd64;
   reg [7:0] rf5c_gain = 8'd64;
   reg [7:0] gb_gain = 8'd64;
   // Вне M4_HAS_HOME вместе со своим стробом: модуль rf5c164 живёт в обоих
@@ -835,6 +836,7 @@ module chipbox #(
           6'h2E: {sn_sr15, sn_fb_mask} <= data_write[16:0];
           6'h2F: sn_stereo_en <= data_write[0];
           6'h31: fds_gain <= data_write[7:0];
+          6'h37: pwm_gain <= data_write[7:0];
           6'h32: rf5c_gain <= data_write[7:0];
           6'h33: rf5c_phase_inc <= data_write;
           6'h34: {vrc7_nsf_en, opll_set} <= data_write[1:0];
@@ -2242,6 +2244,25 @@ module chipbox #(
       .snd(fds_snd)
   );
 
+  // PWM Sega 32X: 12-битный ЦАП, вся музыка 32X идёт через него. Своего
+  // DC-блокера нет намеренно — эталон тоже без него, а постоянную
+  // составляющую конкретного рипа чип снимает сам (offset по первой
+  // записи, см. pwm32x.sv).
+  reg [2:0] pwm_sel = 0;
+  reg [11:0] pwm_din = 0;
+  reg pwm_wr = 0;
+  wire signed [15:0] pwm_l, pwm_r;
+
+  pwm32x pwm_i (
+      .clk(clk),
+      .rst(chip_reset),
+      .wr(pwm_wr),
+      .sel(pwm_sel),
+      .din(pwm_din),
+      .snd_l(pwm_l),
+      .snd_r(pwm_r)
+  );
+
   // DC-блокеры для однополярных источников (AY и NES APU держат
   // постоянное смещение): y[n] = x[n] - x[n-1] + y[n-1]*(1 - 2^-11),
   // обновление на подстробе 96 кГц => срез 96000/(2*pi*2048) = 7.5 Гц.
@@ -2317,6 +2338,7 @@ module chipbox #(
   wire signed [8:0] g_adpcm = {1'b0, mix_gains[31:24]};
   wire signed [8:0] g_apu = {1'b0, apu_gain};
   wire signed [8:0] g_fds = {1'b0, fds_gain};
+  wire signed [8:0] g_pwm = {1'b0, pwm_gain};
   // Выход RF5C164 уже знаковый и симметричный — DC-блокер ему не нужен.
   wire signed [8:0] g_rf5c = {1'b0, rf5c_gain};
 `ifdef M4_SIM
@@ -2392,6 +2414,7 @@ module chipbox #(
   // сумма — на следующем такте; строб выхода ~55 кГц задержки не заметит
   reg signed [25:0] ay_g;
   reg signed [25:0] apu_g, fds_g, rf5c_l_g, rf5c_r_g, opl_l_g, opl_r_g;
+  reg signed [25:0] pwm_l_g = 0, pwm_r_g = 0;
 `ifdef M4_HAS_HOME
   reg signed [25:0] gbl_g, gbr_g, sid_g;
 `else
@@ -2420,6 +2443,8 @@ module chipbox #(
 `endif
     apu_g <= (apu_hp * g_apu) >>> 6;
     fds_g <= (fds_hp * g_fds) >>> 6;
+    pwm_l_g <= (pwm_l * g_pwm) >>> 6;
+    pwm_r_g <= (pwm_r * g_pwm) >>> 6;
 `ifdef M4_SIM
     if (rf5c_abs > rf5c_dbg_pk) rf5c_dbg_pk <= rf5c_abs;
 `endif
@@ -2454,8 +2479,8 @@ module chipbox #(
   // дальше по подотсчёту идут усреднение, насыщение, фильтры и сведение,
   // и всё это одной цепочкой от регистров гейнов до выхода давало 20 нс
   // при периоде 17.5. Задержка в один такт (17 нс) на 48 кГц незаметна.
-  wire signed [25:0] mix_l_c = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + fds_g + rf5c_l_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
-  wire signed [25:0] mix_r_c = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + fds_g + rf5c_r_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
+  wire signed [25:0] mix_l_c = ym_l_g + ay_g + pcm_l_g + adpcm_l_g + apu_g + fds_g + pwm_l_g + rf5c_l_g + gbl_g + sid_g + opl_l_g + fm_l_g + sn_l_g + scc_g + huc_l_g + okim_g + k060_l_g;
+  wire signed [25:0] mix_r_c = ym_r_g + ay_g + pcm_r_g + adpcm_r_g + apu_g + fds_g + pwm_r_g + rf5c_r_g + gbr_g + sid_g + opl_r_g + fm_r_g + sn_r_g + scc_g + huc_r_g + okim_g + k060_r_g;
   reg signed [25:0] mix_l = 0, mix_r = 0;
   always @(posedge clk) begin
     mix_l <= mix_l_c;
@@ -2804,6 +2829,7 @@ module chipbox #(
   localparam EXT_RF5C_PTR = 4'h8; // указатель записи в ОЗУ RF5C164
   localparam EXT_RF5C_RAM = 4'h9; // байт в ОЗУ RF5C164
   localparam EXT_OPLL = 4'hA; // регистр OPLL (YM2413/VRC7) -> транслятор в OPL2
+  localparam EXT_PWM  = 4'hB; // PWM Sega 32X: [14:12] регистр, [11:0] значение
 
   localparam S_IDLE = 4'd0;
   localparam S_DECODE = 4'd1;
@@ -2880,6 +2906,7 @@ module chipbox #(
 `ifdef M4_HAS_HOME
     huc_wr <= 0;   // однотактовый строб: гасится там же, где взводится
     fds_wr <= 0;
+    pwm_wr <= 0;
     rf5c_wr <= 0;
     opll_wr_seq <= 0;
     opll_ack <= 0;
@@ -3077,6 +3104,11 @@ module chipbox #(
                   fds_addr <= fifo_q[15:8];
                   fds_din  <= fifo_q[7:0];
                   fds_wr   <= 1;
+                end
+                EXT_PWM: begin
+                  pwm_sel <= fifo_q[14:12];
+                  pwm_din <= fifo_q[11:0];
+                  pwm_wr  <= 1;
                 end
                 EXT_RF5C: begin
                   rf5c_addr <= fifo_q[11:8];
