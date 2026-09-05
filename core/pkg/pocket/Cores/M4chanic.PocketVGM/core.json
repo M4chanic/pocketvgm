@@ -9,7 +9,7 @@
       "description": "Chiptune jukebox for consoles and home computers",
       "author": "M4chanic",
       "url": "https://github.com/M4chanic/pocketvgm",
-      "version": "0.2.10",
+      "version": "0.2.11",
       "date_release": "2026-07-29"
     },
     "framework": {
