@@ -304,6 +304,38 @@ module core_top (
 
   wire [31:0] apf_wishbone_bridge_rd_data;
 
+  // Структура параметров openfile. APF читает её через мост из адреса 0
+  // (target_dataslot_bridgeaddr), а чтение этого региона идёт через
+  // apf_wishbone_master: адрес уходит в FIFO, потом обращение к SDRAM,
+  // потом ответ обратно через FIFO — десятки тактов, тогда как отдать
+  // данные надо до следующего строба чтения. Имя файла до APF не
+  // доходило, openfile получал пустую строку и молча ничего не делал:
+  // на этом стояли ВСЕ плейлисты. Держим структуру в блочном ОЗУ и
+  // отвечаем из него за такт, как core_bridge_cmd со своей таблицей.
+  //
+  // Пишет её фирмварь через chipbox (регистры 0x35/0x36). Запись моста
+  // в этот регион не трогаем — по ней грузятся сами файлы.
+  wire [6:0] ofile_addr;
+  wire [31:0] ofile_data;
+  wire ofile_wr;
+  reg [31:0] ofile_buf[0:127];
+  reg [31:0] ofile_q = 0;
+
+  always @(posedge clk_sys_57_12) begin
+    if (ofile_wr) ofile_buf[ofile_addr] <= ofile_data;
+  end
+
+  always @(posedge clk_74a) begin
+    ofile_q <= ofile_buf[bridge_addr[8:2]];
+  end
+
+  // Порядок байт — как у записи в apf_wishbone_master: у моста
+  // bridge_endian_little = 0, то есть первый символ строки APF ждёт в
+  // старшем байте слова.
+  wire [31:0] ofile_rd_data = bridge_endian_little ? ofile_q : {
+    ofile_q[7:0], ofile_q[15:8], ofile_q[23:16], ofile_q[31:24]
+  };
+
   // for bridge write data, we just broadcast it to all bus devices
   // for bridge read data, we have to mux it
   // add your own devices here
@@ -313,7 +345,7 @@ module core_top (
         bridge_rd_data <= 0;
       end
       32'h0XXX_XXXX: begin
-        bridge_rd_data <= apf_wishbone_bridge_rd_data;
+        bridge_rd_data <= ofile_rd_data;
       end
       32'h1000_00XX: begin
         bridge_rd_data <= 0;
@@ -1091,7 +1123,11 @@ module core_top (
       .mem_wbe(chip_mem_wbe),
       .mem_rdata(chip_mem_rdata),
       .mem_rdata_valid(chip_mem_rdata_valid),
-      .mem_busy(chip_mem_busy)
+      .mem_busy(chip_mem_busy),
+
+      .ofile_addr(ofile_addr),
+      .ofile_data(ofile_data),
+      .ofile_wr(ofile_wr)
   );
 
   psram #(

@@ -20,6 +20,19 @@ const STRUCT_BUF: u32 = 0x4170_0000;
 static SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 /// Код результата последней файловой операции APF (0 = ok)
 static LAST_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// В слоте лежит уже не тот файл, что открывал плеер: базу длительностей
+/// SID подгружает тот же слот, и после неё трек надо открывать заново,
+/// иначе на повторе в буфер попадёт база вместо музыки.
+static SLOT_DIRTY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn mark_dirty() {
+    SLOT_DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Прочитать и сбросить признак
+pub fn take_dirty() -> bool {
+    SLOT_DIRTY.swap(false, core::sync::atomic::Ordering::Relaxed)
+}
 
 pub fn last_err() -> u32 {
     LAST_ERR.load(core::sync::atomic::Ordering::Relaxed)
@@ -68,11 +81,39 @@ pub fn slot_path() -> String {
     String::from_utf8_lossy(&raw[..len]).into_owned()
 }
 
+/// Структура параметров openfile в блочном ОЗУ ядра (chipbox 0x35/0x36).
+///
+/// Раскладка APF: имя файла 256 байт с нулём, потом флаги и размер — оба
+/// нулевые, мы ничего не создаём и не усекаем.
+///
+/// Зачем отдельный буфер: APF читает эту структуру ЧЕРЕЗ МОСТ, а чтение
+/// SDRAM в базовом ядре идёт через FIFO и Wishbone и отвечает на десятки
+/// тактов позже, чем APF успевает забрать данные. Имя файла до APF не
+/// доходило — openfile получал пустую строку, отвечал «успех» и не менял
+/// содержимое слота. Отсюда все симптомы плейлистов: «трек не найден»,
+/// игра прежнего трека вместо выбранного и мусорный список из бинарника.
+/// Подробности — в core_top.sv рядом с ofile_buf.
+fn push_param_struct(path: &str) {
+    let b = path.as_bytes();
+    crate::chipbox_write(0x35, 0); // индекс слова, дальше автоинкремент
+    for w in 0..66usize {
+        let mut v: u32 = 0;
+        for k in 0..4usize {
+            let i = w * 4 + k;
+            if i < b.len() {
+                v |= (b[i] as u32) << (8 * k);
+            }
+        }
+        crate::chipbox_write(0x36, v);
+    }
+}
+
 /// Открыть произвольный путь в слоте. false — файла нет/ошибка.
 pub fn open(path: &str) -> bool {
     if path.is_empty() || path.len() > 255 {
         return false;
     }
+    push_param_struct(path);
     let p = unsafe { pac::Peripherals::steal() };
     unsafe {
         core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
@@ -126,6 +167,45 @@ pub fn tail(s: &str, n: usize) -> &str {
         i += 1;
     }
     core::str::from_utf8(&b[i..]).unwrap_or("")
+}
+
+/// Слоты, в которых APF разрешит открыть файл с таким расширением.
+///
+/// Списки — из data.json: домашнее ядро Sega [vgm,vgz,gym,m3u], Nintendo
+/// [vgm,vgz,nsf,gbs], Computer [mid,sid,m3u]; аркадное — один слот
+/// [vgm,vgz,m3u]. openfile ищет путь В СЛОТЕ, поэтому плейлист, попавший
+/// не в тот слот, не откроет ни одного трека. Текущий слот идёт первым.
+pub fn slots_for(path: &str) -> Vec<u32> {
+    const SLOTS: [(u32, &[&str]); 3] = [
+        (1, &[".vgm", ".vgz", ".gym", ".m3u"]),
+        (2, &[".vgm", ".vgz", ".nsf", ".gbs"]),
+        (3, &[".mid", ".sid", ".m3u"]),
+    ];
+    let mut out: Vec<u32> = Vec::new();
+    for (id, exts) in SLOTS.iter() {
+        if exts.iter().any(|e| has_ext(path, e)) {
+            out.push(*id);
+        }
+    }
+    let cur = slot();
+    if let Some(i) = out.iter().position(|&s| s == cur) {
+        out.swap(0, i);
+    }
+    out
+}
+
+/// Начало строки длиной не больше n байт, обрезанное по границе символа
+/// (срез `s[..n]` паникует на многобайтовом символе — см. tail)
+pub fn head(s: &str, n: usize) -> &str {
+    if s.len() <= n {
+        return s;
+    }
+    let b = s.as_bytes();
+    let mut i = n;
+    while i > 0 && (b[i] & 0xC0) == 0x80 {
+        i -= 1;
+    }
+    core::str::from_utf8(&b[..i]).unwrap_or("")
 }
 
 /// Каталог из пути ("a/b/c.vgm" -> "a/b/")

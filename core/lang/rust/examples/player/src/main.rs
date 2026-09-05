@@ -154,7 +154,12 @@ impl Buttons {
 
 /// Сообщение об ошибке + ожидание смены трека кнопками
 fn error_wait(format: &str, msg: &str) -> Ctl {
-    ui::screen(format, msg, "", "-", "-", None, None);
+    error_wait2(format, msg, "")
+}
+
+/// То же с подписью второй строкой — под длинный путь в диагностике
+fn error_wait2(format: &str, msg: &str, sub: &str) -> Ctl {
+    ui::screen(format, msg, sub, "-", "-", None, None);
     let mut b = Buttons::new();
     loop {
         let e = b.take();
@@ -1444,11 +1449,27 @@ fn gbs_play(data: &[u8], pl: &PlayCtx) -> Ctl {
 /// Длительности подпесен SID из HVSC Songlengths.md5 (лежит рядом с
 /// музыкой в Assets/pocketvgm/common). Формат: "<32hex>=M:SS M:SS ...".
 /// Пусто — базы нет или записи не нашлось.
-fn load_songlengths(md5h: &[u8; 32]) -> alloc::vec::Vec<u32> {
+fn load_songlengths(md5h: &[u8; 32], dir: &str) -> alloc::vec::Vec<u32> {
     let mut out = alloc::vec::Vec::new();
-    if !files::open("Songlengths.md5") {
+    // APF ждёт полный путь, а не имя рядом с треком. Пробуем папку самой
+    // музыки, потом корень платформы (…/common/), потом голое имя.
+    let mut cands: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    let mut push = |base: &str| {
+        let mut p = String::from(base);
+        p.push_str("Songlengths.md5");
+        if !cands.contains(&p) {
+            cands.push(p);
+        }
+    };
+    push(dir);
+    if let Some(i) = dir.find("/common/") {
+        push(&dir[..i + 8]);
+    }
+    push("");
+    if !cands.iter().any(|c| files::open(c)) {
         return out;
     }
+    files::mark_dirty();
     let size = File::size(files::slot());
     if size == 0 || size == 0xFFFF_FFFF {
         return out;
@@ -1557,7 +1578,7 @@ fn sid_play(data: &[u8], pl: &PlayCtx) -> Ctl {
     // ВАЖНО: load_slot перезапишет staging — все нужные данные SID уже
     // скопированы выше (body_vec и owned-строки).
     let md5h = vgm_core::md5::md5_hex(data);
-    let lens = load_songlengths(&md5h);
+    let lens = load_songlengths(&md5h, files::dir_of(pl.list.get(pl.idx).map_or("", |p| p.as_str())));
     if !lens.is_empty() {
         println!("HVSC: длительности найдены ({} подпесен)", lens.len());
     }
@@ -1856,6 +1877,38 @@ fn gd3_lines(data: &[u8], header: &Header) -> (Option<String>, String) {
     (title, sub)
 }
 
+/// Открыть трек плейлиста, перебирая варианты.
+///
+/// APF ждёт полный путь («/Assets/платформа/common/...»), а getfile
+/// отдаёт его в своём виде, и слот у трека может быть не тот, в котором
+/// лежит сам плейлист (расширения разнесены по трём слотам). Поэтому
+/// пробуем путь как есть и с ведущей косой чертой, в каждом слоте, чей
+/// список расширений этот трек допускает; свой слот идёт первым.
+///
+/// Признак настоящего открытия — размер файла в слоте, который стал
+/// другим: openfile отвечает «успех» и когда ничего не открыл.
+fn open_track(path: &str, cur_size: u32) -> bool {
+    let mut alt = String::from("/");
+    alt.push_str(path);
+    let start = files::slot();
+    for s in files::slots_for(path) {
+        files::set_slot(s);
+        for cand in [path, alt.as_str()] {
+            if files::open(cand) {
+                let sz = File::size(s);
+                if sz != 0 && sz != 0xFFFF_FFFF && sz != cur_size {
+                    return true;
+                }
+            }
+        }
+    }
+    // Ни один вариант не подменил содержимое слота: возвращаемся к
+    // исходному и отдаём результат как есть — дальше сработает проверка
+    // «в слоте всё ещё плейлист» и на экран уйдёт диагностика.
+    files::set_slot(start);
+    files::open(path)
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("Паника: {info}");
@@ -1966,6 +2019,8 @@ fn main() -> ! {
 
     let mut list: alloc::vec::Vec<String>;
     let mut idx: usize = 0;
+    // путь плейлиста, найденного рядом с треком: он остаётся в слоте
+    let mut found: Option<String> = None;
 
     let is_m3u = files::has_ext(&own_path, ".m3u");
     if is_m3u {
@@ -2010,6 +2065,8 @@ fn main() -> ! {
                 list = files::parse_m3u(pdata, &base);
                 idx = list.iter().position(|p| *p == own_path).unwrap_or(0);
                 println!("Найден плейлист {cand}: {} треков", list.len());
+                // В слоте теперь ПЛЕЙЛИСТ, а не выбранный трек.
+                found = Some(cand.clone());
                 break;
             }
         }
@@ -2020,8 +2077,12 @@ fn main() -> ! {
 
     // какой файл сейчас реально открыт в слоте: выбранный из меню уже
     // там — переоткрывать его через openfile не нужно (и нельзя
-    // зависеть от openfile для базового воспроизведения)
-    let mut in_slot: String = own_path.clone();
+    // зависеть от openfile для базового воспроизведения).
+    //
+    // Если рядом нашёлся плейлист, в слоте лежит ОН: без этого первый
+    // трек не переоткрывался, и плеер брался играть текст m3u —
+    // «unknown format» на файле, который до плейлиста играл нормально.
+    let mut in_slot: String = found.unwrap_or_else(|| own_path.clone());
 
     loop {
         let path = list[idx].clone();
@@ -2034,9 +2095,12 @@ fn main() -> ! {
         // предыдущий трек продолжал тянуть последнюю ноту.
         ctrl_reset(); // софт-сброс: чистит FIFO и глушит чипы
 
-        let opened = if path == in_slot {
+        // Признак снимаем всегда: если содержимое слота подменяли (база
+        // длительностей SID), «этот файл уже открыт» больше не верно.
+        let dirty = files::take_dirty();
+        let opened = if path == in_slot && !dirty {
             true
-        } else if files::open(&path) {
+        } else if open_track(&path, File::size(files::slot())) {
             in_slot = path.clone();
             true
         } else {
@@ -2086,10 +2150,13 @@ fn main() -> ! {
                     && staged.len() >= 16
                     && data[..16] == staged[..16];
                 if stale {
-                    let tail = files::tail(&path, 20);
-                    let mut msg = String::from("track not found: ");
-                    msg.push_str(tail);
-                    error_wait("m3u", &msg)
+                    // Начало пути, а не хвост: хвост — это имя из m3u,
+                    // оно и так известно, а спорное место — префикс,
+                    // который APF ждёт в виде «/Assets/платформа/...».
+                    // Слот тоже на экран: расширения разнесены по трём.
+                    let mut msg = String::from("track not found s");
+                    msg.push((b'0' + (files::slot() % 10) as u8) as char);
+                    error_wait2("m3u", &msg, files::head(&path, 56))
                 } else {
                     dispatch(data, &pl)
                 }

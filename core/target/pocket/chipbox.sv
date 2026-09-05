@@ -123,7 +123,13 @@ module chipbox #(
     input wire mem_rdata_valid,
     input wire mem_busy,
     // {счётчик обновлений, id последнего обновлённого слота} от APF
-    input wire [23:0] slot_upd_info
+    input wire [23:0] slot_upd_info,
+
+    // Структура параметров openfile: поток записи в блочное ОЗУ ядра.
+    // Читает её APF через мост, и отвечать надо за такт — см. core_top.
+    output reg [6:0] ofile_addr = 0,
+    output reg [31:0] ofile_data = 0,
+    output reg ofile_wr = 0
 `ifdef M4_SIM
     ,
     // Отладка (только для Verilator-сборок)
@@ -447,6 +453,12 @@ module chipbox #(
     soft_reset_req <= 0;
     stub_wr <= 0;
     gb_stub_wr <= 0;
+    // Слово структуры openfile ушло в ОЗУ — снимаем строб и двигаем
+    // индекс, чтобы фирмварь писала подряд одним регистром.
+    if (ofile_wr) begin
+      ofile_wr   <= 0;
+      ofile_addr <= ofile_addr + 7'd1;
+    end
     mem_rd <= 0;
     mem_wr <= 0;
 
@@ -792,6 +804,14 @@ module chipbox #(
           // Режим вывода — вне гейта: пункт «Output» есть в меню обоих
           // ядер, значит и регистр должен приниматься обоими
           6'h30: out_mode <= data_write[1:0];
+          // Структура параметров openfile: 0x35 — индекс слова, 0x36 —
+          // слово с автоинкрементом. Вне гейтов вариантов: плейлисты
+          // нужны и домашнему ядру, и аркадному.
+          6'h35: ofile_addr <= data_write[6:0];
+          6'h36: begin
+            ofile_data <= data_write;
+            ofile_wr   <= 1;
+          end
 `ifdef M4_HAS_HOME
           6'h21: scc_phase_inc <= data_write;
           6'h22: scc_gain <= data_write[7:0];
