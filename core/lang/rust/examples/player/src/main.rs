@@ -265,10 +265,15 @@ static HEAP: Heap = Heap::empty();
 // Раскладка SDRAM (main_ram 0x4000_0000..0x4400_0000, 64 МБ):
 //   0x4000_0000  программа + .bss (boot.bin)
 //   0x40C0_0000  фреймбуфер litex
-//   0x4100_0000  сырой файл из data-слота (до 8 МБ)
+//   0x4100_0000  сырой файл из data-слота (7 МБ, см. STAGE_MAX)
+//   0x4170_0000  буфер структур APF (files::STRUCT_BUF)
 //   0x4180_0000  куча плеера (32 МБ — хватает на распакованный VGZ)
 //   0x4380_0000+ стек (растёт вниз от 0x4400_0000)
 const STAGE_BASE: u32 = 0x4100_0000;
+/// Сколько влезает в отсек сырого файла: до буфера структур APF. Слот
+/// data.json допускает 32 МБ, и файл крупнее затирал буфер, кучу и стек —
+/// это и есть «долго грузит, а потом падает» на больших рипах 32X.
+const STAGE_MAX: u32 = 0x0070_0000;
 const HEAP_BASE: usize = 0x4180_0000;
 const HEAP_SIZE: usize = 32 * 1024 * 1024;
 
@@ -641,6 +646,8 @@ fn diag_ff(buf: &mut [u8; 16]) -> &str {
 
 /// Сколько раз заливку в PSRAM пришлось повторять из-за расхождения
 static PSRAM_RETRY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Сколько раз заливка сдалась совсем (три попытки подряд с расхождениями)
+static PSRAM_GIVEUP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Байт из PSRAM отладочным чтением: бит 8 — готовность
 fn psram_byte(addr: u32) -> Option<u8> {
@@ -690,6 +697,11 @@ fn upload_psram(base: u32, bytes: &[u8]) {
         PSRAM_RETRY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         println!("PSRAM: попытка {} — расхождений {bad}, повтор", attempt + 1);
     }
+    // Три попытки не сошлись — дальше идём с заведомо битым образом.
+    // Молча это выглядит как «первое включение молчит»: считаем и
+    // показываем в служебной строке, иначе причину с экрана не отличить.
+    PSRAM_GIVEUP.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    println!("PSRAM: заливка не сошлась за три попытки");
 }
 
 /// Сколько байт ROM не совпало при обратном чтении из BRAM ядра
@@ -762,13 +774,15 @@ fn diag_str(buf: &mut [u8; 16]) -> &str {
     for i in 0..4 {
         buf[9 + i] = HEX[(f >> (12 - 4 * i) & 0xF) as usize];
     }
-    // r — сколько раз заливку в PSRAM пришлось повторить. Растёт — причина
-    // срыва первого воспроизведения в заливке; стоит на нуле — искать надо
-    // в другом месте.
-    let r = PSRAM_RETRY.load(core::sync::atomic::Ordering::Relaxed);
+    // r<сдач><повторов> по заливке в PSRAM. Второй знак растёт — заливка
+    // сходится не с первого раза; первый не ноль — образ в памяти заведомо
+    // битый, и «молчит с первого раза» объясняется этим. Оба нуля — искать
+    // надо в другом месте.
+    let r = PSRAM_RETRY.load(core::sync::atomic::Ordering::Relaxed).min(15);
+    let g = PSRAM_GIVEUP.load(core::sync::atomic::Ordering::Relaxed).min(15);
     buf[13] = b'r';
-    buf[14] = HEX[(r >> 4 & 0xF) as usize];
-    buf[15] = HEX[(r & 0xF) as usize];
+    buf[14] = HEX[g as usize];
+    buf[15] = HEX[r as usize];
     core::str::from_utf8(&buf[..16]).unwrap_or("?")
 }
 
@@ -2133,6 +2147,9 @@ fn main() -> ! {
             let fsize = File::size(files::slot());
             if fsize == 0 || fsize == 0xFFFF_FFFF {
                 error_wait("error", "empty file")
+            } else if fsize > STAGE_MAX {
+                // Честнее сказать, чем играть обрезанный файл.
+                error_wait("error", "file too large (over 7M)")
             } else {
                 let data = load_slot(fsize);
                 // openfile у APF «успешен» и для НЕСУЩЕСТВУЮЩЕГО пути: код
@@ -2189,6 +2206,10 @@ fn ticks_ms(from: u32) -> u32 {
 /// Чтение содержимого слота в staging-буфер
 fn load_slot(size: u32) -> &'static [u8] {
     let t0 = chipbox_read(0x18);
+    // Дальше отсека не читаем ни при каких размерах: за ним буфер
+    // структур и куча. Обрезанный файл поймает разбор формата, а порча
+    // памяти ловится только падением через несколько секунд.
+    let size = size.min(STAGE_MAX);
     File::request_read(0, size, STAGE_BASE, files::slot());
     File::block_op_complete();
     LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
@@ -2223,6 +2244,26 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     // .vgz распаковываем в кучу; сырой .vgm играем прямо из staging-буфера
     let decompressed;
     let data: &[u8] = if staged.len() >= 2 && staged[0..2] == vgm_core::GZIP_MAGIC {
+        // Размер после распаковки лежит в последних четырёх байтах gzip.
+        // Куче 32 МБ, и рипы 32X с PWM разворачиваются в десятки: без
+        // этой проверки распаковка съедала кучу и падала с паникой уже
+        // после долгой загрузки. Лучше сказать сразу и с числом.
+        if staged.len() >= 4 {
+            let n = staged.len();
+            let isize_le = u32::from_le_bytes([
+                staged[n - 4], staged[n - 3], staged[n - 2], staged[n - 1],
+            ]);
+            if isize_le > 28 * 1024 * 1024 {
+                let mut msg = String::from("unpacked ");
+                let mb = isize_le / (1024 * 1024);
+                if mb >= 10 {
+                    msg.push((b'0' + (mb / 10 % 10) as u8) as char);
+                }
+                msg.push((b'0' + (mb % 10) as u8) as char);
+                msg.push_str("M, over heap");
+                return error_wait("VGM", &msg);
+            }
+        }
         let t0 = chipbox_read(0x18);
         match decompress(staged) {
             Ok(v) => {
