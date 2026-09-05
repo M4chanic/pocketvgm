@@ -171,7 +171,7 @@ static uint32_t apu_gain_opt = 0;
 // настоящий пик из рендера не виден.
 static uint32_t huc_gain_opt = 0;
 static uint32_t opll_gain_opt = 0;   // --opll-gain: гейн OPLL (YM2413/VRC7) на OPL3
-static uint32_t pwm_gain_opt = 64;   // --pwm-gain: гейн PWM 32X
+static uint32_t pwm_gain_opt = 86;   // --pwm-gain: гейн PWM 32X (см. фирмварь)
 
 static std::vector<int16_t> to_out_rate(const std::vector<int16_t>& pcm, uint32_t rate) {
     size_t n_in = pcm.size() / 2;
@@ -2054,8 +2054,11 @@ int main(int argc, char** argv) {
         tb.wb(0x2E, true, (w == 15 ? 1u : 0u) << 16 | fb);
     }
     // В файлах Mega Drive 36 и 207 вместо 33 и 239 — см. фирмварь
-    tb.wb(0x15, true, gain_of(sn_clk ? (fm_clk ? 36u : 33u) : 0u, 0x00) << 8
-                    | gain_of(fm_clk ? 207u : (opn_clk ? 204u : 0u), fm_id));
+    // Понижение группы Mega Drive на файлах 32X — как в фирмвари (md_scale):
+    // к сумме, которая и так у потолка, добавляется PWM.
+    auto md_scale = [&](uint32_t v) { return pwm_clk ? v * 3 / 4 : v; };
+    tb.wb(0x15, true, gain_of(sn_clk ? (fm_clk ? md_scale(36u) : 33u) : 0u, 0x00) << 8
+                    | gain_of(fm_clk ? md_scale(207u) : (opn_clk ? 204u : 0u), fm_id));
     tb.wb(2, true, 1);                       // сброс чипа (чистит FIFO!)
     // разблокировка регистров звука SCC (BR2=0x3F) — только после сброса
     if (scc_clk) tb.wb(0, true, 0xF0000000u | (7u << 16));
