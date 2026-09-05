@@ -80,11 +80,21 @@
 `ifdef M4_SIM
   `define M4_HAS_HOME
   `define M4_HAS_ARCADE
+  // Ядро SID остаётся только в симуляции: селфтест и замеры при нём, а
+  // на кристалле его нет — см. M4_HAS_SID ниже.
+  `define M4_HAS_SID
 `elsif M4_ARCADE
   `define M4_HAS_ARCADE
 `else
   `define M4_HAS_HOME
 `endif
+
+// SID (C64) убран из битстрима по решению владельца 2026-09-05: C64 —
+// не консоль, а ядро занимало 1577 ALM, около девяти процентов кристалла,
+// и это была единственная крупная свободная площадь под консольные чипы
+// (PWM у 32X в первую очередь). Возврат — одна строка: определить
+// M4_HAS_SID в ветке домашнего варианта. Слот .sid из data.json тоже
+// убран, иначе плеер молча играл бы тишину.
 
 module chipbox #(
     parameter CLK_HZ = 57_120_000
@@ -988,7 +998,7 @@ module chipbox #(
   end
 
   reg [31:0] sid_cen_phase = 0;
-`ifdef M4_HAS_HOME
+`ifdef M4_HAS_SID
   reg cen_sid = 0;
 
   always @(posedge clk) begin
@@ -1791,7 +1801,7 @@ module chipbox #(
   // 1 такт (регистры защёлкиваются каждый clk), чтения ($D41B/$D41C) —
   // через sid_read_pend.
   wire [7:0] sid_dout;
-`ifdef M4_HAS_HOME
+`ifdef M4_HAS_SID
   wire [17:0] sid_audio;
 
   sid_top #(
@@ -2373,7 +2383,7 @@ module chipbox #(
   // K053260 стерео, знаковый 16 бит
   wire signed [8:0] g_k060 = {1'b0, k060_gain};
 `endif
-`ifdef M4_HAS_HOME
+`ifdef M4_HAS_SID
   wire signed [15:0] sid_wide = sid_audio[17:2];
   wire signed [16:0] sid_wide17 = {sid_wide[15], sid_wide};
 `endif
@@ -2419,7 +2429,7 @@ module chipbox #(
     gbl_g <= (gbl_hp * g_gb) >>> 6;
     gbr_g <= (gbr_hp * g_gb) >>> 6;
 `endif
-`ifdef M4_HAS_HOME
+`ifdef M4_HAS_SID
     sid_g <= (sid_hp * g_sid) >>> 6;
 `endif
     opl_l_g <= (opl_l_s * g_opl) >>> 6;
@@ -2633,8 +2643,10 @@ module chipbox #(
         gbl_hp_y <= 0;
         gbr_hp_x <= gbr_wide;
         gbr_hp_y <= 0;
+`ifdef M4_HAS_SID
         sid_hp_x <= sid_wide17;
         sid_hp_y <= 0;
+`endif
         hucl_hp_x <= huc_left;
         hucl_hp_y <= 0;
         hucr_hp_x <= huc_right;
@@ -2652,8 +2664,10 @@ module chipbox #(
       gbl_hp_x <= gbl_wide;
       gbr_hp_y <= (gbr_wide - gbr_hp_x) + (gbr_hp_y - hp_leak(gbr_hp_y));
       gbr_hp_x <= gbr_wide;
+`ifdef M4_HAS_SID
       sid_hp_y <= (sid_wide17 - sid_hp_x) + (sid_hp_y - hp_leak(sid_hp_y));
       sid_hp_x <= sid_wide17;
+`endif
       hucl_hp_y <= (huc_left - hucl_hp_x) + (hucl_hp_y - hp_leak(hucl_hp_y));
       hucl_hp_x <= huc_left;
       hucr_hp_y <= (huc_right - hucr_hp_x) + (hucr_hp_y - hp_leak(hucr_hp_y));

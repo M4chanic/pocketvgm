@@ -9,13 +9,17 @@ Prebuilt releases: [Releases](https://github.com/M4chanic/pocketvgm/releases).
 
 ## Formats
 
-Three Load menu entries, grouped by platform:
+Two Load menu entries, split by what the file is:
 
 | Menu | Extensions | Content |
 |---|---|---|
-| Sega | `.m3u` `.vgm` `.vgz` `.gym` | playlists, register logs (Mega Drive / Master System / arcade), Genesis logs |
-| Nintendo | `.vgm` `.vgz` `.nsf` `.gbs` | register logs, NES/Famicom music, Game Boy music |
-| Computer | `.m3u` `.mid` `.sid` | playlists, General MIDI (OPL synthesis), Commodore 64 music |
+| VGM & playlists | `.m3u` `.vgm` `.vgz` `.gym` | playlists, register logs of any logged system, Genesis logs |
+| NSF & GBS | `.vgm` `.vgz` `.nsf` `.gbs` | register logs, NES/Famicom music, Game Boy music |
+
+Commodore 64 `.sid` and General MIDI `.mid` are not in the menu: the core
+is aimed at consoles, and the SID took nine percent of the FPGA that the
+console chips need. Both can come back — MIDI needs no hardware of its
+own, the SID needs the core rebuilt with `M4_HAS_SID`.
 
 The Arcade core has a single entry, **Load Arcade**, taking `.vgm` `.vgz`
 `.m3u` — the arcade chips are only ever logged in those formats, so there
@@ -32,8 +36,8 @@ cannot build that list on its own — of the nine commands APF gives it, none
 lists a directory, and a core only ever learns the one path the user picked.
 The updater writes the missing `playlist.m3u` files for you; see below.
 
-VGM/VGZ appear in both console menus — packs for any platform may come in
-these formats. Multi-song files (NSF/GBS/SID) switch subsongs with the D-pad.
+VGM/VGZ appear in both menus — packs for any platform may come in these
+formats. Multi-song files (NSF, GBS) switch subsongs with the D-pad.
 
 ## Supported systems
 
@@ -46,13 +50,11 @@ default Console bitstream; the second needs the Arcade one.
 | Sega Master System, Game Gear | `.vgm` `.vgz` | SN76489 |
 | NES / Famicom | `.nsf` `.vgm` | NES APU + DMC, VRC6, VRC7, Sunsoft 5B |
 | Game Boy | `.gbs` | SM83 + Game Boy APU |
-| Commodore 64 | `.sid` | SID 6581/8580 + 6502 |
 | PC Engine / TurboGrafx-16 | `.vgm` `.vgz` | HuC6280 |
 | Vectrex | `.vgm` `.vgz` | AY-3-8912 |
 | MSX | `.vgm` `.vgz` | AY-3-8910, Konami SCC |
 | NEC PC-88, PC-98 | `.vgm` `.vgz` | YM2203, YM2608 (melodic part) |
 | ZX Spectrum | `.vgm` `.vgz` | AY-3-8910 |
-| PC, General MIDI | `.mid` | YMF262 with Freedoom GENMIDI patches |
 
 | In the separate Arcade core | Formats | Chips used |
 |---|---|---|
@@ -92,12 +94,11 @@ play in full.
 | AY-3-8910 / YM2149 / Sunsoft 5B | MSX, ZX Spectrum, Famicom (5B) | [jt49](https://github.com/jotego/jt49) |
 | NES APU + DMC, VRC6 | NES / Famicom | [NES_MiSTer](https://github.com/MiSTer-devel/NES_MiSTer) / custom |
 | Game Boy APU (+ SM83 CPU) | Game Boy (GBS) | [VerilogBoy](https://github.com/zephray/VerilogBoy) |
-| SID 6581/8580 (+ 6502 CPU) | Commodore 64 | [C64_MiSTer](https://github.com/MiSTer-devel/C64_MiSTer) (reSID) |
 | HuC6280 PSG | PC Engine / TurboGrafx-16 | custom, written for this project |
 | Konami SCC (K051649) | MSX cartridges | [IKASCC](https://github.com/ika-musume/IKASCC) |
 | OKIM6295 | arcade | [jt6295](https://github.com/jotego/jt6295) |
 | K053260 | Konami arcade | [jtcores](https://github.com/jotego/jtcores) (2 of 4 channels, for area) |
-| YMF262 (OPL3, OPL2 subset) | General MIDI synthesis (GENMIDI patches from Freedoom) | [opl3_fpga](https://github.com/gtaylormb/opl3_fpga) |
+| YMF262 (OPL3, OPL2 subset) | PC AdLib logs, YM2413/VRC7 through a register translator | [opl3_fpga](https://github.com/gtaylormb/opl3_fpga) |
 | YM2413 (OPLL) / VRC7 | MSX-Music, NES (Lagrange Point) | register translation onto opl3_fpga, patch ROM from libvgm |
 
 Upstream sources and commits of the vendored RTL are listed in
@@ -125,7 +126,7 @@ is yours and outranks a generated one.
 
 ## Controls
 
-- **Left / Right** — previous/next track (or subsong within NSF/GBS/SID)
+- **Left / Right** — previous/next track (or subsong within NSF/GBS)
 - **A** — pause, **B** — stop
 - **R (hold)** — fast forward ×8
 - **Select** — playlist browser
@@ -143,7 +144,7 @@ just picked through Load — then it plays straight away.
 - `firmware/vgm-core/` — shared Rust parser library (format parsers,
   inflate, MD5 for HVSC song lengths)
 - `sim/` — Verilator harnesses: `vgmplay` (VGM→WAV on a PC), `chipbox_tb`
-  (self-tests of the whole path, including real NSF/GBS/SID files)
+  (self-tests of the whole path, including real NSF and GBS files)
 - `scripts/` — updater, artwork generation, demo tune generators,
   VGM→GYM converter; `check_package.py` validates a built package against
   the openFPGA spec and `make_release.py` assembles one from CI artifacts;
@@ -189,7 +190,7 @@ are listed in [`rtl/vendor/VENDOR.md`](rtl/vendor/VENDOR.md)):
   based on Dag Lem's reSID/reDIP-SID)
 - [zephray/VerilogBoy](https://github.com/zephray/VerilogBoy) — SM83 CPU and
   Game Boy APU
-- [Arlet/verilog-6502](https://github.com/Arlet/verilog-6502) — 6502 for NSF/SID
+- [Arlet/verilog-6502](https://github.com/Arlet/verilog-6502) — 6502 for NSF
 - [gtaylormb/opl3_fpga](https://github.com/gtaylormb/opl3_fpga) — YMF262 (OPL3)
 - [agg23/openfpga-litex](https://github.com/agg23/openfpga-litex) — base core:
   RISC-V SoC, APF bridge, openFPGA infrastructure

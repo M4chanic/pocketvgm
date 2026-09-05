@@ -66,6 +66,15 @@ lint:
 	@if [ -s /tmp/m4arc.txt ]; then \
 		echo "линт: в аркадном варианте остались негейченые ссылки:"; \
 		cat /tmp/m4arc.txt; exit 1; fi
+	@# Домашний вариант на кристалле идёт БЕЗ SID (M4_HAS_SID определён
+	@# только в симуляции), и та же ловушка тут своя: ссылку на
+	@# загейченный сигнал видно только в этой сборке.
+	@verilator --lint-only -Wno-fatal --top-module chipbox \
+		-GCLK_HZ=57120000 -I$(VB_HDL) ../../rtl/chipbox/*.sv $(CHIPBOX) 2>&1 \
+		| grep "Can.t find definition of variable" > /tmp/m4home.txt || true
+	@if [ -s /tmp/m4home.txt ]; then \
+		echo "линт: в домашнем варианте (без SID) остались негейченые ссылки:"; \
+		cat /tmp/m4home.txt; exit 1; fi
 	@if [ -s /tmp/m4lint.txt ]; then \
 		echo "линт: предупреждения в собственных файлах:"; cat /tmp/m4lint.txt; exit 1; \
 	else echo "линт: собственные файлы чисты"; fi

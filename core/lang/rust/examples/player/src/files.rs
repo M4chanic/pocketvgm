@@ -171,15 +171,17 @@ pub fn tail(s: &str, n: usize) -> &str {
 
 /// Слоты, в которых APF разрешит открыть файл с таким расширением.
 ///
-/// Списки — из data.json: домашнее ядро Sega [vgm,vgz,gym,m3u], Nintendo
-/// [vgm,vgz,nsf,gbs], Computer [mid,sid,m3u]; аркадное — один слот
-/// [vgm,vgz,m3u]. openfile ищет путь В СЛОТЕ, поэтому плейлист, попавший
-/// не в тот слот, не откроет ни одного трека. Текущий слот идёт первым.
+/// Списки — из data.json: домашнее ядро [vgm,vgz,gym,m3u] и
+/// [vgm,vgz,nsf,gbs], аркадное — один слот [vgm,vgz,m3u]. openfile ищет
+/// путь В СЛОТЕ, поэтому плейлист, попавший не в тот слот, не откроет ни
+/// одного трека. Текущий слот идёт первым.
+///
+/// Третьего слота (mid/sid) больше нет: SID и MIDI убраны, см. заметку у
+/// M4_HAS_SID в chipbox.sv.
 pub fn slots_for(path: &str) -> Vec<u32> {
-    const SLOTS: [(u32, &[&str]); 3] = [
+    const SLOTS: [(u32, &[&str]); 2] = [
         (1, &[".vgm", ".vgz", ".gym", ".m3u"]),
         (2, &[".vgm", ".vgz", ".nsf", ".gbs"]),
-        (3, &[".mid", ".sid", ".m3u"]),
     ];
     let mut out: Vec<u32> = Vec::new();
     for (id, exts) in SLOTS.iter() {

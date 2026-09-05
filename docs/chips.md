@@ -22,10 +22,9 @@ game plays but is incomplete — those cases are called out.
 | SN76489 (PSG, incl. T6W28) | ~38 | Mega Drive, Master System, Game Gear | jt89 |
 | NES APU (2A03) + VRC6 | ~24 | NES / Famicom | NES_MiSTer + custom |
 | AY-3-8910 / YM2149 | ~14 | MSX, ZX Spectrum, Famicom 5B, Vectrex | jt49 |
-| SID 6581/8580 | — | Commodore 64 (SID files) | C64_MiSTer |
 | Game Boy DMG APU | ~4 | Game Boy (GBS) | VerilogBoy |
 | SCC / K051649 | ~6 | MSX (Konami) | IKASCC |
-| YMF262 (OPL3) | ~1 | PC AdLib, General MIDI synth | opl3_fpga |
+| YMF262 (OPL3) | ~1 | PC AdLib; YM2413/VRC7 through a translator | opl3_fpga |
 | YM2203 (OPN) | ~5 | PC-88/98, MSX | jt12 + jt49 |
 | YM2608 (OPNA) | ~11 | NEC PC-8801/98 | jt12 + jt49 |
 | HuC6280 PSG | ~7 | PC Engine / TG-16 | custom |
@@ -88,7 +87,7 @@ by the user through `variants.json`):
 
 | Variant | Chips | Covers |
 |---|---|---|
-| **Console** (default) | YM2612, SN76489, AY, NES APU + VRC6, SID, Game Boy, OPL3 (incl. VGM AdLib), SCC | Mega Drive, NES, MSX, C64, Game Boy, PC AdLib |
+| **Console** (default) | YM2612, SN76489, AY, NES APU + VRC6 + VRC7, Game Boy, OPL3 (AdLib and OPLL), SCC, HuC6280, FDS, RF5C164 | Mega Drive, Mega CD, NES, MSX, Game Boy, PC Engine, PC AdLib |
 | **Arcade + X68k** | YM2151, SegaPCM, MSM6258, OKIM6295, K053260 | arcade boards and the Sharp X68000 |
 
 Measured for the Console variant: 17 190 / 18 480 ALMs (93%) with −0.12 ns

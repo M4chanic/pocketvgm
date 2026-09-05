@@ -1954,7 +1954,10 @@ fn main() -> ! {
     //     непустой.
     let mut present = [false; 3];
     let mut fps = [0u32; 3];
-    for i in 0..3usize {
+    // Слотов в data.json теперь два (третий, mid/sid, убран вместе с SID
+    // и MIDI). Массивы оставлены на три: в них лежит формат заначки в
+    // PSRAM, и менять его ради одного нуля незачем.
+    for i in 0..2usize {
         let slot = i as u32 + 1;
         files::set_slot(slot);
         let has = !files::slot_path().is_empty() || probe_slot(slot).is_some();

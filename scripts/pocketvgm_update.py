@@ -167,7 +167,9 @@ def migrate_old_core():
 
 
 MUSIC_DIR = os.path.join(ROOT, "Assets", "pocketvgm", "common")
-PLAYABLE = (".vgm", ".vgz", ".gym", ".nsf", ".gbs", ".sid", ".mid")
+# .sid и .mid убраны вместе со слотом Computer: плейлист из них ядро
+# всё равно не откроет.
+PLAYABLE = (".vgm", ".vgz", ".gym", ".nsf", ".gbs")
 
 
 def _natural(name):
