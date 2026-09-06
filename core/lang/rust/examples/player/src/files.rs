@@ -196,6 +196,67 @@ pub fn slots_for(path: &str) -> Vec<u32> {
     out
 }
 
+/// Соседи трека по индексу библиотеки.
+///
+/// Индекс — `index.txt`, который пишет апдейтер: по пути на строку
+/// относительно папки индекса, строки с `#` — комментарии. Ищем строку,
+/// которой ОКАНЧИВАЕТСЯ путь трека (с косой чертой перед ней, чтобы
+/// «Music/A/01.vgz» не совпал с «…/B/A/01.vgz»); из совпавших берём самую
+/// длинную. Всё, что в пути до неё, — префикс: он взят из ответа getfile,
+/// и какой бы вид пути ни ждал openfile, соседи получат ровно тот же.
+/// Возвращает список путей папки и номер текущего трека в нём.
+pub fn siblings_from_index(text: &[u8], own: &str) -> Option<(Vec<String>, usize)> {
+    let ob = own.as_bytes();
+    let lines = || {
+        text.split(|&b| b == b'\n').map(|l| {
+            let l = if l.last() == Some(&b'\r') { &l[..l.len() - 1] } else { l };
+            l
+        })
+    };
+    // 1. строка трека
+    let mut best: &[u8] = &[];
+    for l in lines() {
+        if l.is_empty() || l[0] == b'#' || l.len() > ob.len() || l.len() <= best.len() {
+            continue;
+        }
+        let at = ob.len() - l.len();
+        if &ob[at..] == l && (at == 0 || ob[at - 1] == b'/') {
+            best = l;
+        }
+    }
+    if best.is_empty() {
+        return None;
+    }
+    let prefix = &ob[..ob.len() - best.len()];
+    let dir_len = best.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
+    let dir = &best[..dir_len];
+    // 2. все строки той же папки
+    let mut out: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+    for l in lines() {
+        if l.is_empty() || l[0] == b'#' || l.len() <= dir_len || &l[..dir_len] != dir {
+            continue;
+        }
+        if l[dir_len..].contains(&b'/') {
+            continue; // вложенная папка — не сосед
+        }
+        if l == best {
+            idx = out.len();
+        }
+        let mut full = Vec::with_capacity(prefix.len() + l.len());
+        full.extend_from_slice(prefix);
+        full.extend_from_slice(l);
+        if full.len() <= 255 {
+            out.push(String::from_utf8_lossy(&full).into_owned());
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some((out, idx))
+    }
+}
+
 /// Начало строки длиной не больше n байт, обрезанное по границе символа
 /// (срез `s[..n]` паникует на многобайтовом символе — см. tail)
 pub fn head(s: &str, n: usize) -> &str {

@@ -28,13 +28,13 @@ is nothing to group.
 A playlist opened from any menu can list tracks of any supported format —
 the player reads the `.m3u` and then opens each track by path.
 
-Opening a single tune also gets a playlist, if one sits beside it: the core
-looks for `playlist.m3u` in the same folder, then for a file named after the
-folder, and starts that list at the tune you picked. So D-pad left/right and
-the Select browser walk the whole folder rather than the one file. A core
-cannot build that list on its own — of the nine commands APF gives it, none
-lists a directory, and a core only ever learns the one path the user picked.
-The updater writes the missing `playlist.m3u` files for you; see below.
+Opening a single tune gets you its folder as well: D-pad left/right and the
+Select browser walk the folder rather than the one file. A core cannot list
+a directory on its own — of the nine commands APF gives it, none does, and a
+core only ever learns the one path the user picked — so the updater writes
+one `index.txt` for the whole card, and the core looks it up when a tune
+starts. Nothing is written into the music folders. A `playlist.m3u` or a
+file named after the folder still works where the index is missing.
 
 VGM/VGZ appear in both menus — packs for any platform may come in these
 formats. Multi-song files (NSF, GBS) switch subsongs with the D-pad.
@@ -120,11 +120,10 @@ the release zip): run it by double-clicking on macOS or with
 `python3 pocketvgm` — it finds the SD card, downloads the latest release and
 updates the core files.
 
-It also writes a `playlist.m3u` into every music folder that has none, which
-is what lets left/right walk a folder of loose files. Run `python3 pocketvgm
---playlists` after adding music to refresh those lists without updating the
-core. A folder that already contains any `.m3u` is left alone — that ordering
-is yours and outranks a generated one.
+It also writes `Assets/pocketvgm/common/index.txt`, one line per tune on the
+card, which is what lets left/right walk a folder. Run `python3 pocketvgm
+--index` after adding music to rebuild it without updating the core. The old
+way, a `playlist.m3u` in every folder, is still there as `--playlists`.
 
 ## Controls
 

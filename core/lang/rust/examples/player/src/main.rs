@@ -2070,6 +2070,38 @@ fn main() -> ! {
             loop {}
         }
     } else {
+        // Индекс библиотеки: один index.txt на карту, его пишет апдейтер.
+        // Ищем вверх от папки трека, не глубже восьми уровней; первый
+        // найденный, в котором есть этот трек, даёт соседей по папке.
+        // Плейлисты в папках при этом не нужны вовсе — см.
+        // files::siblings_from_index про то, откуда берётся префикс пути.
+        list = alloc::vec::Vec::new();
+        let mut dir = String::from(base.as_str());
+        for _ in 0..8 {
+            let mut cand = dir.clone();
+            cand.push_str("index.txt");
+            if files::open(&cand) {
+                // Содержимое слота теперь чужое, чем бы ни кончился разбор
+                files::mark_dirty();
+                let isize = File::size(files::slot());
+                if isize != 0 && isize != 0xFFFF_FFFF && isize <= STAGE_MAX {
+                    let idata = load_slot(isize);
+                    if let Some((lst, i)) = files::siblings_from_index(idata, &own_path) {
+                        println!("Индекс {cand}: {} треков в папке", lst.len());
+                        list = lst;
+                        idx = i;
+                        found = Some(cand);
+                        break;
+                    }
+                }
+            }
+            let t = dir.trim_end_matches('/');
+            match t.rfind('/') {
+                Some(pos) => dir = String::from(&t[..pos + 1]),
+                None => break,
+            }
+        }
+
         // Плейлист рядом с треком: playlist.m3u, затем «Имя папки.m3u»
         // (vgmrips кладёт плейлист с именем альбома) и вариант _ -> пробел
         let dirname = {
@@ -2093,9 +2125,12 @@ fn main() -> ! {
         }
         cands.dedup();
 
-        list = alloc::vec::Vec::new();
         for cand in &cands {
+            if !list.is_empty() {
+                break; // индекс уже дал список
+            }
             if files::open(cand) {
+                files::mark_dirty();
                 let psize = File::size(files::slot());
                 if psize == 0 || psize > 0x40_0000 {
                     continue; // не похоже на плейлист

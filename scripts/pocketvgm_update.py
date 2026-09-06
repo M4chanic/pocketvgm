@@ -220,6 +220,42 @@ def make_playlists(quiet=False):
     return written
 
 
+INDEX_NAME = "index.txt"
+
+
+def make_index(quiet=False):
+    """Write one index of every tune on the card: Assets/pocketvgm/common/index.txt.
+
+    One path per line, relative to that folder, forward slashes, folders
+    and files in natural order (9 before 10). The core opens this file by
+    name when a tune starts, finds the line the tune's own path ends
+    with, and takes the other lines of the same folder as its neighbours.
+    That is what makes left/right and the Select browser walk a folder
+    without a playlist in it — APF gives a core no way to list a
+    directory, so somebody has to, and this is the one file that does it
+    for the whole card.
+    """
+    if not os.path.isdir(MUSIC_DIR):
+        return 0
+    lines = []
+    for folder, dirs, files in os.walk(MUSIC_DIR):
+        dirs.sort(key=_natural)
+        tunes = sorted((f for f in files
+                        if f.lower().endswith(PLAYABLE) and not f.startswith("._")),
+                       key=_natural)
+        rel = os.path.relpath(folder, MUSIC_DIR).replace(os.sep, "/")
+        for t in tunes:
+            lines.append(t if rel == "." else rel + "/" + t)
+    path = os.path.join(MUSIC_DIR, INDEX_NAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# PocketVGM index: one tune per line, relative to this folder. "
+                "Written by pocketvgm_update.py; run it again after adding music.\n")
+        f.write("\n".join(lines) + "\n")
+    if not quiet:
+        print("  index: %s (%d tunes)" % (os.path.relpath(path, ROOT), len(lines)))
+    return len(lines)
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
@@ -229,9 +265,15 @@ def main():
     ap.add_argument("--tag", help="specific release (vX.Y.Z) instead of the latest")
     ap.add_argument("--insecure", action="store_true",
                     help="skip TLS certificate verification (when macOS CAs are not set up)")
+    ap.add_argument("--index", action="store_true",
+                    help="only rebuild the music index, do not update")
     ap.add_argument("--playlists", action="store_true",
-                    help="only write playlist.m3u into music folders, do not update")
+                    help="write playlist.m3u into music folders instead (the old way)")
     args = ap.parse_args()
+    if args.index:
+        n = make_index()
+        print("Index written: %d tunes" % n if n else "No music found under %s" % MUSIC_DIR)
+        return
     if args.playlists:
         n = make_playlists()
         print("Playlists written: %d" % n if n else
@@ -280,10 +322,10 @@ def main():
     except OSError:
         pass
     migrate_old_core()
-    made = make_playlists()
+    made = make_index()
     print("Done: %s, files extracted: %d, card: %s" % (tag, n, ROOT))
     if made:
-        print("Playlists written: %d — open any tune and D-pad left/right "
+        print("Index written: %d tunes — open any tune and D-pad left/right "
               "walks its folder." % made)
     print("Insert the SD card into the Pocket — core M4chanic.PocketVGM, "
           "music in Assets/pocketvgm/common.")
