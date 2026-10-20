@@ -1924,17 +1924,14 @@ fn gd3_lines(data: &[u8], header: &Header) -> (Option<String>, String) {
 /// Признак настоящего открытия — размер файла в слоте, который стал
 /// другим: openfile отвечает «успех» и когда ничего не открыл.
 fn open_track(path: &str, cur_size: u32) -> bool {
-    let mut alt = String::from("/");
-    alt.push_str(path);
+    // Варианты вида пути перебирает сам files::open
     let start = files::slot();
     for s in files::slots_for(path) {
         files::set_slot(s);
-        for cand in [path, alt.as_str()] {
-            if files::open(cand) {
-                let sz = File::size(s);
-                if sz != 0 && sz != 0xFFFF_FFFF && sz != cur_size {
-                    return true;
-                }
+        if files::open(path) {
+            let sz = File::size(s);
+            if sz != 0 && sz != 0xFFFF_FFFF && sz != cur_size {
+                return true;
             }
         }
     }
@@ -2202,7 +2199,9 @@ fn main() -> ! {
             msg.push((b'0' + (files::slot() % 10) as u8) as char);
             msg.push_str(": ");
             msg.push_str(tail);
-            error_wait("error", &msg)
+            // Второй строкой — НАЧАЛО пути: по нему видно, в каком виде
+            // путь отдал getfile (код 4 у APF — «malformed path»)
+            error_wait2("error", &msg, files::head(&path, 56))
         } else {
             let fsize = File::size(files::slot());
             if fsize == 0 || fsize == 0xFFFF_FFFF {

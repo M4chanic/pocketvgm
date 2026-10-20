@@ -108,8 +108,47 @@ fn push_param_struct(path: &str) {
     }
 }
 
+/// Папка платформы, от которой APF ждёт путь openfile
+const ASSETS_ROOT: &str = "/Assets/pocketvgm/common/";
+
+/// Путь в том виде, в каком его принимает openfile.
+///
+/// По документации Analogue путь полный: «/Assets/<платформа>/common/…».
+/// Какой вид отдаёт getfile, с устройства ни разу не было видно, а
+/// openfile на пути из getfile отвечал кодом 4 («malformed path») — и с
+/// ведущей косой, и без неё. Поэтому недостающий корень достраиваем,
+/// откуда бы ни начинался путь.
+fn apf_path(path: &str) -> String {
+    if path.starts_with("/Assets/") || path.starts_with("/Saves/") {
+        return String::from(path);
+    }
+    let rel = path.trim_start_matches('/');
+    let mut out = String::new();
+    if rel.starts_with("Assets/") || rel.starts_with("Saves/") {
+        out.push('/');
+    } else if rel.starts_with("pocketvgm/common/") {
+        out.push_str("/Assets/");
+    } else if rel.starts_with("common/") {
+        out.push_str("/Assets/pocketvgm/");
+    } else {
+        out.push_str(ASSETS_ROOT);
+    }
+    out.push_str(rel);
+    out
+}
+
 /// Открыть произвольный путь в слоте. false — файла нет/ошибка.
+///
+/// Сначала путь как есть, затем с достроенным корнем (см. apf_path).
 pub fn open(path: &str) -> bool {
+    if open_as(path) {
+        return true;
+    }
+    let full = apf_path(path);
+    full != path && open_as(&full)
+}
+
+fn open_as(path: &str) -> bool {
     if path.is_empty() || path.len() > 255 {
         return false;
     }
