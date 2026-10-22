@@ -108,44 +108,42 @@ fn push_param_struct(path: &str) {
     }
 }
 
-/// Папка платформы, от которой APF ждёт путь openfile
-const ASSETS_ROOT: &str = "/Assets/pocketvgm/common/";
-
-/// Путь в том виде, в каком его принимает openfile.
+/// Служебный слот под openfile (id 3 в data.json, параметры 0x8).
 ///
-/// По документации Analogue путь полный: «/Assets/<платформа>/common/…».
-/// Какой вид отдаёт getfile, с устройства ни разу не было видно, а
-/// openfile на пути из getfile отвечал кодом 4 («malformed path») — и с
-/// ведущей косой, и без неё. Поэтому недостающий корень достраиваем,
-/// откуда бы ни начинался путь.
-fn apf_path(path: &str) -> String {
-    if path.starts_with("/Assets/") || path.starts_with("/Saves/") {
-        return String::from(path);
-    }
-    let rel = path.trim_start_matches('/');
-    let mut out = String::new();
-    if rel.starts_with("Assets/") || rel.starts_with("Saves/") {
-        out.push('/');
-    } else if rel.starts_with("pocketvgm/common/") {
-        out.push_str("/Assets/");
-    } else if rel.starts_with("common/") {
-        out.push_str("/Assets/pocketvgm/");
-    } else {
-        out.push_str(ASSETS_ROOT);
-    }
-    out.push_str(rel);
-    out
+/// Путь из getfile — уже полный, «/Assets/pocketvgm/common/…», ровно как
+/// в документации, и всё же openfile в пользовательский слот отвечал
+/// кодом 4 («malformed path»). Все ядра, у которых openfile подтверждённо
+/// работает (Mega CD, PC Engine CD, CD-i), открывают файлы в отдельный
+/// слот, которого нет в меню Load и у которого не стоят флаги «только
+/// чтение», «сброс ядра при загрузке» и «помнить путь». Делаем так же.
+const OPEN_SLOT: u32 = 3;
+/// Слот, который выбрал пользователь через Load
+static USER_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+/// Код APF от попытки в служебном слоте — для экрана ошибки
+static OPEN_SLOT_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn set_user_slot(s: u32) {
+    USER_SLOT.store(s, core::sync::atomic::Ordering::Relaxed);
+    set_slot(s);
 }
 
-/// Открыть произвольный путь в слоте. false — файла нет/ошибка.
+pub fn open_slot_err() -> u32 {
+    OPEN_SLOT_ERR.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Открыть произвольный путь. false — файла нет/ошибка.
 ///
-/// Сначала путь как есть, затем с достроенным корнем (см. apf_path).
+/// Сначала в служебный слот, при отказе — как раньше, в слот
+/// пользователя. Удачный слот остаётся активным: из него дальше читает
+/// load_slot. Коды обеих попыток видны на экране ошибки.
 pub fn open(path: &str) -> bool {
+    set_slot(OPEN_SLOT);
     if open_as(path) {
         return true;
     }
-    let full = apf_path(path);
-    full != path && open_as(&full)
+    OPEN_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
+    set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
+    open_as(path)
 }
 
 fn open_as(path: &str) -> bool {
@@ -206,33 +204,6 @@ pub fn tail(s: &str, n: usize) -> &str {
         i += 1;
     }
     core::str::from_utf8(&b[i..]).unwrap_or("")
-}
-
-/// Слоты, в которых APF разрешит открыть файл с таким расширением.
-///
-/// Списки — из data.json: домашнее ядро [vgm,vgz,gym,m3u] и
-/// [vgm,vgz,nsf,gbs], аркадное — один слот [vgm,vgz,m3u]. openfile ищет
-/// путь В СЛОТЕ, поэтому плейлист, попавший не в тот слот, не откроет ни
-/// одного трека. Текущий слот идёт первым.
-///
-/// Третьего слота (mid/sid) больше нет: SID и MIDI убраны, см. заметку у
-/// M4_HAS_SID в chipbox.sv.
-pub fn slots_for(path: &str) -> Vec<u32> {
-    const SLOTS: [(u32, &[&str]); 2] = [
-        (1, &[".vgm", ".vgz", ".gym", ".m3u"]),
-        (2, &[".vgm", ".vgz", ".nsf", ".gbs"]),
-    ];
-    let mut out: Vec<u32> = Vec::new();
-    for (id, exts) in SLOTS.iter() {
-        if exts.iter().any(|e| has_ext(path, e)) {
-            out.push(*id);
-        }
-    }
-    let cur = slot();
-    if let Some(i) = out.iter().position(|&s| s == cur) {
-        out.swap(0, i);
-    }
-    out
 }
 
 /// Соседи трека по индексу библиотеки.

@@ -27,6 +27,20 @@
         ],
         "size_maximum": "0x2000000",
         "address": "0x00000000"
+      },
+      {
+        "name": "Track",
+        "id": 3,
+        "required": false,
+        "parameters": "0x8",
+        "deferload": true,
+        "extensions": [
+          "vgm",
+          "vgz",
+          "m3u"
+        ],
+        "size_maximum": "0x2000000",
+        "address": "0x00000000"
       }
     ]
   }

@@ -455,7 +455,13 @@ module core_top (
   wire [31:0] target_dataslot_bridgeaddr;
   wire [31:0] target_dataslot_length;
 
-  wire [31:0] target_buffer_param_struct = target_dataslot_bridgeaddr;
+  // Структура openfile — по ненулевому адресу. APF отвечал на openfile
+  // кодом 4 («malformed path») на путь ровно в документированном виде, а
+  // все ядра, у которых openfile подтверждённо работает (Mega CD, PC
+  // Engine CD, CD-i), отдают структуру по ненулевому адресу. Чтение
+  // региона 0x0XXX_XXXX обслуживает ofile_buf по bridge_addr[8:2], так что
+  // 0x200 попадает в его нулевое слово.
+  wire [31:0] target_buffer_param_struct = 32'h0000_0200;
   wire [31:0] target_buffer_resp_struct = target_dataslot_bridgeaddr;
 
   // bridge data slot access

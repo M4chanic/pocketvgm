@@ -1913,35 +1913,6 @@ fn gd3_lines(data: &[u8], header: &Header) -> (Option<String>, String) {
     (title, sub)
 }
 
-/// Открыть трек плейлиста, перебирая варианты.
-///
-/// APF ждёт полный путь («/Assets/платформа/common/...»), а getfile
-/// отдаёт его в своём виде, и слот у трека может быть не тот, в котором
-/// лежит сам плейлист (расширения разнесены по трём слотам). Поэтому
-/// пробуем путь как есть и с ведущей косой чертой, в каждом слоте, чей
-/// список расширений этот трек допускает; свой слот идёт первым.
-///
-/// Признак настоящего открытия — размер файла в слоте, который стал
-/// другим: openfile отвечает «успех» и когда ничего не открыл.
-fn open_track(path: &str, cur_size: u32) -> bool {
-    // Варианты вида пути перебирает сам files::open
-    let start = files::slot();
-    for s in files::slots_for(path) {
-        files::set_slot(s);
-        if files::open(path) {
-            let sz = File::size(s);
-            if sz != 0 && sz != 0xFFFF_FFFF && sz != cur_size {
-                return true;
-            }
-        }
-    }
-    // Ни один вариант не подменил содержимое слота: возвращаемся к
-    // исходному и отдаём результат как есть — дальше сработает проверка
-    // «в слоте всё ещё плейлист» и на экран уйдёт диагностика.
-    files::set_slot(start);
-    files::open(path)
-}
-
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!("Паника: {info}");
@@ -2025,7 +1996,7 @@ fn main() -> ! {
     if chosen == 0 {
         chosen = present.iter().position(|&p| p).unwrap() as u32 + 1;
     }
-    files::set_slot(chosen);
+    files::set_user_slot(chosen);
     stash_write3(chosen, &fps);
 
     // Титул: ядро не проигрывает ничего само. Экран информационный —
@@ -2171,32 +2142,33 @@ fn main() -> ! {
         let dirty = files::take_dirty();
         let opened = if path == in_slot && !dirty {
             true
-        } else if open_track(&path, File::size(files::slot())) {
+        } else if files::open(&path) {
+            // Слот выбирает files::open: служебный, при отказе —
+            // пользовательский. Пустой файл ловится ниже по размеру.
             in_slot = path.clone();
             true
         } else {
             false
         };
         let ctl = if !opened {
-            // Код ошибки APF, СЛОТ и хвост пути — для диагностики с экрана.
+            // Коды APF обеих попыток и хвост пути — для диагностики с
+            // экрана: «open err A/B», где A — служебный слот, B — слот
+            // пользователя (см. files::open).
             //
             // Код печатается целиком: раньше стояло `% 8`, и коды 8 и 9
             // показывались как 0 и 1, то есть отчёт с устройства мог
             // указывать на несуществующую причину.
-            //
-            // Слот важен потому, что openfile ищет путь В ТЕКУЩЕМ слоте, а
-            // слотов три (расширения разнесены из-за лимита APF в четыре
-            // на слот). Плейлист, ссылающийся на файлы другой группы, их
-            // не откроет, и по одному коду ошибки это не отличить.
             let tail = files::tail(&path, 22);
             let mut msg = String::from("open err ");
-            let e = files::last_err();
-            if e >= 10 {
-                msg.push((b'0' + (e / 10 % 10) as u8) as char);
+            for (i, e) in [files::open_slot_err(), files::last_err()].into_iter().enumerate() {
+                if i > 0 {
+                    msg.push('/');
+                }
+                if e >= 10 {
+                    msg.push((b'0' + (e / 10 % 10) as u8) as char);
+                }
+                msg.push((b'0' + (e % 10) as u8) as char);
             }
-            msg.push((b'0' + (e % 10) as u8) as char);
-            msg.push_str(" s");
-            msg.push((b'0' + (files::slot() % 10) as u8) as char);
             msg.push_str(": ");
             msg.push_str(tail);
             // Второй строкой — НАЧАЛО пути: по нему видно, в каком виде
