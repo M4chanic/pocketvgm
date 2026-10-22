@@ -134,6 +134,8 @@ module chipbox #(
     input wire mem_busy,
     // {счётчик обновлений, id последнего обновлённого слота} от APF
     input wire [23:0] slot_upd_info,
+    // Журнал чтений моста: {слово 1, слово 0, последний адрес, счётчик}
+    input wire [111:0] ofile_dbg,
 
     // Структура параметров openfile: поток записи в блочное ОЗУ ядра.
     // Читает её APF через мост, и отвечать надо за такт — см. core_top.
@@ -921,6 +923,10 @@ module chipbox #(
           5'h1D: data_read <= {gbs_fetch, nsf_fetch};
           5'h1E: data_read <= {gbs_ticks, gbs_sndwr};
           6'h20: data_read <= {8'b0, slot_upd_info};
+          6'h38: data_read <= {16'b0, ofile_dbg[15:0]};
+          6'h39: data_read <= ofile_dbg[47:16];
+          6'h3A: data_read <= ofile_dbg[79:48];
+          6'h3B: data_read <= ofile_dbg[111:80];
           6'h22: data_read <= {rf5c_dbg_rd, rf5c_dbg_ram};
           6'h23: data_read <= {rf5c_dbg_pk, rf5c_dbg_reg};
           5'h1F: data_read <= {23'b0, dbg_rd_valid, dbg_rd_data};

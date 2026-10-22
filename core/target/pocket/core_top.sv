@@ -336,6 +336,28 @@ module core_top (
     ofile_q[7:0], ofile_q[15:8], ofile_q[23:16], ofile_q[31:24]
   };
 
+  // Журнал чтений моста вне региона core_bridge_cmd (0xF8…): сколько
+  // слов APF прочитал, последний адрес и что ушло по смещениям 0 и 4
+  // структуры. openfile упорно отвечает 4 на верный путь, и только так
+  // видно, читает ли APF структуру вообще, откуда и что получает.
+  // Фирмварь берёт значения через chipbox 0x38–0x3B, когда запрос уже
+  // завершён, то есть они стоят.
+  reg [15:0] obr_cnt = 0;
+  reg [31:0] obr_last_addr = 0;
+  reg [31:0] obr_w0 = 0;
+  reg [31:0] obr_w1 = 0;
+  reg obr_prev_rd = 0;
+
+  always @(posedge clk_74a) begin
+    obr_prev_rd <= bridge_rd;
+    if (bridge_rd && !obr_prev_rd && bridge_addr[31:24] != 8'hF8) begin
+      obr_cnt <= obr_cnt + 16'd1;
+      obr_last_addr <= bridge_addr;
+      if (bridge_addr[8:2] == 7'd0) obr_w0 <= bridge_rd_data;
+      if (bridge_addr[8:2] == 7'd1) obr_w1 <= bridge_rd_data;
+    end
+  end
+
   // for bridge write data, we just broadcast it to all bus devices
   // for bridge read data, we have to mux it
   // add your own devices here
@@ -345,6 +367,9 @@ module core_top (
         bridge_rd_data <= 0;
       end
       32'h0XXX_XXXX: begin
+        bridge_rd_data <= ofile_rd_data;
+      end
+      32'h81XX_XXXX: begin
         bridge_rd_data <= ofile_rd_data;
       end
       32'h1000_00XX: begin
@@ -455,13 +480,12 @@ module core_top (
   wire [31:0] target_dataslot_bridgeaddr;
   wire [31:0] target_dataslot_length;
 
-  // Структура openfile — по ненулевому адресу. APF отвечал на openfile
-  // кодом 4 («malformed path») на путь ровно в документированном виде, а
-  // все ядра, у которых openfile подтверждённо работает (Mega CD, PC
-  // Engine CD, CD-i), отдают структуру по ненулевому адресу. Чтение
-  // региона 0x0XXX_XXXX обслуживает ofile_buf по bridge_addr[8:2], так что
-  // 0x200 попадает в его нулевое слово.
-  wire [31:0] target_buffer_param_struct = 32'h0000_0200;
+  // Структура openfile — в своём регионе моста, как у PC Engine CD
+  // (0x8100_0000), где openfile подтверждённо работает. Адреса 0 и 0x200
+  // в регионе 0x0XXX_XXXX давали один и тот же код 4 («malformed path»)
+  // на путь ровно в документированном виде (0.2.12–0.2.14). ofile_buf
+  // отвечает по bridge_addr[8:2], смещение 0 — его нулевое слово.
+  wire [31:0] target_buffer_param_struct = 32'h8100_0000;
   wire [31:0] target_buffer_resp_struct = target_dataslot_bridgeaddr;
 
   // bridge data slot access
@@ -1099,10 +1123,20 @@ module core_top (
     slot_upd_s2 <= slot_upd_s1;
   end
 
+  // Журнал чтений моста (см. obr_cnt) в домен chipbox
+  reg [111:0] obr_s1 = 0;
+  reg [111:0] obr_s2 = 0;
+
+  always @(posedge clk_sys_57_12) begin
+    obr_s1 <= {obr_w1, obr_w0, obr_last_addr, obr_cnt};
+    obr_s2 <= obr_s1;
+  end
+
   chipbox chipbox (
       .clk(clk_sys_57_12),
 
       .slot_upd_info(slot_upd_s2),
+      .ofile_dbg(obr_s2),
 
       .reset(reset),
 

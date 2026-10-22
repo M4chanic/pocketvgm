@@ -159,7 +159,12 @@ fn error_wait(format: &str, msg: &str) -> Ctl {
 
 /// То же с подписью второй строкой — под длинный путь в диагностике
 fn error_wait2(format: &str, msg: &str, sub: &str) -> Ctl {
-    ui::screen(format, msg, sub, "-", "-", None, None);
+    error_wait4(format, msg, sub, "-", "-")
+}
+
+/// То же, и ещё две строки диагностики на местах «system» и «chips»
+fn error_wait4(format: &str, msg: &str, sub: &str, line3: &str, line4: &str) -> Ctl {
+    ui::screen(format, msg, sub, line3, line4, None, None);
     let mut b = Buttons::new();
     loop {
         let e = b.take();
@@ -2172,8 +2177,10 @@ fn main() -> ! {
             msg.push_str(": ");
             msg.push_str(tail);
             // Второй строкой — НАЧАЛО пути: по нему видно, в каком виде
-            // путь отдал getfile (код 4 у APF — «malformed path»)
-            error_wait2("error", &msg, files::head(&path, 56))
+            // путь отдал getfile (код 4 у APF — «malformed path»). Ниже —
+            // журнал чтений моста: читал ли APF структуру и что получил.
+            let (l3, l4) = files::bridge_log();
+            error_wait4("error", &msg, files::head(&path, 56), &l3, &l4)
         } else {
             let fsize = File::size(files::slot());
             if fsize == 0 || fsize == 0xFFFF_FFFF {

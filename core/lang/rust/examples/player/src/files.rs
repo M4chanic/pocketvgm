@@ -137,13 +137,44 @@ pub fn open_slot_err() -> u32 {
 /// пользователя. Удачный слот остаётся активным: из него дальше читает
 /// load_slot. Коды обеих попыток видны на экране ошибки.
 pub fn open(path: &str) -> bool {
+    let c0 = bridge_reads();
     set_slot(OPEN_SLOT);
-    if open_as(path) {
+    let ok = open_as(path);
+    let c1 = bridge_reads();
+    READS_OPEN.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
+    if ok {
         return true;
     }
     OPEN_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
     set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
-    open_as(path)
+    let ok = open_as(path);
+    READS_USER.store(bridge_reads().wrapping_sub(c1) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
+    ok
+}
+
+/// Сколько слов APF прочитал через мост за попытку в служебном слоте и
+/// в слоте пользователя. Структура — 66 слов; 0 значит, что APF её не
+/// читал вовсе.
+static READS_OPEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static READS_USER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Счётчик чтений моста вне региона команд (chipbox 0x38, см. obr_cnt в
+/// core_top.sv)
+fn bridge_reads() -> u32 {
+    crate::chipbox_read(0x38)
+}
+
+/// Журнал чтений моста для экрана ошибки openfile, две строки:
+/// «r:<попытка 1>/<попытка 2> a:<последний адрес>» и
+/// «w:<слово 0> <слово 1>» — что APF получил в начале структуры. Путь
+/// «/Assets/…» должен прийти как 2f417373 65747320.
+pub fn bridge_log() -> (String, String) {
+    let ro = READS_OPEN.load(core::sync::atomic::Ordering::Relaxed);
+    let ru = READS_USER.load(core::sync::atomic::Ordering::Relaxed);
+    (
+        alloc::format!("r:{}/{} a:{:08x}", ro, ru, crate::chipbox_read(0x39)),
+        alloc::format!("w:{:08x} {:08x}", crate::chipbox_read(0x3A), crate::chipbox_read(0x3B)),
+    )
 }
 
 fn open_as(path: &str) -> bool {
