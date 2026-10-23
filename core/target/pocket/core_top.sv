@@ -304,29 +304,33 @@ module core_top (
 
   wire [31:0] apf_wishbone_bridge_rd_data;
 
-  // Структура параметров openfile. APF читает её через мост из адреса 0
-  // (target_dataslot_bridgeaddr), а чтение этого региона идёт через
-  // apf_wishbone_master: адрес уходит в FIFO, потом обращение к SDRAM,
-  // потом ответ обратно через FIFO — десятки тактов, тогда как отдать
-  // данные надо до следующего строба чтения. Имя файла до APF не
-  // доходило, openfile получал пустую строку и молча ничего не делал:
-  // на этом стояли ВСЕ плейлисты. Держим структуру в блочном ОЗУ и
-  // отвечаем из него за такт, как core_bridge_cmd со своей таблицей.
+  // Структура параметров openfile в блочном ОЗУ ядра. Пишет её фирмварь
+  // через chipbox (регистры 0x35/0x36), APF читает через мост.
   //
-  // Пишет её фирмварь через chipbox (регистры 0x35/0x36). Запись моста
-  // в этот регион не трогаем — по ней грузятся сами файлы.
+  // Чтение моста конвейерное: io_bridge_peripheral забирает данные ДО
+  // строба bridge_rd, а строб — это запрос следующего слова. Каждое
+  // чтение отдаёт слово, запрошенное предыдущим, и APF на это
+  // рассчитывает: структуру в 66 слов он читает 67 чтениями, а флаги и
+  // размер — каждый дважды. Так же устроен core_bridge_cmd (данные по
+  // стробу) и ядро Mega CD, где openfile работает. Старый путь через
+  // apf_wishbone_master давал этот сдвиг сам — запрос в SDRAM уходил по
+  // стробу, — и плейлисты до 0.2.10 работали. В 0.2.11 структура
+  // переехала сюда с ответом «за такт», APF стал видеть путь, сдвинутый
+  // на слово («ets/pocketvgm/…»), и отвечать 4 («malformed path») на
+  // любой путь. Поэтому слово обновляется только по стробу.
   wire [6:0] ofile_addr;
   wire [31:0] ofile_data;
   wire ofile_wr;
   reg [31:0] ofile_buf[0:127];
   reg [31:0] ofile_q = 0;
+  wire ofile_region = bridge_addr[31:28] == 4'h0 || bridge_addr[31:24] == 8'h81;
 
   always @(posedge clk_sys_57_12) begin
     if (ofile_wr) ofile_buf[ofile_addr] <= ofile_data;
   end
 
   always @(posedge clk_74a) begin
-    ofile_q <= ofile_buf[bridge_addr[8:2]];
+    if (bridge_rd && ofile_region) ofile_q <= ofile_buf[bridge_addr[8:2]];
   end
 
   // Порядок байт — как у записи в apf_wishbone_master: у моста
@@ -353,23 +357,25 @@ module core_top (
     if (bridge_rd && !obr_prev_rd && bridge_addr[31:24] != 8'hF8) begin
       obr_cnt <= obr_cnt + 16'd1;
       obr_last_addr <= bridge_addr;
-      if (bridge_addr[8:2] == 7'd0) obr_w0 <= bridge_rd_data;
-      if (bridge_addr[8:2] == 7'd1) obr_w1 <= bridge_rd_data;
     end
   end
 
-  // Полный снимок того же: что ушло по каждому слову структуры
-  // (obr_shadow, по адресу) и порядок чтений (obr_ring — младшие 16 бит
-  // адреса по номеру чтения). APF читал 71 слово при структуре в 66, и
-  // по первым двум словам не видно, искажено ли остальное. Фирмварь
-  // читает оба через chipbox: индекс пишется в 0x3C, данные — 0x3C
-  // (снимок) и 0x3D (порядок).
+  // Полный снимок того же: что APF получил по каждому слову структуры
+  // (obr_shadow) и порядок чтений (obr_ring — младшие 16 бит адреса по
+  // номеру чтения). Чтение конвейерное (см. ofile_q), поэтому данные
+  // очередного чтения кладутся под адрес ПРЕДЫДУЩЕГО — того, для которого
+  // их и запрашивали. Фирмварь читает оба через chipbox: индекс пишется
+  // в 0x3C, данные — 0x3C (снимок) и 0x3D (порядок).
   reg [31:0] obr_shadow[0:127];
   reg [15:0] obr_ring[0:127];
+  reg [6:0] obr_prev_word = 0;
 
   always @(posedge clk_74a) begin
     if (bridge_rd && !obr_prev_rd && bridge_addr[31:24] != 8'hF8) begin
-      obr_shadow[bridge_addr[8:2]] <= bridge_rd_data;
+      obr_shadow[obr_prev_word] <= bridge_rd_data;
+      if (obr_prev_word == 7'd0) obr_w0 <= bridge_rd_data;
+      if (obr_prev_word == 7'd1) obr_w1 <= bridge_rd_data;
+      obr_prev_word <= bridge_addr[8:2];
       obr_ring[obr_cnt[6:0]] <= bridge_addr[15:0];
     end
   end

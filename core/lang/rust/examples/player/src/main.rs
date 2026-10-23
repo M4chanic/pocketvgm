@@ -2167,10 +2167,10 @@ fn main() -> ! {
         };
         let ctl = if !opened {
             // Коды APF для диагностики с экрана: «open err A/B idx:C
-            // own:D», где A — служебный слот, B — слот пользователя (см.
+            // own:D», где A — слот пользователя, B — служебный (см.
             // files::open), C и D — пробы ниже. Хвост пути ушёл с этой
             // строки: путь целиком известен, а место нужно пробам.
-            let e_user = files::last_err();
+            let e_open = files::last_err();
             // Второй строкой — НАЧАЛО пути: по нему видно, в каком виде
             // путь отдал getfile (код 4 у APF — «malformed path»). Ниже —
             // журнал чтений моста: сколько слов и откуда APF прочитал,
@@ -2178,16 +2178,16 @@ fn main() -> ! {
             let (l3, _) = files::bridge_log();
             let mut l4 = files::struct_check(&path);
             l4.push(' ');
-            l4.push_str(&files::read_order(files::reads_user()));
+            l4.push_str(&files::read_order(files::reads_last()));
             // Пробы после журнала: они его перезаписывают. Путь без
             // пробелов и скобок и путь, который отдал сам getfile, —
             // отвергнет ли APF и их.
             let p_idx = files::probe("/Assets/pocketvgm/common/index.txt");
             let p_own = files::probe(&own_path);
             let mut msg = String::from("open err ");
-            push_code(&mut msg, files::open_slot_err());
+            push_code(&mut msg, files::user_slot_err());
             msg.push('/');
-            push_code(&mut msg, e_user);
+            push_code(&mut msg, e_open);
             msg.push_str(" idx:");
             push_code(&mut msg, p_idx);
             msg.push_str(" own:");

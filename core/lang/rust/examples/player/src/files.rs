@@ -108,55 +108,56 @@ fn push_param_struct(path: &str) {
     }
 }
 
-/// Служебный слот под openfile (id 3 в data.json, параметры 0x8).
-///
-/// Путь из getfile — уже полный, «/Assets/pocketvgm/common/…», ровно как
-/// в документации, и всё же openfile в пользовательский слот отвечал
-/// кодом 4 («malformed path»). Все ядра, у которых openfile подтверждённо
-/// работает (Mega CD, PC Engine CD, CD-i), открывают файлы в отдельный
-/// слот, которого нет в меню Load и у которого не стоят флаги «только
-/// чтение», «сброс ядра при загрузке» и «помнить путь». Делаем так же.
+/// Запасной слот под openfile (id 3 в data.json, параметры 0x8), как у
+/// ядер Mega CD, PC Engine CD и CD-i. До 0.2.10 openfile работал и в
+/// слоте пользователя; отказ с кодом 4 в 0.2.11–0.2.16 был не из-за
+/// слота, а из-за отдачи структуры без конвейерного сдвига (см. ofile_q
+/// в core_top.sv). Служебный слот оставлен на случай, если слот
+/// пользователя откажет.
 const OPEN_SLOT: u32 = 3;
 /// Слот, который выбрал пользователь через Load
 static USER_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
-/// Код APF от попытки в служебном слоте — для экрана ошибки
-static OPEN_SLOT_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Код APF от попытки в слоте пользователя — для экрана ошибки
+static USER_SLOT_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 pub fn set_user_slot(s: u32) {
     USER_SLOT.store(s, core::sync::atomic::Ordering::Relaxed);
     set_slot(s);
 }
 
-pub fn open_slot_err() -> u32 {
-    OPEN_SLOT_ERR.load(core::sync::atomic::Ordering::Relaxed)
+pub fn user_slot_err() -> u32 {
+    USER_SLOT_ERR.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Открыть произвольный путь. false — файла нет/ошибка.
 ///
-/// Сначала в служебный слот, при отказе — как раньше, в слот
-/// пользователя. Удачный слот остаётся активным: из него дальше читает
+/// Сначала в слот пользователя, как до 0.2.10, при отказе — в
+/// служебный. Удачный слот остаётся активным: из него дальше читает
 /// load_slot. Коды обеих попыток видны на экране ошибки.
 pub fn open(path: &str) -> bool {
     let c0 = bridge_reads();
-    set_slot(OPEN_SLOT);
+    set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
     let ok = open_as(path);
     let c1 = bridge_reads();
-    READS_OPEN.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
+    READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
         return true;
     }
-    OPEN_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
-    set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
+    USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
+    set_slot(OPEN_SLOT);
     let ok = open_as(path);
-    READS_USER.store(bridge_reads().wrapping_sub(c1) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
+    READS_OPEN.store(bridge_reads().wrapping_sub(c1) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
+    if !ok {
+        set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
+    }
     ok
 }
 
-/// Сколько слов APF прочитал через мост за попытку в служебном слоте и
-/// в слоте пользователя. Структура — 66 слов; 0 значит, что APF её не
-/// читал вовсе.
-static READS_OPEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Сколько слов APF прочитал через мост за попытку в слоте пользователя
+/// и в служебном. Структура — 66 слов, APF читает её 67 чтениями плюс
+/// повторы флагов; 0 значит, что APF её не читал вовсе.
 static READS_USER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static READS_OPEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Счётчик чтений моста вне региона команд (chipbox 0x38, см. obr_cnt в
 /// core_top.sv)
@@ -232,29 +233,27 @@ pub fn read_order(n: u32) -> String {
 
 /// Проба: код APF на openfile этого пути в служебном слоте
 pub fn probe(path: &str) -> u32 {
-    set_slot(OPEN_SLOT);
+    set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
     if open_as(path) {
         mark_dirty(); // в слоте теперь проба, а не трек
     }
-    let e = last_err();
-    set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
-    e
+    last_err()
 }
 
-/// Сколько чтений моста ушло на попытку в слоте пользователя
-pub fn reads_user() -> u32 {
-    READS_USER.load(core::sync::atomic::Ordering::Relaxed)
+/// Сколько чтений моста ушло на последнюю попытку (служебный слот)
+pub fn reads_last() -> u32 {
+    READS_OPEN.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// Журнал чтений моста для экрана ошибки openfile, две строки:
-/// «r:<попытка 1>/<попытка 2> a:<последний адрес>» и
+/// «r:<слот пользователя>/<служебный> a:<последний адрес>» и
 /// «w:<слово 0> <слово 1>» — что APF получил в начале структуры. Путь
-/// «/Assets/…» должен прийти как 2f417373 65747320.
+/// «/Assets/…» должен прийти как 2f417373 6574732f.
 pub fn bridge_log() -> (String, String) {
     let ro = READS_OPEN.load(core::sync::atomic::Ordering::Relaxed);
     let ru = READS_USER.load(core::sync::atomic::Ordering::Relaxed);
     (
-        alloc::format!("r:{}/{} a:{:08x}", ro, ru, crate::chipbox_read(0x39)),
+        alloc::format!("r:{}/{} a:{:08x}", ru, ro, crate::chipbox_read(0x39)),
         alloc::format!("w:{:08x} {:08x}", crate::chipbox_read(0x3A), crate::chipbox_read(0x3B)),
     )
 }
