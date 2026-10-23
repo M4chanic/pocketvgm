@@ -164,6 +164,88 @@ fn bridge_reads() -> u32 {
     crate::chipbox_read(0x38)
 }
 
+/// Слово структуры так, как его должен получить APF: первый символ в
+/// старшем байте (мост big-endian, см. ofile_rd_data в core_top)
+fn expected_word(path: &[u8], w: usize) -> u32 {
+    let mut v: u32 = 0;
+    for k in 0..4usize {
+        let i = w * 4 + k;
+        if i < path.len() {
+            v |= (path[i] as u32) << (24 - 8 * k);
+        }
+    }
+    v
+}
+
+/// Сверка снимка (chipbox 0x3C) с тем, что фирмварь записала для пути:
+/// «rb:ok» или «rb:@<слово> <получено>» на первом расхождении.
+pub fn struct_check(path: &str) -> String {
+    let b = path.as_bytes();
+    for w in 0..66usize {
+        crate::chipbox_write(0x3C, w as u32);
+        let _ = crate::chipbox_read(0x3C); // ОЗУ снимка отвечает тактом позже
+        let got = crate::chipbox_read(0x3C);
+        if got != expected_word(b, w) {
+            return alloc::format!("rb:@{} {:08x}", w, got);
+        }
+    }
+    String::from("rb:ok")
+}
+
+/// Порядок последних n чтений моста словами структуры, слитый в
+/// диапазоны: «0-65 0-4» значит, что APF прочитал её целиком, а потом
+/// ещё раз первые пять слов.
+pub fn read_order(n: u32) -> String {
+    let end = bridge_reads();
+    let n = n.min(128);
+    let mut out = String::from("o:");
+    let mut run: Option<(u32, u32)> = None;
+    let flush = |out: &mut String, r: (u32, u32)| {
+        if out.len() > 2 {
+            out.push(' ');
+        }
+        if r.0 == r.1 {
+            out.push_str(&alloc::format!("{}", r.0));
+        } else {
+            out.push_str(&alloc::format!("{}-{}", r.0, r.1));
+        }
+    };
+    for k in 0..n {
+        let i = end.wrapping_sub(n).wrapping_add(k) & 127;
+        crate::chipbox_write(0x3C, i);
+        let _ = crate::chipbox_read(0x3D);
+        let w = (crate::chipbox_read(0x3D) & 0x1FF) >> 2;
+        run = match run {
+            Some((a, z)) if w == z + 1 => Some((a, w)),
+            Some(r) => {
+                flush(&mut out, r);
+                Some((w, w))
+            }
+            None => Some((w, w)),
+        };
+    }
+    if let Some(r) = run {
+        flush(&mut out, r);
+    }
+    out
+}
+
+/// Проба: код APF на openfile этого пути в служебном слоте
+pub fn probe(path: &str) -> u32 {
+    set_slot(OPEN_SLOT);
+    if open_as(path) {
+        mark_dirty(); // в слоте теперь проба, а не трек
+    }
+    let e = last_err();
+    set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
+    e
+}
+
+/// Сколько чтений моста ушло на попытку в слоте пользователя
+pub fn reads_user() -> u32 {
+    READS_USER.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Журнал чтений моста для экрана ошибки openfile, две строки:
 /// «r:<попытка 1>/<попытка 2> a:<последний адрес>» и
 /// «w:<слово 0> <слово 1>» — что APF получил в начале структуры. Путь

@@ -358,6 +358,31 @@ module core_top (
     end
   end
 
+  // Полный снимок того же: что ушло по каждому слову структуры
+  // (obr_shadow, по адресу) и порядок чтений (obr_ring — младшие 16 бит
+  // адреса по номеру чтения). APF читал 71 слово при структуре в 66, и
+  // по первым двум словам не видно, искажено ли остальное. Фирмварь
+  // читает оба через chipbox: индекс пишется в 0x3C, данные — 0x3C
+  // (снимок) и 0x3D (порядок).
+  reg [31:0] obr_shadow[0:127];
+  reg [15:0] obr_ring[0:127];
+
+  always @(posedge clk_74a) begin
+    if (bridge_rd && !obr_prev_rd && bridge_addr[31:24] != 8'hF8) begin
+      obr_shadow[bridge_addr[8:2]] <= bridge_rd_data;
+      obr_ring[obr_cnt[6:0]] <= bridge_addr[15:0];
+    end
+  end
+
+  wire [6:0] obr_idx;
+  reg [31:0] obr_shadow_q = 0;
+  reg [15:0] obr_ring_q = 0;
+
+  always @(posedge clk_sys_57_12) begin
+    obr_shadow_q <= obr_shadow[obr_idx];
+    obr_ring_q <= obr_ring[obr_idx];
+  end
+
   // for bridge write data, we just broadcast it to all bus devices
   // for bridge read data, we have to mux it
   // add your own devices here
@@ -1137,6 +1162,9 @@ module core_top (
 
       .slot_upd_info(slot_upd_s2),
       .ofile_dbg(obr_s2),
+      .obr_idx(obr_idx),
+      .obr_shadow(obr_shadow_q),
+      .obr_ring(obr_ring_q),
 
       .reset(reset),
 

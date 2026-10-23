@@ -162,6 +162,16 @@ fn error_wait2(format: &str, msg: &str, sub: &str) -> Ctl {
     error_wait4(format, msg, sub, "-", "-")
 }
 
+/// Код APF десятичным числом. Печатается целиком: раньше стояло `% 8`, и
+/// коды 8 и 9 показывались как 0 и 1, то есть отчёт с устройства мог
+/// указывать на несуществующую причину.
+fn push_code(msg: &mut String, e: u32) {
+    if e >= 10 {
+        msg.push((b'0' + (e / 10 % 10) as u8) as char);
+    }
+    msg.push((b'0' + (e % 10) as u8) as char);
+}
+
 /// То же, и ещё две строки диагностики на местах «system» и «chips»
 fn error_wait4(format: &str, msg: &str, sub: &str, line3: &str, line4: &str) -> Ctl {
     ui::screen(format, msg, sub, line3, line4, None, None);
@@ -2156,30 +2166,32 @@ fn main() -> ! {
             false
         };
         let ctl = if !opened {
-            // Коды APF обеих попыток и хвост пути — для диагностики с
-            // экрана: «open err A/B», где A — служебный слот, B — слот
-            // пользователя (см. files::open).
-            //
-            // Код печатается целиком: раньше стояло `% 8`, и коды 8 и 9
-            // показывались как 0 и 1, то есть отчёт с устройства мог
-            // указывать на несуществующую причину.
-            let tail = files::tail(&path, 22);
-            let mut msg = String::from("open err ");
-            for (i, e) in [files::open_slot_err(), files::last_err()].into_iter().enumerate() {
-                if i > 0 {
-                    msg.push('/');
-                }
-                if e >= 10 {
-                    msg.push((b'0' + (e / 10 % 10) as u8) as char);
-                }
-                msg.push((b'0' + (e % 10) as u8) as char);
-            }
-            msg.push_str(": ");
-            msg.push_str(tail);
+            // Коды APF для диагностики с экрана: «open err A/B idx:C
+            // own:D», где A — служебный слот, B — слот пользователя (см.
+            // files::open), C и D — пробы ниже. Хвост пути ушёл с этой
+            // строки: путь целиком известен, а место нужно пробам.
+            let e_user = files::last_err();
             // Второй строкой — НАЧАЛО пути: по нему видно, в каком виде
             // путь отдал getfile (код 4 у APF — «malformed path»). Ниже —
-            // журнал чтений моста: читал ли APF структуру и что получил.
-            let (l3, l4) = files::bridge_log();
+            // журнал чтений моста: сколько слов и откуда APF прочитал,
+            // совпало ли прочитанное с записанным и в каком порядке шло.
+            let (l3, _) = files::bridge_log();
+            let mut l4 = files::struct_check(&path);
+            l4.push(' ');
+            l4.push_str(&files::read_order(files::reads_user()));
+            // Пробы после журнала: они его перезаписывают. Путь без
+            // пробелов и скобок и путь, который отдал сам getfile, —
+            // отвергнет ли APF и их.
+            let p_idx = files::probe("/Assets/pocketvgm/common/index.txt");
+            let p_own = files::probe(&own_path);
+            let mut msg = String::from("open err ");
+            push_code(&mut msg, files::open_slot_err());
+            msg.push('/');
+            push_code(&mut msg, e_user);
+            msg.push_str(" idx:");
+            push_code(&mut msg, p_idx);
+            msg.push_str(" own:");
+            push_code(&mut msg, p_own);
             error_wait4("error", &msg, files::head(&path, 56), &l3, &l4)
         } else {
             let fsize = File::size(files::slot());
