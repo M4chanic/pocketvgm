@@ -137,10 +137,12 @@ pub fn user_slot_err() -> u32 {
 pub fn open(path: &str) -> bool {
     let c0 = bridge_reads();
     set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
+    let u0 = upd_count();
     let ok = open_as(path);
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
+        wait_slot_update(u0);
         return true;
     }
     USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
@@ -151,6 +153,33 @@ pub fn open(path: &str) -> bool {
         set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
     }
     ok
+}
+
+/// Счётчик уведомлений 008A «слот обновлён» (chipbox 0x20, биты 23:16)
+fn upd_count() -> u32 {
+    (crate::chipbox_read(0x20) >> 16) & 0xFF
+}
+
+/// Дождаться 008A с новым размером файла после openfile.
+///
+/// Размер открытого файла APF сообщает отдельной командой 008A, и она
+/// может прийти ПОСЛЕ того, как сам openfile завершился. До неё в
+/// таблице слотов лежит размер прежнего файла: трек читался с чужой
+/// длиной, отсюда «unknown format», «unpacked 84M, over heap» и «track
+/// not found» на первом открытии — со второго раза 008A уже успевал.
+/// Ядро Mega CD по той же причине ждёт 008A, а не таблицу. Приходит оно
+/// только слотам с флагом «user-reloadable», то есть слоту пользователя.
+/// Таймаут ~0.3 с — на случай, если уведомления не будет вовсе.
+fn wait_slot_update(u0: u32) {
+    let t0 = crate::chipbox_read(0x18); // счётчик 44100 Гц
+    for _ in 0..5_000_000u32 {
+        if upd_count() != u0 {
+            return;
+        }
+        if crate::chipbox_read(0x18).wrapping_sub(t0) > 13_230 {
+            return;
+        }
+    }
 }
 
 /// Сколько слов APF прочитал через мост за попытку в слоте пользователя
