@@ -137,12 +137,10 @@ pub fn user_slot_err() -> u32 {
 pub fn open(path: &str) -> bool {
     let c0 = bridge_reads();
     set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
-    let u0 = upd_count();
     let ok = open_as(path);
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
-        wait_slot_update(u0);
         return true;
     }
     USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
@@ -153,33 +151,6 @@ pub fn open(path: &str) -> bool {
         set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
     }
     ok
-}
-
-/// Счётчик уведомлений 008A «слот обновлён» (chipbox 0x20, биты 23:16)
-fn upd_count() -> u32 {
-    (crate::chipbox_read(0x20) >> 16) & 0xFF
-}
-
-/// Дождаться 008A с новым размером файла после openfile.
-///
-/// Размер открытого файла APF сообщает отдельной командой 008A, и она
-/// может прийти ПОСЛЕ того, как сам openfile завершился. До неё в
-/// таблице слотов лежит размер прежнего файла: трек читался с чужой
-/// длиной, отсюда «unknown format», «unpacked 84M, over heap» и «track
-/// not found» на первом открытии — со второго раза 008A уже успевал.
-/// Ядро Mega CD по той же причине ждёт 008A, а не таблицу. Приходит оно
-/// только слотам с флагом «user-reloadable», то есть слоту пользователя.
-/// Таймаут ~0.3 с — на случай, если уведомления не будет вовсе.
-fn wait_slot_update(u0: u32) {
-    let t0 = crate::chipbox_read(0x18); // счётчик 44100 Гц
-    for _ in 0..5_000_000u32 {
-        if upd_count() != u0 {
-            return;
-        }
-        if crate::chipbox_read(0x18).wrapping_sub(t0) > 13_230 {
-            return;
-        }
-    }
 }
 
 /// Сколько слов APF прочитал через мост за попытку в слоте пользователя
@@ -300,16 +271,14 @@ fn open_as(path: &str) -> bool {
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
         p.APF_BRIDGE.request_openfile.write(|w| w.bits(1));
     }
-    // Ответ APF — код результата, и только он. В 0.2.7 здесь стояла
-    // дополнительная проверка размера по смещению +260 ответной
-    // структуры; она давала ложный отказ НА ЛЮБОМ файле, потому что APF
-    // туда ничего не пишет, а буфер мы сами обнуляем перед запросом.
-    // Одиночные файлы это не задевало (для них open не вызывается —
-    // они уже в слоте), а все треки плейлистов падали с «open err 0»:
-    // код APF нулевой, то есть успех, отказ выставляла проверка.
-    // Пустой или битый файл ловится дальше по размеру слота и по магии
-    // формата, так что защита не потеряна.
-    wait_op()
+    if !wait_op() {
+        return false;
+    }
+    // APF может ответить успехом, оставив в слоте прежний файл. Кроме того,
+    // отдельное уведомление 008A с размером после openfile не гарантировано.
+    // getfile — следующая сериализованная команда: совпавший путь подтверждает
+    // именно это открытие, а к его завершению APF уже обновил таблицу размеров.
+    slot_path() == path
 }
 
 /// Чтение из произвольного слота с таймаутом (block_op_complete litex
