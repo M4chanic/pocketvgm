@@ -13,6 +13,21 @@ pub const FG: u16 = 0xFFFF;
 pub const ACCENT: u16 = 0xFD20; // оранжевый
 pub const DIM: u16 = 0x8410; // серый
 
+// Текущий режим воспроизведения (индекс в MODE_NAMES). Хранится здесь,
+// чтобы шапка плеера и браузер рисовали одинаковый ярлык без параметров
+// у каждого draw: замыкания перерисовки вызывают screen() сами, и тащить
+// режим через все их сигнатуры ради одного ярлыка незачем.
+static MODE: AtomicUsize = AtomicUsize::new(2); // по умолчанию «луп списка»
+const MODE_NAMES: [&str; 4] = ["seq", "one", "all", "rnd"];
+
+pub fn set_mode(m: u8) {
+    MODE.store((m as usize) % MODE_NAMES.len(), Relaxed);
+}
+
+pub fn mode_name() -> &'static str {
+    MODE_NAMES[MODE.load(Relaxed)]
+}
+
 /// Включение видеотракта (VTG + DMA на наш буфер)
 pub fn init() {
     let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
@@ -261,7 +276,7 @@ pub fn browser(names: &[&str], cursor: usize, playing: usize, title: &str) {
         let mark = if i == playing { ACCENT } else if i == cursor { FG } else { DIM };
         text(12, y, names[i], mark, 1);
     }
-    text(12, 228, "^ v move   A/> play   B/< back", DIM, 1);
+    text(12, 228, "^v move  A play  B back  R mode", DIM, 1);
 }
 
 /// Полный экран плеера
@@ -322,11 +337,17 @@ pub fn screen(
     // «PANIC» и «?», по которым видно, что случилось.
     text(12, 12, format, DIM, 1);
     if let Some((cur, total)) = track {
+        // Ярлык режима у правого края, счётчик трека отодвинут влево.
+        // Раньше счётчик упирался в край; место под «seq/one/all/rnd»
+        // взяли из его отступа 16px + добавили поле.
+        let tag = mode_name();
+        text(W - 12 - 8 * tag.len(), 12, tag, ACCENT, 1);
+        let shift = 8 * tag.len() + 12;
         let mut buf = [0u8; 16];
         let s = fmt_pair(&mut buf, cur as u32 + 1, total as u32);
         let w = 8 * (s.len() + 6);
-        text(W - 16 - w, 12, "track ", DIM, 1);
-        text(W - 16 - 8 * s.len(), 12, s, FG, 1);
+        text(W - 16 - shift - w, 12, "track ", DIM, 1);
+        text(W - 16 - shift - 8 * s.len(), 12, s, FG, 1);
     }
     hline(26, DIM);
 

@@ -26,12 +26,57 @@ mod ui;
 enum Ctl {
     Next,
     Prev,
+    /// Трек закончился сам (не кнопкой) — дальше решает режим воспроизведения
+    Ended,
     /// Тот же трек с начала (после стопа)
     Restart,
     /// Прыжок на конкретный трек плейлиста (браузер)
     Jump(usize),
     /// Экран перерисовать, воспроизведение продолжается (выход из браузера)
     Redraw,
+}
+
+/// Режимы воспроизведения: что делать, когда трек кончился сам.
+const MODE_SEQ: u32 = 0; // по порядку; конец списка — стоп
+const MODE_ONE: u32 = 1; // луп одного трека
+const MODE_ALL: u32 = 2; // луп всего списка
+const MODE_RND: u32 = 3; // случайный следующий
+/// По умолчанию — луп списка: это поведение плеера до появления режимов.
+static PLAY_MODE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(MODE_ALL);
+
+fn play_mode() -> u32 {
+    PLAY_MODE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Переключить режим по кругу, вернуть новый. Индикатор в шапке и шапку
+/// браузера обновляет сама ui::set_mode — единственное место с именами.
+fn cycle_mode() -> u32 {
+    let m = (play_mode() + 1) % 4;
+    PLAY_MODE.store(m, core::sync::atomic::Ordering::Relaxed);
+    crate::ui::set_mode(m as u8);
+    m
+}
+
+/// Случайный следующий трек: не тот, что сейчас. Генератор — xorshift32:
+/// libc rand здесь нет, а криптостойкость не нужна, нужно лишь не ходить
+/// по кругу. Зерно берём со старта из 44.1-кГц счётчика chipbox.
+static RND_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x9E37_79B9);
+
+fn rnd_next(cur: usize, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    loop {
+        let mut s = RND_STATE.load(core::sync::atomic::Ordering::Relaxed);
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        RND_STATE.store(s, core::sync::atomic::Ordering::Relaxed);
+        let v = s as usize % len;
+        if v != cur {
+            return v;
+        }
+    }
 }
 
 const BTN_UP: u16 = 1 << 0;
@@ -932,6 +977,7 @@ fn basename(p: &str) -> &str {
 
 /// Модальный браузер плейлиста (музыка продолжает играть из FIFO/железа).
 /// Some(i) — прыгнуть на трек i, None — закрыть (нужна перерисовка).
+/// R — переключить режим воспроизведения, текущий виден в заголовке.
 fn browser(b: &mut Buttons, pl: &PlayCtx) -> Option<usize> {
     let mut cur = pl.idx;
     let draw = |cur: usize| {
@@ -939,7 +985,10 @@ fn browser(b: &mut Buttons, pl: &PlayCtx) -> Option<usize> {
         for p in pl.list {
             names.push(basename(p));
         }
-        ui::browser(&names, cur, pl.idx, "playlist");
+        let mut hdr = String::from("playlist [");
+        hdr.push_str(ui::mode_name());
+        hdr.push(']');
+        ui::browser(&names, cur, pl.idx, &hdr);
     };
     draw(cur);
     loop {
@@ -949,6 +998,9 @@ fn browser(b: &mut Buttons, pl: &PlayCtx) -> Option<usize> {
             draw(cur);
         } else if e & BTN_UP != 0 {
             cur = if cur == 0 { pl.list.len() - 1 } else { cur - 1 };
+            draw(cur);
+        } else if e & BTN_R != 0 {
+            cycle_mode();
             draw(cur);
         } else if e & (BTN_RIGHT | BTN_A) != 0 {
             return Some(cur);
@@ -1164,7 +1216,7 @@ fn song_loop(
         }
         if el >= limit {
             if song + 1 >= num_songs {
-                return Ctl::Next;
+                return Ctl::Ended;
             }
             song += 1;
             start_song(song);
@@ -1944,6 +1996,13 @@ fn main() -> ! {
     println!("m4pocket player v0.1");
     ui::init();
     ui::screen("loading...", "", "", "-", "-", None, None);
+    // Зерно шафла из живого счётчика: на старте ядра он уже тикает,
+    // и две загрузки подряд не дают одинаковой «случайной» последовательности.
+    RND_STATE.store(
+        chipbox_read(0x18) | 1,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    ui::set_mode(play_mode() as u8);
 
     // Расширения разнесены по двум слотам (лимит APF — 4 на слот).
     // APF не сообщает, какой слот обновился последним: если файлы есть
@@ -2151,6 +2210,11 @@ fn main() -> ! {
         // сброс делался только внутри воспроизведения — всё это время
         // предыдущий трек продолжал тянуть последнюю ноту.
         ctrl_reset(); // софт-сброс: чистит FIFO и глушит чипы
+        // Сброс чипов гейны микшера не трогает, и весь сброс с прежними
+        // гейнами чип отдаёт в сумму свой холостой уровень — на время
+        // загрузки файла это слышно как шипение. hold() в STOPPED делает
+        // ту же пару «сброс + нулевые гейны», без неё шипение остаётся.
+        mute_all_chips();
 
         // Признак снимаем всегда: если содержимое слота подменяли (база
         // длительностей SID), «этот файл уже открыт» больше не верно.
@@ -2231,10 +2295,44 @@ fn main() -> ! {
         };
 
         match ctl {
-            Ctl::Next => idx = if idx + 1 >= list.len() { 0 } else { idx + 1 },
+            // Ручной >: всегда идём дальше; в шафле «дальше» — случайный.
+            Ctl::Next => {
+                idx = if play_mode() == MODE_RND {
+                    rnd_next(idx, list.len())
+                } else if idx + 1 >= list.len() {
+                    0
+                } else {
+                    idx + 1
+                }
+            }
             Ctl::Prev => idx = if idx == 0 { list.len() - 1 } else { idx - 1 },
             Ctl::Jump(i) => idx = i.min(list.len() - 1),
             Ctl::Restart | Ctl::Redraw => {} // тот же трек с начала
+            // Трек кончился сам: дальше решает режим.
+            Ctl::Ended => match play_mode() {
+                MODE_ONE => {} // луп трека: тот же idx, перезапуск
+                MODE_RND => idx = rnd_next(idx, list.len()),
+                _ => {
+                    if idx + 1 >= list.len() {
+                        if play_mode() == MODE_SEQ {
+                            // Конец списка: как в обычных плеерах —
+                            // остановились и ждём кнопку. hold() в стопе
+                            // глушит чипы и рисует STOPPED.
+                            let mut b = Buttons::new();
+                            match hold(&mut b, 0, true) {
+                                Some(Ctl::Next) => idx = 0,
+                                Some(Ctl::Prev) => idx = idx.saturating_sub(1),
+                                Some(Ctl::Jump(i)) => idx = i.min(list.len() - 1),
+                                _ => {} // Restart — тот же трек с начала
+                            }
+                        } else {
+                            idx = 0; // MODE_ALL
+                        }
+                    } else {
+                        idx += 1;
+                    }
+                }
+            },
         }
     }
 }
@@ -3193,7 +3291,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                         }
                         core::hint::spin_loop();
                     }
-                    return Ctl::Next;
+                    return Ctl::Ended;
                 }
                 let restart = header.loop_offset.unwrap_or(header.data_offset);
                 println!("Луп {loops}");
