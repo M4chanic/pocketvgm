@@ -683,6 +683,7 @@ module core_top (
   // Dataslot Management
 
   reg [31:0] active_file_size = 0;
+  reg active_file_size_toggle = 0;
   reg prev_dataslot_update = 0;
 
   // Какой data-слот Pocket обновил последним (музыкальные слоты 1..N):
@@ -706,7 +707,12 @@ module core_top (
       // Read asset size for data slot index set by ID
       // These are indicies, not IDs, so you must make sure the index matches the ID
       datatable_addr   <= target_dataslot_id[9:0] * 10'h2 + 10'h1;
-      active_file_size <= datatable_q;
+      // Toggle — квитанция для mailbox в clk_sys: после её синхронизации
+      // многобитная шина уже стабильна и её можно безопасно защёлкнуть.
+      if (active_file_size != datatable_q) begin
+        active_file_size <= datatable_q;
+        active_file_size_toggle <= ~active_file_size_toggle;
+      end
 
       if (apf_bridge_file_size_wr_s) begin
         // Set ID index
@@ -924,15 +930,27 @@ module core_top (
   wire apf_bridge_request = apf_bridge_request_counter > 3'h0;
 
   wire [31:0] active_file_size_s;
+  wire active_file_size_toggle_s;
   wire target_dataslot_done_s;
 
   synch_3 #(
-      .WIDTH(33)
+      .WIDTH(34)
   ) from_bridge_s (
-      {active_file_size, target_dataslot_done},
-      {active_file_size_s, target_dataslot_done_s},
+      {active_file_size, active_file_size_toggle, target_dataslot_done},
+      {active_file_size_s, active_file_size_toggle_s, target_dataslot_done_s},
       clk_sys_57_12
   );
+
+  // Не отдаём в CSR «живую» многобитную шину из другого домена: на смене
+  // размера отдельные биты могли бы попасть в выборку от разных значений.
+  reg [31:0] active_file_size_mailbox = 0;
+  reg active_file_size_toggle_prev = 0;
+  always @(posedge clk_sys_57_12) begin
+    active_file_size_toggle_prev <= active_file_size_toggle_s;
+    if (active_file_size_toggle_s != active_file_size_toggle_prev) begin
+      active_file_size_mailbox <= active_file_size_s;
+    end
+  end
 
   // Always have bridge read/write from 0
   assign target_dataslot_bridgeaddr = 32'h0;
@@ -1057,7 +1075,7 @@ module core_top (
       .apf_bridge_length(apf_bridge_length),
       .apf_bridge_ram_data_address(ram_data_address),
       .apf_bridge_slot_id(apf_bridge_slot_id),
-      .apf_bridge_file_size(active_file_size_s),
+      .apf_bridge_file_size(active_file_size_mailbox),
       .apf_bridge_file_size_wr(apf_bridge_file_size_wr),
       .apf_bridge_new_file_size_data(apf_bridge_new_file_size_data),
       .apf_bridge_current_address(current_address),

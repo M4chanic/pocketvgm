@@ -61,6 +61,8 @@ fn wait_op() -> bool {
             return code == 0;
         }
     }
+    // 99 — наш таймаут, не код APF (у того поле результата трёхбитное).
+    LAST_ERR.store(99, core::sync::atomic::Ordering::Relaxed);
     false
 }
 

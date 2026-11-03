@@ -1577,7 +1577,10 @@ fn load_songlengths(md5h: &[u8; 32], dir: &str) -> alloc::vec::Vec<u32> {
     if size == 0 || size == 0xFFFF_FFFF {
         return out;
     }
-    let db = load_slot(size);
+    let db = match load_slot(size) {
+        Ok(data) => data,
+        Err(_) => return out,
+    };
     let mut pos = 0usize;
     while pos + 33 <= db.len() {
         // строка вида md5=... — ищем совпадение в начале строки
@@ -2095,7 +2098,13 @@ fn main() -> ! {
     // иначе одиночный трек
     let own_path = files::slot_path();
     println!("Файл: {own_path}");
-    let staged = load_slot(size);
+    let staged = match load_slot(size) {
+        Ok(data) => data,
+        Err(e) => {
+            let _ = file_read_error(e);
+            loop {}
+        }
+    };
     let base = String::from(files::dir_of(&own_path));
 
     let mut list: alloc::vec::Vec<String>;
@@ -2127,13 +2136,14 @@ fn main() -> ! {
                 files::mark_dirty();
                 let isize = File::size(files::slot());
                 if isize != 0 && isize != 0xFFFF_FFFF && isize <= STAGE_MAX {
-                    let idata = load_slot(isize);
-                    if let Some((lst, i)) = files::siblings_from_index(idata, &own_path) {
-                        println!("Индекс {cand}: {} треков в папке", lst.len());
-                        list = lst;
-                        idx = i;
-                        found = Some(cand);
-                        break;
+                    if let Ok(idata) = load_slot(isize) {
+                        if let Some((lst, i)) = files::siblings_from_index(idata, &own_path) {
+                            println!("Индекс {cand}: {} треков в папке", lst.len());
+                            list = lst;
+                            idx = i;
+                            found = Some(cand);
+                            break;
+                        }
                     }
                 }
             }
@@ -2177,7 +2187,10 @@ fn main() -> ! {
                 if psize == 0 || psize > 0x40_0000 {
                     continue; // не похоже на плейлист
                 }
-                let pdata = load_slot(psize);
+                let pdata = match load_slot(psize) {
+                    Ok(data) => data,
+                    Err(_) => continue,
+                };
                 list = files::parse_m3u(pdata, &base);
                 idx = list.iter().position(|p| *p == own_path).unwrap_or(0);
                 println!("Найден плейлист {cand}: {} треков", list.len());
@@ -2265,31 +2278,9 @@ fn main() -> ! {
                 // Честнее сказать, чем играть обрезанный файл.
                 error_wait("error", "file too large (over 7M)")
             } else {
-                let data = load_slot(fsize);
-                // openfile у APF «успешен» и для НЕСУЩЕСТВУЮЩЕГО пути: код
-                // результата нулевой, а слот сохраняет прежнее содержимое.
-                // Тогда плеер брался играть сам плейлист и говорил
-                // «unknown format», что уводит в сторону — искать надо не
-                // формат трека, а почему не разрешился путь.
-                //
-                // Отличить можно прямо здесь: если в буфере лежит тот же
-                // текст, что мы уже разобрали как m3u, значит трек не
-                // открылся. Сравниваем начало — этого хватает, полное
-                // сравнение стоило бы лишнего прохода по мегабайтам.
-                let stale = is_m3u
-                    && data.len() >= 16
-                    && staged.len() >= 16
-                    && data[..16] == staged[..16];
-                if stale {
-                    // Начало пути, а не хвост: хвост — это имя из m3u,
-                    // оно и так известно, а спорное место — префикс,
-                    // который APF ждёт в виде «/Assets/платформа/...».
-                    // Слот тоже на экран: расширения разнесены по трём.
-                    let mut msg = String::from("track not found s");
-                    msg.push((b'0' + (files::slot() % 10) as u8) as char);
-                    error_wait2("m3u", &msg, files::head(&path, 56))
-                } else {
-                    dispatch(data, &pl)
+                match load_slot(fsize) {
+                    Ok(data) => dispatch(data, &pl),
+                    Err(e) => file_read_error(e),
                 }
             }
         };
@@ -2352,17 +2343,24 @@ fn ticks_ms(from: u32) -> u32 {
 }
 
 /// Чтение содержимого слота в staging-буфер
-fn load_slot(size: u32) -> &'static [u8] {
+fn load_slot(size: u32) -> Result<&'static [u8], u32> {
     let t0 = chipbox_read(0x18);
     // Дальше отсека не читаем ни при каких размерах: за ним буфер
     // структур и куча. Обрезанный файл поймает разбор формата, а порча
     // памяти ловится только падением через несколько секунд.
     let size = size.min(STAGE_MAX);
-    File::request_read(0, size, STAGE_BASE, files::slot());
-    File::block_op_complete();
+    if !files::read_slot_to(files::slot(), size, STAGE_BASE) {
+        return Err(files::last_err());
+    }
     LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
     DEC_MS.store(0, core::sync::atomic::Ordering::Relaxed);
-    unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) }
+    Ok(unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) })
+}
+
+fn file_read_error(e: u32) -> Ctl {
+    let mut msg = String::from("file read err ");
+    push_code(&mut msg, e);
+    error_wait("error", &msg)
 }
 
 /// Определение формата по магии и запуск
@@ -3092,7 +3090,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::Ym2612Dac { ticks, offset }) => {
                 let b = *dac_bank.get(offset as usize).unwrap_or(&0);
-                sink.push(OP_FM2612 | 0x2A << 8 | b as u32);
+                sink.push(OP_FM2612 | 1 << 16 | 0x2A << 8 | b as u32);
                 if ticks > 0 {
                     sink.push(OP_WAIT | ticks as u32);
                 }

@@ -1805,7 +1805,7 @@ int main(int argc, char** argv) {
         else if ((cmd & 0xF0) == 0x80) {
             uint8_t b = dac_ptr < dac_bank.size() ? dac_bank[dac_ptr] : 0;
             dac_ptr++;
-            cmds.push_back(0xD0000000u | 0x2A00u | b);
+            cmds.push_back(0xD0000000u | 0x10000u | 0x2A00u | b);
             wait_ticks(cmd & 0xF);
         }
         else if (cmd == 0xE0) { dac_ptr = rd32(d, pos); pos += 4; }
