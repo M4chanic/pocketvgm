@@ -80,6 +80,15 @@ pub fn slot() -> u32 {
     SLOT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Короткая пауза по 44.1-кГц счётчику chipbox. Нужна между командами APF:
+/// сразу после 008A read иногда попадает в переходное состояние слота.
+fn wait_ms(ms: u32) {
+    let t0 = crate::chipbox_read(0x18);
+    while crate::chipbox_read(0x18).wrapping_sub(t0) < ms * 44_100 {
+        core::hint::spin_loop();
+    }
+}
+
 fn wait_op() -> bool {
     let p = unsafe { pac::Peripherals::steal() };
     for _ in 0..60_000_000u32 {
@@ -180,10 +189,19 @@ pub fn open(path: &str) -> bool {
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
-        // 008A — единственное событие, где id слота, размер и содержимое
-        // уже актуальны вместе. File::size() на этом этапе недостоверен.
+        // 008A даёт когерентный размер, но при быстрых переключениях read
+        // сразу за ним всё ещё может попасть в переходное состояние слота.
+        // Подтверждаем getfile точным путём и даём слоту короткую паузу.
         if wait_slot_update(u0, user_slot) {
-            set_open_size(upd_size());
+            wait_ms(20);
+            for _ in 0..20 {
+                if slot_path() == path && upd_id() == user_slot {
+                    set_open_size(upd_size());
+                    wait_ms(10);
+                    break;
+                }
+                wait_ms(10);
+            }
         }
         return true;
     }
@@ -361,17 +379,27 @@ fn open_as(path: &str) -> bool {
 }
 
 /// Чтение из произвольного слота с таймаутом (block_op_complete litex
-/// может зависнуть навечно на пустом слоте)
+/// может зависнуть навечно на пустом слоте). Код APF 2 («error/out of range»)
+/// сразу после openfile бывает переходным: один повтор через короткую паузу.
 pub fn read_slot_to(slot_id: u32, len: u32, addr: u32) -> bool {
     let p = unsafe { pac::Peripherals::steal() };
-    unsafe {
-        p.APF_BRIDGE.slot_id.write(|w| w.bits(slot_id));
-        p.APF_BRIDGE.data_offset.write(|w| w.bits(0));
-        p.APF_BRIDGE.transfer_length.write(|w| w.bits(len));
-        p.APF_BRIDGE.ram_data_address.write(|w| w.bits(addr));
-        p.APF_BRIDGE.request_read.write(|w| w.bits(1));
+    for attempt in 0..2 {
+        unsafe {
+            p.APF_BRIDGE.slot_id.write(|w| w.bits(slot_id));
+            p.APF_BRIDGE.data_offset.write(|w| w.bits(0));
+            p.APF_BRIDGE.transfer_length.write(|w| w.bits(len));
+            p.APF_BRIDGE.ram_data_address.write(|w| w.bits(addr));
+            p.APF_BRIDGE.request_read.write(|w| w.bits(1));
+        }
+        if wait_op() {
+            return true;
+        }
+        if last_err() != 2 || attempt == 1 {
+            return false;
+        }
+        wait_ms(20);
     }
-    wait_op()
+    false
 }
 
 /// Расширение пути без срезов строки: `path[len-4..]` падает, если путь
