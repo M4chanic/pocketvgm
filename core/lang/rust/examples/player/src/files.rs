@@ -91,7 +91,13 @@ fn wait_ms(ms: u32) {
 
 fn wait_op() -> bool {
     let p = unsafe { pac::Peripherals::steal() };
-    for _ in 0..60_000_000u32 {
+    // Максимум файла в staging — 7 МБ, а APF-перекачка идёт всего несколько
+    // МБ/с. Старый предел ~1 с обрывал нормальное чтение, после чего новая
+    // команда запускалась поверх ещё не закончившейся перекачки. Десяти
+    // секунд хватает с большим запасом; бесконечный цикл не возвращаем,
+    // чтобы пустой/зависший запрос всё же освобождал плеер.
+    let t0 = crate::chipbox_read(0x18);
+    loop {
         let st = unsafe { p.APF_BRIDGE.status.read().bits() };
         if st != 0 {
             if st & 1 == 0 {
@@ -103,6 +109,10 @@ fn wait_op() -> bool {
             LAST_ERR.store(code, core::sync::atomic::Ordering::Relaxed);
             return code == 0;
         }
+        if crate::chipbox_read(0x18).wrapping_sub(t0) > 10 * 44_100 {
+            break;
+        }
+        core::hint::spin_loop();
     }
     // 99 — наш таймаут, не код APF (у того поле результата трёхбитное).
     LAST_ERR.store(99, core::sync::atomic::Ordering::Relaxed);
