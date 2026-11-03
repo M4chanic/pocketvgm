@@ -139,10 +139,12 @@ pub fn user_slot_err() -> u32 {
 pub fn open(path: &str) -> bool {
     let c0 = bridge_reads();
     set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
+    let u0 = upd_count();
     let ok = open_as(path);
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
+        wait_slot_update(u0);
         return true;
     }
     USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
@@ -153,6 +155,30 @@ pub fn open(path: &str) -> bool {
         set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
     }
     ok
+}
+
+/// Счётчик уведомлений 008A «слот обновлён» (chipbox 0x20, биты 23:16)
+fn upd_count() -> u32 {
+    (crate::chipbox_read(0x20) >> 16) & 0xFF
+}
+
+/// Дождаться 008A с новым размером файла после openfile.
+///
+/// Завершение openfile не означает, что Pocket уже обновил путь, размер и
+/// содержимое слота. getfile сразу за ним тоже может вернуть прежний путь,
+/// поэтому подтверждать открытие так нельзя. Для user-reloadable слота
+/// надёжный маркер — отдельное уведомление 008A. Таймаут нужен лишь чтобы
+/// не зависнуть при нештатном ответе Pocket.
+fn wait_slot_update(u0: u32) {
+    let t0 = crate::chipbox_read(0x18); // счётчик 44100 Гц
+    for _ in 0..10_000_000u32 {
+        if upd_count() != u0 {
+            return;
+        }
+        if crate::chipbox_read(0x18).wrapping_sub(t0) > 44_100 {
+            return;
+        }
+    }
 }
 
 /// Сколько слов APF прочитал через мост за попытку в слоте пользователя
@@ -273,14 +299,10 @@ fn open_as(path: &str) -> bool {
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
         p.APF_BRIDGE.request_openfile.write(|w| w.bits(1));
     }
-    if !wait_op() {
-        return false;
-    }
-    // APF может ответить успехом, оставив в слоте прежний файл. Кроме того,
-    // отдельное уведомление 008A с размером после openfile не гарантировано.
-    // getfile — следующая сериализованная команда: совпавший путь подтверждает
-    // именно это открытие, а к его завершению APF уже обновил таблицу размеров.
-    slot_path() == path
+    // Здесь завершается только сама команда openfile. Актуализации слота
+    // ждёт вызывающая сторона через 008A; немедленный getfile возвращает
+    // прежний путь и ошибочно превращает успешное открытие в open err 0/0.
+    wait_op()
 }
 
 /// Чтение из произвольного слота с таймаутом (block_op_complete litex
