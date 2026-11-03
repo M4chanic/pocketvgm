@@ -134,6 +134,8 @@ module chipbox #(
     input wire mem_busy,
     // {счётчик обновлений, id последнего обновлённого слота} от APF
     input wire [23:0] slot_upd_info,
+    // Размер из того же последнего 008A — актуальная альтернатива File::size()
+    input wire [31:0] slot_upd_size,
     // Журнал чтений моста: {слово 1, слово 0, последний адрес, счётчик}
     input wire [111:0] ofile_dbg,
     // Снимок отданного APF по словам и порядок чтений (см. obr_shadow в
@@ -929,6 +931,7 @@ module chipbox #(
           5'h1D: data_read <= {gbs_fetch, nsf_fetch};
           5'h1E: data_read <= {gbs_ticks, gbs_sndwr};
           6'h20: data_read <= {8'b0, slot_upd_info};
+          6'h21: data_read <= slot_upd_size;
           6'h38: data_read <= {16'b0, ofile_dbg[15:0]};
           6'h39: data_read <= ofile_dbg[47:16];
           6'h3A: data_read <= ofile_dbg[79:48];

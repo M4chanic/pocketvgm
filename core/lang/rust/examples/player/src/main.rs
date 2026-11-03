@@ -1573,7 +1573,8 @@ fn load_songlengths(md5h: &[u8; 32], dir: &str) -> alloc::vec::Vec<u32> {
         return out;
     }
     files::mark_dirty();
-    let size = File::size(files::slot());
+    let size = files::take_open_size()
+        .unwrap_or_else(|| File::size(files::slot()));
     if size == 0 || size == 0xFFFF_FFFF {
         return out;
     }
@@ -2092,7 +2093,10 @@ fn main() -> ! {
         }
     }
 
-    let size = File::size(files::slot());
+    // Файл пользователя уже пришёл со стартовым 008A: его размер надёжнее
+    // datatable/mailbox File::size().
+    let size = files::last_update_size(files::slot())
+        .unwrap_or_else(|| File::size(files::slot()));
 
     // Плейлист: выбранный .m3u; иначе playlist.m3u рядом с файлом;
     // иначе одиночный трек
@@ -2134,7 +2138,8 @@ fn main() -> ! {
             if files::open(&cand) {
                 // Содержимое слота теперь чужое, чем бы ни кончился разбор
                 files::mark_dirty();
-                let isize = File::size(files::slot());
+                let isize = files::take_open_size()
+                    .unwrap_or_else(|| File::size(files::slot()));
                 if isize != 0 && isize != 0xFFFF_FFFF && isize <= STAGE_MAX {
                     if let Ok(idata) = load_slot(isize) {
                         if let Some((lst, i)) = files::siblings_from_index(idata, &own_path) {
@@ -2183,7 +2188,8 @@ fn main() -> ! {
             }
             if files::open(cand) {
                 files::mark_dirty();
-                let psize = File::size(files::slot());
+                let psize = files::take_open_size()
+                    .unwrap_or_else(|| File::size(files::slot()));
                 if psize == 0 || psize > 0x40_0000 {
                     continue; // не похоже на плейлист
                 }
@@ -2271,7 +2277,8 @@ fn main() -> ! {
             push_code(&mut msg, p_own);
             error_wait4("error", &msg, files::head(&path, 56), &l3, &l4)
         } else {
-            let fsize = File::size(files::slot());
+            let fsize = files::take_open_size()
+                .unwrap_or_else(|| File::size(files::slot()));
             if fsize == 0 || fsize == 0xFFFF_FFFF {
                 error_wait("error", "empty file")
             } else if fsize > STAGE_MAX {
@@ -3090,7 +3097,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
             Ok(Event::Ym2612Dac { ticks, offset }) => {
                 let b = *dac_bank.get(offset as usize).unwrap_or(&0);
-                sink.push(OP_FM2612 | 1 << 16 | 0x2A << 8 | b as u32);
+                sink.push(OP_FM2612 | 0x2A << 8 | b as u32);
                 if ticks > 0 {
                     sink.push(OP_WAIT | ticks as u32);
                 }

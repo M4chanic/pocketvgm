@@ -687,10 +687,14 @@ module core_top (
   reg prev_dataslot_update = 0;
 
   // Какой data-слот Pocket обновил последним (музыкальные слоты 1..N):
-  // единственный сигнал «какой Load нажал пользователь». Латч в clk_74a,
-  // квазистатичен к моменту чтения фирмварью — 2FF-синхронизация ниже.
+  // единственный сигнал «какой Load нажал пользователь». Размер берём из
+  // того же события 008A, а не позже из datatable: значение там актуально
+  // сразу, тогда как File::size() проходит через выбор слота и mailbox и
+  // может вернуть размер предыдущего файла.
   reg [15:0] last_upd_id = 16'hFFFF;
+  reg [31:0] slot_upd_size = 0;
   reg [7:0] upd_count = 0;
+  reg slot_upd_toggle = 0;
 
   always @(posedge clk_74a) begin
     if (~pll_core_locked) begin
@@ -731,7 +735,9 @@ module core_top (
 
         if (dataslot_update_id != 0) begin
           last_upd_id <= dataslot_update_id;
+          slot_upd_size <= dataslot_update_size;
           upd_count <= upd_count + 1'b1;
+          slot_upd_toggle <= ~slot_upd_toggle;
         end
       end
     end
@@ -952,6 +958,31 @@ module core_top (
     end
   end
 
+  // То же для размера последнего 008A. Шина slot_upd_size защёлкнута в
+  // clk_74a до инверсии toggle, поэтому к моменту детекта фронта в clk_sys
+  // она уже долго стабильна и её можно безопасно скопировать целиком.
+  wire slot_upd_toggle_s;
+  synch_3 #(
+      .WIDTH(1)
+  ) slot_upd_s (
+      slot_upd_toggle,
+      slot_upd_toggle_s,
+      clk_sys_57_12
+  );
+
+  reg [23:0] slot_upd_info_mailbox = 24'hFF_FFFF;
+  reg [31:0] slot_upd_size_mailbox = 0;
+  reg slot_upd_toggle_prev = 0;
+  always @(posedge clk_sys_57_12) begin
+    slot_upd_toggle_prev <= slot_upd_toggle_s;
+    if (slot_upd_toggle_s != slot_upd_toggle_prev) begin
+      // Поле и размер копируются одним событием: фирмварь не должна увидеть
+      // новый upd_count до размера того же 008A (или наоборот).
+      slot_upd_info_mailbox <= {upd_count, last_upd_id};
+      slot_upd_size_mailbox <= slot_upd_size;
+    end
+  end
+
   // Always have bridge read/write from 0
   assign target_dataslot_bridgeaddr = 32'h0;
 
@@ -1164,14 +1195,6 @@ module core_top (
       .sdram_we_n(dram_we_n)
   );
 
-  reg [23:0] slot_upd_s1 = 24'hFF_FFFF;
-  reg [23:0] slot_upd_s2 = 24'hFF_FFFF;
-
-  always @(posedge clk_sys_57_12) begin
-    slot_upd_s1 <= {upd_count, last_upd_id};
-    slot_upd_s2 <= slot_upd_s1;
-  end
-
   // Журнал чтений моста (см. obr_cnt) в домен chipbox
   reg [111:0] obr_s1 = 0;
   reg [111:0] obr_s2 = 0;
@@ -1184,7 +1207,8 @@ module core_top (
   chipbox chipbox (
       .clk(clk_sys_57_12),
 
-      .slot_upd_info(slot_upd_s2),
+      .slot_upd_info(slot_upd_info_mailbox),
+      .slot_upd_size(slot_upd_size_mailbox),
       .ofile_dbg(obr_s2),
       .obr_idx(obr_idx),
       .obr_shadow(obr_shadow_q),
