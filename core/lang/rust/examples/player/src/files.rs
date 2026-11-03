@@ -98,14 +98,14 @@ fn wait_op() -> bool {
     // чтобы пустой/зависший запрос всё же освобождал плеер.
     let t0 = crate::chipbox_read(0x18);
     loop {
-        let st = unsafe { p.APF_BRIDGE.status.read().bits() };
+        let st = p.APF_BRIDGE.status.read().bits();
         if st != 0 {
             if st & 1 == 0 {
                 return false;
             }
             // сам запрос завершён — успех определяет код результата APF
             // (0 = ok; для несуществующего файла запрос тоже «завершается»)
-            let code = unsafe { p.APF_BRIDGE.command_result_code.read().bits() };
+            let code = p.APF_BRIDGE.command_result_code.read().bits();
             LAST_ERR.store(code, core::sync::atomic::Ordering::Relaxed);
             return code == 0;
         }
@@ -175,6 +175,28 @@ static USER_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32:
 /// Код APF от попытки в слоте пользователя — для экрана ошибки
 static USER_SLOT_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+// --- Диагностика 0.2.25: что на самом деле произошло с openfile ---
+/// Путь из getfile совпал с открываемым (слот реально сменил файл)
+static CONFIRM_OK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// Сколько попыток getfile понадобилось (0 — 008A вообще не пришёл)
+static CONFIRM_TRIES: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+/// Открытие ушло в служебный слот (fallback) — читать будем не тот слот,
+/// что выбрал пользователь
+static OPENED_FALLBACK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Состояние подтверждения последнего openfile: (совпал ли путь,
+/// сколько попыток, был ли fallback в служебный слот)
+pub fn diag_confirm() -> (bool, u32, bool) {
+    (
+        CONFIRM_OK.load(core::sync::atomic::Ordering::Relaxed),
+        CONFIRM_TRIES.load(core::sync::atomic::Ordering::Relaxed),
+        OPENED_FALLBACK.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 pub fn set_user_slot(s: u32) {
     USER_SLOT.store(s, core::sync::atomic::Ordering::Relaxed);
     set_slot(s);
@@ -195,6 +217,9 @@ pub fn open(path: &str) -> bool {
     let user_slot = USER_SLOT.load(core::sync::atomic::Ordering::Relaxed);
     set_slot(user_slot);
     let u0 = upd_count();
+    CONFIRM_OK.store(false, core::sync::atomic::Ordering::Relaxed);
+    CONFIRM_TRIES.store(0, core::sync::atomic::Ordering::Relaxed);
+    OPENED_FALLBACK.store(false, core::sync::atomic::Ordering::Relaxed);
     let ok = open_as(path);
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
@@ -204,8 +229,10 @@ pub fn open(path: &str) -> bool {
         // Подтверждаем getfile точным путём и даём слоту короткую паузу.
         if wait_slot_update(u0, user_slot) {
             wait_ms(20);
-            for _ in 0..20 {
+            for t in 1..=20u32 {
+                CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
                 if slot_path() == path && upd_id() == user_slot {
+                    CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
                     set_open_size(upd_size());
                     wait_ms(10);
                     break;
@@ -218,6 +245,9 @@ pub fn open(path: &str) -> bool {
     USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
     set_slot(OPEN_SLOT);
     let ok = open_as(path);
+    if ok {
+        OPENED_FALLBACK.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     READS_OPEN.store(bridge_reads().wrapping_sub(c1) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if !ok {
         set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));

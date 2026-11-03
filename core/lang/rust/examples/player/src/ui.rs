@@ -214,12 +214,21 @@ pub fn progress(cur: u32, total: u32, diag: &str) {
             put_px(x, y, BG);
         }
     }
-    let mut b1 = [0u8; 8];
-    let mut x = 12 + text(12, PROG_Y, fmt_time(&mut b1, cur), FG, 1);
+    if !diag.is_empty() {
+        // Диагностическая строка длинная: в правый край рядом со временем
+        // не влезает без наложения, поэтому в dev-режиме время прячем,
+        // полоса прогресса остаётся.
+        text(12, PROG_Y, diag, DIM, 1);
+    } else {
+        let mut b1 = [0u8; 8];
+        let mut x = 12 + text(12, PROG_Y, fmt_time(&mut b1, cur), FG, 1);
+        if total > 0 {
+            x += text(x, PROG_Y, " / ", DIM, 1);
+            let mut b2 = [0u8; 8];
+            text(x, PROG_Y, fmt_time(&mut b2, total), DIM, 1);
+        }
+    }
     if total > 0 {
-        x += text(x, PROG_Y, " / ", DIM, 1);
-        let mut b2 = [0u8; 8];
-        text(x, PROG_Y, fmt_time(&mut b2, total), DIM, 1);
         // полоса под текстом
         let bw = W - 24;
         let fill = (bw as u64 * cur.min(total) as u64 / total.max(1) as u64) as usize;
@@ -228,10 +237,6 @@ pub fn progress(cur: u32, total: u32, diag: &str) {
                 put_px(12 + px, y, if px < fill { ACCENT } else { DIM });
             }
         }
-    }
-    if !diag.is_empty() {
-        let w = diag.len() * 8;
-        text(W - 12 - w, PROG_Y, diag, DIM, 1);
     }
 }
 

@@ -649,34 +649,66 @@ fn nes_filter_set(on: bool) {
     chipbox_write(0x2D, m);
 }
 
-/// Диагностика перемотки: f — бит FF в контрол-слове, которое фирмварь
-/// послала последней; r — состояние кнопки R прямо сейчас. Если музыка
-/// идёт ускоренно при f0 r0, значит железо держит ff_r само, и дело не в
-/// фирмвари. Два прошлых захода правились вслепую — больше не гадаем.
-fn diag_ff(buf: &mut [u8; 16]) -> &str {
+/// Служебная строка диагностики (только Developer info: On). 0.2.25 —
+/// диагностический релиз: в начале строки стоят хэш прочитанного файла
+/// и состояние подтверждения openfile, место ради них отдано блокам
+/// f0r0/F0 (их баги закрыты). Дальше: d9g9 — отброшенные команды,
+/// L<чтение>/<распаковка> — время загрузки.
+fn diag_ff(buf: &mut [u8; 48]) -> &str {
     if !dev_mode() {
         return "";
     }
     use core::sync::atomic::Ordering::Relaxed;
-    let f = (CTRL_FLAGS.load(Relaxed) >> 6) & 1;
-    let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
-    let r = (unsafe { p.APF_INPUT.cont1_key.read().bits() } as u16 & BTN_R != 0) as u32;
-    buf[0] = b'f';
-    buf[1] = b'0' + f as u8;
-    buf[2] = b' ';
-    buf[3] = b'r';
-    buf[4] = b'0' + r as u8;
-    // Пока играет файл Mega Drive, показываем режим фильтра прямо из
-    // пункта меню. С устройства пришло «выбор есть, но не переключается»,
-    // а проверить это в симуляции нельзя: фирмварь там не исполняется.
-    // Если цифра меняется при переключении — значит значение доезжает и
-    // виновата запись в регистр; если стоит на месте — не доезжает.
-    let mut n = 5;
-    if MD_FILTER_ON.load(Relaxed) {
-        buf[n] = b' ';
-        buf[n + 1] = b'F';
-        buf[n + 2] = b'0' + (md_filter_mode() & 3) as u8;
-        n += 3;
+    let mut n = 0usize;
+    let put = |v: u32, b: &mut [u8; 48], n: &mut usize| {
+        let mut d = 1000;
+        let mut go = false;
+        while d > 0 {
+            let c = v / d % 10;
+            if c != 0 || go || d == 1 {
+                b[*n] = b'0' + c as u8;
+                *n += 1;
+                go = true;
+            }
+            d /= 10;
+        }
+    };
+    // Хэш (FNV-1a 32) содержимого staging после чтения слота: сличение
+    // с эталоном из заметок к релизу покажет, портится ли чтение на
+    // железе. Искажённый, но открывшийся трек Comix Zone — главный
+    // клиент: хэш сойдётся = файл в памяти цел, копать звуковой тракт;
+    // не сойдётся = чтение/APF.
+    {
+        let h = LOAD_HASH.load(Relaxed);
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        buf[n] = b'h';
+        buf[n + 1] = b':';
+        for k in 0..8 {
+            buf[n + 2 + k] = HEX[((h >> (28 - 4 * k)) & 0xF) as usize];
+        }
+        n += 10;
+    }
+    // Подтверждение openfile: «c:ok3» — путь сошёлся с третьей попытки,
+    // «c:no0» — 008A не пришёл, «c:no20» — за 20 попыток путь не совпал
+    // (файл в слоте, скорее всего, НЕ тот, что открывали). «f1» — openfile
+    // ушло в служебный слот 3 вместо выбранного пользователем.
+    {
+        let (cok, ctries, cfb) = files::diag_confirm();
+        if n + 6 <= buf.len() {
+            buf[n] = b' ';
+            buf[n + 1] = b'c';
+            buf[n + 2] = b':';
+            buf[n + 3] = if cok { b'o' } else { b'n' };
+            buf[n + 4] = if cok { b'k' } else { b'o' };
+            n += 5;
+            put(ctries, buf, &mut n);
+            if cfb && n + 3 <= buf.len() {
+                buf[n] = b' ';
+                buf[n + 1] = b'f';
+                buf[n + 2] = b'1';
+                n += 3;
+            }
+        }
     }
     // Время загрузки: L<чтение слота>/<распаковка> в миллисекундах.
     // Показываем только у файлов, где оно вообще заметно.
@@ -686,19 +718,6 @@ fn diag_ff(buf: &mut [u8; 16]) -> &str {
         buf[n] = b' ';
         buf[n + 1] = b'L';
         n += 2;
-        let mut put = |v: u32, b: &mut [u8; 16], n: &mut usize| {
-            let mut d = 1000;
-            let mut go = false;
-            while d > 0 {
-                let c = v / d % 10;
-                if c != 0 || go || d == 1 {
-                    b[*n] = b'0' + c as u8;
-                    *n += 1;
-                    go = true;
-                }
-                d /= 10;
-            }
-        };
         put(lms.min(9999), buf, &mut n);
         buf[n] = b'/';
         n += 1;
@@ -2277,13 +2296,37 @@ fn main() -> ! {
             push_code(&mut msg, p_own);
             error_wait4("error", &msg, files::head(&path, 56), &l3, &l4)
         } else {
-            let fsize = files::take_open_size()
-                .unwrap_or_else(|| File::size(files::slot()));
+            let fsize = match files::take_open_size() {
+                Some(s) => {
+                    SIZE_008A.store(s, core::sync::atomic::Ordering::Relaxed);
+                    s
+                }
+                None => {
+                    // Путь после openfile не подтвердился: размер пойдёт из
+                    // mailbox File::size — на экране ошибки это будет видно
+                    // по прочерку в поле a:.
+                    SIZE_008A.store(0xFFFF_FFFF, core::sync::atomic::Ordering::Relaxed);
+                    File::size(files::slot())
+                }
+            };
+            SIZE_MAILBOX.store(File::size(files::slot()), core::sync::atomic::Ordering::Relaxed);
             if fsize == 0 || fsize == 0xFFFF_FFFF {
-                error_wait("error", "empty file")
+                error_wait4(
+                    "error",
+                    "empty file",
+                    "",
+                    &diag_size_line(),
+                    &diag_confirm_str(),
+                )
             } else if fsize > STAGE_MAX {
                 // Честнее сказать, чем играть обрезанный файл.
-                error_wait("error", "file too large (over 7M)")
+                error_wait4(
+                    "error",
+                    "file too large (over 7M)",
+                    "",
+                    &diag_size_line(),
+                    &diag_confirm_str(),
+                )
             } else {
                 match load_slot(fsize) {
                     Ok(data) => dispatch(data, &pl),
@@ -2345,6 +2388,81 @@ fn main() -> ! {
 static LOAD_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static DEC_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+// --- Диагностика 0.2.25: сличение с эталоном скажет, портится ли файл ---
+/// FNV-1a 32 по содержимому staging после чтения слота
+static LOAD_HASH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Слот, из которого реально читали
+static LOAD_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Размер, переданный в load_slot: из 008A; 0xFFFF_FFFF — взят File::size()
+/// (путь не подтвердился, работаем по шаткому mailbox)
+static SIZE_008A: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0xFFFF_FFFF);
+/// File::size(слот) в момент чтения — для сличения с размером из 008A
+static SIZE_MAILBOX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn fnv1a32(data: &[u8]) -> u32 {
+    let mut h = 0x811c_9dc5u32;
+    for &b in data {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// Строка «sl:<слот> a:<размер 008A> f:<размер mailbox>» — по ней видно,
+/// откуда взят размер и совпали ли оба источника.
+fn diag_size_line() -> String {
+    let a = SIZE_008A.load(core::sync::atomic::Ordering::Relaxed);
+    let f = SIZE_MAILBOX.load(core::sync::atomic::Ordering::Relaxed);
+    let sl = LOAD_SLOT.load(core::sync::atomic::Ordering::Relaxed);
+    let a = if a == 0xFFFF_FFFF {
+        String::from("--------")
+    } else {
+        alloc::format!("{:08x}", a)
+    };
+    alloc::format!("sl:{} a:{} f:{:08x}", sl, a, f)
+}
+
+/// Строка «rd:<мс> h:<fnv>» плюс 8 байт из края staging: начала файла
+/// (head) или конца (tail — там лежит ISIZE у .vgz).
+fn diag_hash_line(tail: bool, staged: &[u8]) -> String {
+    let edge8: alloc::vec::Vec<u8> = if staged.len() >= 8 {
+        if tail {
+            staged[staged.len() - 8..].to_vec()
+        } else {
+            staged[..8].to_vec()
+        }
+    } else {
+        alloc::vec::Vec::new()
+    };
+    let hex: String = edge8
+        .iter()
+        .map(|b| alloc::format!("{:02x}", b))
+        .collect();
+    alloc::format!(
+        "rd:{} h:{:08x} {}:{}",
+        LOAD_MS.load(core::sync::atomic::Ordering::Relaxed),
+        LOAD_HASH.load(core::sync::atomic::Ordering::Relaxed),
+        if tail { "tail" } else { "head" },
+        hex
+    )
+}
+
+/// Состояние подтверждения openfile короткой строкой: «ok3» — путь
+/// совпал с третьей попытки, «no0» — 008A не пришёл, «no7» — за 7
+/// попыток путь не совпал. Плюс « f1», если openfile ушло в слот 3.
+fn diag_confirm_str() -> String {
+    let (ok, tries, fb) = files::diag_confirm();
+    let mut s = alloc::format!(
+        "c:{}{}",
+        if ok { "ok" } else { "no" },
+        tries
+    );
+    if fb {
+        s.push_str(" f1");
+    }
+    s
+}
+
 fn ticks_ms(from: u32) -> u32 {
     chipbox_read(0x18).wrapping_sub(from) / 44
 }
@@ -2356,18 +2474,31 @@ fn load_slot(size: u32) -> Result<&'static [u8], u32> {
     // структур и куча. Обрезанный файл поймает разбор формата, а порча
     // памяти ловится только падением через несколько секунд.
     let size = size.min(STAGE_MAX);
+    LOAD_SLOT.store(files::slot(), core::sync::atomic::Ordering::Relaxed);
     if !files::read_slot_to(files::slot(), size, STAGE_BASE) {
+        // Время фиксируем и на ошибке: отличить медленное чтение от
+        // мгновенного отказа APF по экрану ошибки.
+        LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
         return Err(files::last_err());
     }
     LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
     DEC_MS.store(0, core::sync::atomic::Ordering::Relaxed);
-    Ok(unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) })
+    let data = unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) };
+    LOAD_HASH.store(fnv1a32(data), core::sync::atomic::Ordering::Relaxed);
+    Ok(data)
 }
 
 fn file_read_error(e: u32) -> Ctl {
     let mut msg = String::from("file read err ");
     push_code(&mut msg, e);
-    error_wait("error", &msg)
+    // Хэш здесь не показываем: на неудачном чтении в staging лежит
+    // мусор/прежний файл, сличать не с чем.
+    let line4 = alloc::format!(
+        "{} rd:{}",
+        diag_confirm_str(),
+        LOAD_MS.load(core::sync::atomic::Ordering::Relaxed)
+    );
+    error_wait4("error", &msg, "", &diag_size_line(), &line4)
 }
 
 /// Определение формата по магии и запуск
@@ -2407,6 +2538,9 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 staged[n - 4], staged[n - 3], staged[n - 2], staged[n - 1],
             ]);
             if isize_le > 28 * 1024 * 1024 {
+                // Диагностика 0.2.25: «unpacked XXM» — это либо чужой/
+                // битый размер, либо битый хвост gzip. Показываем оба
+                // размера, хэш прочитанного и реальные байты хвоста.
                 let mut msg = String::from("unpacked ");
                 let mb = isize_le / (1024 * 1024);
                 if mb >= 10 {
@@ -2414,7 +2548,12 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 }
                 msg.push((b'0' + (mb % 10) as u8) as char);
                 msg.push_str("M, over heap");
-                return error_wait("VGM", &msg);
+                let line4 = alloc::format!(
+                    "is:{:08x} {}",
+                    isize_le,
+                    diag_hash_line(true, staged)
+                );
+                return error_wait4("VGM", &msg, "", &diag_size_line(), &line4);
             }
         }
         let t0 = chipbox_read(0x18);
@@ -2424,7 +2563,15 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 decompressed = v;
                 &decompressed
             }
-            Err(_) => return error_wait("VGM", "vgz decompress error"),
+            Err(_) => {
+                return error_wait4(
+                    "VGM",
+                    "vgz decompress error",
+                    "",
+                    &diag_size_line(),
+                    &diag_hash_line(true, staged),
+                )
+            }
         }
     } else {
         staged
@@ -2437,7 +2584,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             let tail = files::tail(&path, 24);
             let mut msg = String::from("unknown format: ");
             msg.push_str(tail);
-            return error_wait("?", &msg);
+            return error_wait4("?", &msg, "", &diag_size_line(), &diag_hash_line(false, staged));
         }
     };
 
@@ -3247,7 +3394,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 let el = elapsed_s();
                 if el != shown_s {
                     shown_s = el;
-                    let mut fbuf = [0u8; 16];
+                    let mut fbuf = [0u8; 48];
                     ui::progress(el.min(total_s), total_s, diag_ff(&mut fbuf));
                 }
             }
@@ -3291,7 +3438,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                         let el = elapsed_s();
                         if el != shown_s {
                             shown_s = el;
-                            let mut fbuf = [0u8; 16];
+                            let mut fbuf = [0u8; 48];
                             ui::progress(el.min(total_s), total_s, diag_ff(&mut fbuf));
                         }
                         core::hint::spin_loop();
