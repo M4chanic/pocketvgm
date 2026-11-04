@@ -649,11 +649,12 @@ fn nes_filter_set(on: bool) {
     chipbox_write(0x2D, m);
 }
 
-/// Служебная строка диагностики (только Developer info: On). 0.2.25 —
-/// диагностический релиз: в начале строки стоят хэш прочитанного файла
-/// и состояние подтверждения openfile, место ради них отдано блокам
-/// f0r0/F0 (их баги закрыты). Дальше: d9g9 — отброшенные команды,
-/// L<чтение>/<распаковка> — время загрузки.
+/// Служебная строка диагностики (только Developer info: On). 0.2.29 —
+/// тайминги фаз загрузки: c:.. — подтверждение openfile, O<мс> —
+/// длительность open() (openfile+поллинг, раньше это была «замершая
+/// картинка»), L<чтение>/<распаковка> — время чтения слота и
+/// распаковки gzip, a<n> — число попыток чтения. Хэш файла сюда больше
+/// не влезает; на экранах ошибок он остался (diag_hash_line).
 fn diag_ff(buf: &mut [u8; 48]) -> &str {
     if !dev_mode() {
         return "";
@@ -673,20 +674,17 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
             d /= 10;
         }
     };
-    // Хэш (FNV-1a 32) содержимого staging после чтения слота: сличение
-    // с эталоном из заметок к релизу покажет, портится ли чтение на
-    // железе. Искажённый, но открывшийся трек Comix Zone — главный
-    // клиент: хэш сойдётся = файл в памяти цел, копать звуковой тракт;
-    // не сойдётся = чтение/APF.
+    // Время open(): «O5300» — openfile и поллинг подтверждения на
+    // последнем треке. На медленных картах openfile у OS идёт
+    // секунды; раньше они выглядели как просто «замерший экран».
     {
-        let h = LOAD_HASH.load(Relaxed);
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        buf[n] = b'h';
-        buf[n + 1] = b':';
-        for k in 0..8 {
-            buf[n + 2 + k] = HEX[((h >> (28 - 4 * k)) & 0xF) as usize];
+        let o = crate::files::open_ms().min(9999);
+        if o >= 100 && n + 6 <= buf.len() {
+            buf[n] = b' ';
+            buf[n + 1] = b'O';
+            n += 2;
+            put(o, buf, &mut n);
         }
-        n += 10;
     }
     // Подтверждение openfile: «c:ok3» — путь сошёлся с третьей попытки,
     // «c:no0» — 008A не пришёл, «c:no20» — за 20 попыток путь не совпал
@@ -710,7 +708,8 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
             }
         }
     }
-    // Время загрузки: L<чтение слота>/<распаковка> в миллисекундах.
+    // Время загрузки: L<чтение слота>/<распаковка> в миллисекундах,
+    // a<n> — сколько попыток чтения понадобилось (1 — с первого раза).
     // Показываем только у файлов, где оно вообще заметно.
     let lms = LOAD_MS.load(Relaxed);
     let dms = DEC_MS.load(Relaxed);
@@ -722,6 +721,13 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
         buf[n] = b'/';
         n += 1;
         put(dms.min(9999), buf, &mut n);
+        let at = LOAD_ATTEMPTS.load(Relaxed).min(99);
+        if at > 1 && n + 4 <= buf.len() {
+            buf[n] = b' ';
+            buf[n + 1] = b'a';
+            n += 2;
+            put(at, buf, &mut n);
+        }
     }
 
     // Отброшенное: d — записи второму экземпляру чипа, g — маски стерео
@@ -2120,6 +2126,10 @@ fn main() -> ! {
     // иначе одиночный трек
     let own_path = files::slot_path();
     println!("Файл: {own_path}");
+    // 0.2.29: видимый статус — чтение выбранного файла может идти
+    // секунды, а экран до этого молчал с одним «loading...» с самого
+    // старта ядра.
+    ui::status("reading...");
     let staged = match load_slot(size) {
         Ok(data) => data,
         Err(e) => {
@@ -2150,9 +2160,17 @@ fn main() -> ! {
         // files::siblings_from_index про то, откуда берётся префикс пути.
         list = alloc::vec::Vec::new();
         let mut dir = String::from(base.as_str());
-        for _ in 0..8 {
+        for i in 0..8 {
             let mut cand = dir.clone();
             cand.push_str("index.txt");
+            // 0.2.29: охота за индексом на экран. Каждый openfile —
+            // обращение к OS, на медленных картах это секунды на
+            // кандидата, и весь этап до первого звука был невидимым.
+            ui::status(&alloc::format!(
+                "scan {}/8 {}",
+                i + 1,
+                files::tail(dir.trim_end_matches('/'), 6)
+            ));
             if files::open(&cand) {
                 // Содержимое слота теперь чужое, чем бы ни кончился разбор
                 files::mark_dirty();
@@ -2203,6 +2221,10 @@ fn main() -> ! {
             if !list.is_empty() {
                 break; // индекс уже дал список
             }
+            ui::status(&alloc::format!(
+                "m3u {}",
+                files::head(&cand[base.len()..], 9)
+            ));
             if files::open(cand) {
                 files::mark_dirty();
                 let psize = File::size(files::slot());
@@ -2256,13 +2278,20 @@ fn main() -> ! {
         let dirty = files::take_dirty();
         let opened = if path == in_slot && !dirty {
             true
-        } else if files::open(&path) {
-            // Слот выбирает files::open: служебный, при отказе —
-            // пользовательский. Пустой файл ловится ниже по размеру.
-            in_slot = path.clone();
-            true
         } else {
-            false
+            // 0.2.29: раньше секунды openfile выглядели как замершая
+            // картинка — теперь в строке статуса хотя бы видно, что
+            // идёт открытие (его миллисекунды потом в служебной строке
+            // как O<мс>).
+            ui::status("opening...");
+            if files::open(&path) {
+                // Слот выбирает files::open: служебный, при отказе —
+                // пользовательский. Пустой файл ловится ниже по размеру.
+                in_slot = path.clone();
+                true
+            } else {
+                false
+            }
         };
         let ctl = if !opened {
             // Коды APF для диагностики с экрана: «open err A/B idx:C
@@ -2376,6 +2405,11 @@ fn main() -> ! {
 /// 44100, отсюда и миллисекунды.
 static LOAD_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static DEC_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Сколько попыток чтения сделал load_validated (0.2.29): вместе с
+/// O<open> и L<чтение>/<распаковка> показывает, где реально уходят
+/// секунды при медленном переключении.
+static LOAD_ATTEMPTS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
 
 // --- Диагностика 0.2.25: сличение с эталоном скажет, портится ли файл ---
 /// FNV-1a 32 по содержимому staging после чтения слота
@@ -2543,6 +2577,7 @@ fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
+        LOAD_ATTEMPTS.store(attempt, core::sync::atomic::Ordering::Relaxed);
         if let Ok(data) = load_slot_cap(size, 6_000) {
             if content_plausible(path, data) {
                 ui::status("");
@@ -2553,8 +2588,15 @@ fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
             ui::status("");
             return Err(98);
         }
+        // 0.2.29: «loading 3 t9» — попытка и секунды с начала загрузки.
+        // По этой строке на скриншоте видно, где реально уходят
+        // секунды: в чтении (t растёт рывками по ~время чтения) или в
+        // ожидании подмены слота (t растёт равномерно).
         let mut msg = String::from("loading ");
         push_code(&mut msg, attempt);
+        msg.push(' ');
+        msg.push('t');
+        push_code(&mut msg, (chipbox_read(0x18).wrapping_sub(t0) / 44_100).min(99));
         ui::status(&msg);
         files::settle_ms(200);
         // Размер берём заново: mailbox обновляется по ходу подмены.
@@ -2629,6 +2671,10 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             }
         }
         let t0 = chipbox_read(0x18);
+        // 0.2.29: распаковка большого .vgz на софткоре идёт секунды,
+        // и всё это время на экране висело последнее «loading N» без
+        // понятня, что происходит. DEC_MS этой фазы — вторая цифра L.
+        ui::status("unpacking...");
         match decompress(staged) {
             Ok(v) => {
                 DEC_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);

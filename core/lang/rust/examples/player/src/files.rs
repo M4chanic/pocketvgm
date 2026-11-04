@@ -45,6 +45,16 @@ pub fn slot() -> u32 {
     SLOT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Миллисекунды последнего open() (0.2.29): на медленных картах сам
+/// openfile у OS занимает секунды, и это время выглядело как «замерший
+/// экран» без всяких признаков жизни. Показывается в служебной строке
+/// как O<мс>.
+static OPEN_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn open_ms() -> u32 {
+    OPEN_MS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Короткая пауза по 44.1-кГц счётчику chipbox. Нужна между командами APF:
 /// сразу после 008A read иногда попадает в переходное состояние слота.
 fn wait_ms(ms: u32) {
@@ -187,6 +197,17 @@ pub fn user_slot_err() -> u32 {
 /// служебный. Удачный слот остаётся активным: из него дальше читает
 /// load_slot. Коды обеих попыток видны на экране ошибки.
 pub fn open(path: &str) -> bool {
+    let t0 = crate::chipbox_read(0x18);
+    let r = open_timed(path);
+    // Счётчик 44.1 кГц; делим как ticks_ms в main.rs (/44).
+    OPEN_MS.store(
+        crate::chipbox_read(0x18).wrapping_sub(t0) / 44,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    r
+}
+
+fn open_timed(path: &str) -> bool {
     let c0 = bridge_reads();
     let user_slot = USER_SLOT.load(core::sync::atomic::Ordering::Relaxed);
     set_slot(user_slot);
