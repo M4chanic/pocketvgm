@@ -59,13 +59,14 @@ pub fn settle_ms(ms: u32) {
     wait_ms(ms);
 }
 
-fn wait_op() -> bool {
+fn wait_op_cap(max_ms: u32) -> bool {
     let p = unsafe { pac::Peripherals::steal() };
     // Максимум файла в staging — 7 МБ, а APF-перекачка идёт всего несколько
     // МБ/с. Старый предел ~1 с обрывал нормальное чтение, после чего новая
     // команда запускалась поверх ещё не закончившейся перекачки. Десяти
     // секунд хватает с большим запасом; бесконечный цикл не возвращаем,
-    // чтобы пустой/зависший запрос всё же освобождал плеер.
+    // чтобы пустой/зависший запрос всё же освобождал плеер. Повторные
+    // попытки чтения идут через меньший предел (см. read_slot_to).
     let t0 = crate::chipbox_read(0x18);
     loop {
         let st = p.APF_BRIDGE.status.read().bits();
@@ -79,7 +80,7 @@ fn wait_op() -> bool {
             LAST_ERR.store(code, core::sync::atomic::Ordering::Relaxed);
             return code == 0;
         }
-        if crate::chipbox_read(0x18).wrapping_sub(t0) > 10 * 44_100 {
+        if crate::chipbox_read(0x18).wrapping_sub(t0) > max_ms * 44_100 {
             break;
         }
         core::hint::spin_loop();
@@ -87,6 +88,10 @@ fn wait_op() -> bool {
     // 99 — наш таймаут, не код APF (у того поле результата трёхбитное).
     LAST_ERR.store(99, core::sync::atomic::Ordering::Relaxed);
     false
+}
+
+fn wait_op() -> bool {
+    wait_op_cap(10_000)
 }
 
 /// Путь файла, выбранного в слоте (пустая строка при ошибке)
@@ -194,15 +199,16 @@ pub fn open(path: &str) -> bool {
     if ok {
         // 0.2.26: уведомление 008A после openfile на железе не приходит
         // ни разу (c:no0 во ВСЕХ отчётах 0.2.25, включая исправно
-        // играющие треки) — ждать его бессмысленно, каждое переключение
-        // только теряло секунду. Единственный доступный сигнал «OS
-        // обработал openfile» — getfile начинает отдавать новый путь.
-        // Сразу после openfile getfile отдаёт прежний путь, поэтому
-        // поллим до ~2 с. Не сошлось — всё равно читаем: самопроверка
-        // содержимого в load_validated ловит старый файл и перечитывает.
-        for t in 1..=130u32 {
+        // играющие треки) — ждать его бессмысленно. Единственный
+        // доступный сигнал «OS обработал openfile» — getfile начинает
+        // отдавать новый путь. Сразу после openfile getfile отдаёт
+        // прежний путь, поэтому поллим недолго (0.2.27: было 2 с —
+        // заметно тормозило каждое переключение). Не сошлось — читаем
+        // всё равно: самопроверка содержимого в load_validated ловит
+        // старый файл и перечитывает.
+        for t in 1..=40u32 {
             CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
-            if slot_path() == path {
+            if poll_path(path) {
                 CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
                 wait_ms(10);
                 break;
@@ -348,10 +354,15 @@ fn open_as(path: &str) -> bool {
     wait_op()
 }
 
-/// Чтение из произвольного слота с таймаутом (block_op_complete litex
-/// может зависнуть навечно на пустом слоте). Код APF 2 («error/out of range»)
-/// сразу после openfile бывает переходным: один повтор через короткую паузу.
-pub fn read_slot_to(slot_id: u32, len: u32, addr: u32) -> bool {
+/// Чтение из произвольного слота (block_op_complete litex может зависнуть
+/// навечно на пустом слоте). cap_ms — предел ожидания одной попытки:
+/// первую попытку полного файла даём 10 с (большие файлы читаются
+/// секунды), повторным хватает 2 с — если мост молчит дольше, он
+/// застрял и десять секунд не спасут (0.2.27: без этого лимита серия
+/// повторов сжигала до 100 с молча). Код APF 2 («error/out of range»)
+/// сразу после openfile бывает переходным: один повтор через короткую
+/// паузу.
+pub fn read_slot_to(slot_id: u32, len: u32, addr: u32, cap_ms: u32) -> bool {
     let p = unsafe { pac::Peripherals::steal() };
     for attempt in 0..2 {
         unsafe {
@@ -361,7 +372,7 @@ pub fn read_slot_to(slot_id: u32, len: u32, addr: u32) -> bool {
             p.APF_BRIDGE.ram_data_address.write(|w| w.bits(addr));
             p.APF_BRIDGE.request_read.write(|w| w.bits(1));
         }
-        if wait_op() {
+        if wait_op_cap(if attempt == 0 { cap_ms } else { 2_000 }) {
             return true;
         }
         if last_err() != 2 || attempt == 1 {
@@ -370,6 +381,25 @@ pub fn read_slot_to(slot_id: u32, len: u32, addr: u32) -> bool {
         wait_ms(20);
     }
     false
+}
+
+/// getfile с коротким ожиданием — для поллинга пути после openfile.
+/// Обычный slot_path ждёт до 10 с; в цикле опроса застрявший запрос
+/// раздул бы ожидание до минут. true — путь слота совпал с ожидаемым.
+pub fn poll_path(path: &str) -> bool {
+    let p = unsafe { pac::Peripherals::steal() };
+    unsafe {
+        core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
+        p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
+        p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
+        p.APF_BRIDGE.request_getfile.write(|w| w.bits(1));
+    }
+    if !wait_op_cap(400) {
+        return false;
+    }
+    let raw = unsafe { core::slice::from_raw_parts(STRUCT_BUF as *const u8, 256) };
+    let len = raw.iter().position(|&b| b == 0).unwrap_or(255);
+    raw[..len] == *path.as_bytes()
 }
 
 /// Расширение пути без срезов строки: `path[len-4..]` падает, если путь

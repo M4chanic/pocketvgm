@@ -946,7 +946,7 @@ fn fnv1a(d: &[u8]) -> u32 {
 /// чтение данных из слота работает — распознаём содержимое по сигнатуре
 fn probe_slot(slot: u32) -> Option<&'static str> {
     unsafe { core::ptr::write_bytes(STAGE_BASE as *mut u8, 0, 16) };
-    if !files::read_slot_to(slot, 512, STAGE_BASE) {
+    if !files::read_slot_to(slot, 512, STAGE_BASE, 10_000) {
         return None;
     }
     let d = unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, 16) };
@@ -2048,7 +2048,7 @@ fn main() -> ! {
         files::set_slot(slot);
         let has = !files::slot_path().is_empty() || probe_slot(slot).is_some();
         present[i] = has;
-        if has && files::read_slot_to(slot, 4096, STAGE_BASE) {
+        if has && files::read_slot_to(slot, 4096, STAGE_BASE, 10_000) {
             fps[i] = fnv1a(unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, 4096) });
         }
     }
@@ -2448,15 +2448,16 @@ fn ticks_ms(from: u32) -> u32 {
     chipbox_read(0x18).wrapping_sub(from) / 44
 }
 
-/// Чтение содержимого слота в staging-буфер
-fn load_slot(size: u32) -> Result<&'static [u8], u32> {
+/// Чтение содержимого слота в staging-буфер. cap_ms — предел одной
+/// попытки; повторы внутри read_slot_to идут с коротким пределом.
+fn load_slot_cap(size: u32, cap_ms: u32) -> Result<&'static [u8], u32> {
     let t0 = chipbox_read(0x18);
     // Дальше отсека не читаем ни при каких размерах: за ним буфер
     // структур и куча. Обрезанный файл поймает разбор формата, а порча
     // памяти ловится только падением через несколько секунд.
     let size = size.min(STAGE_MAX);
     LOAD_SLOT.store(files::slot(), core::sync::atomic::Ordering::Relaxed);
-    if !files::read_slot_to(files::slot(), size, STAGE_BASE) {
+    if !files::read_slot_to(files::slot(), size, STAGE_BASE, cap_ms) {
         // Время фиксируем и на ошибке: отличить медленное чтение от
         // мгновенного отказа APF по экрану ошибки.
         LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
@@ -2467,6 +2468,10 @@ fn load_slot(size: u32) -> Result<&'static [u8], u32> {
     let data = unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) };
     LOAD_HASH.store(fnv1a32(data), core::sync::atomic::Ordering::Relaxed);
     Ok(data)
+}
+
+fn load_slot(size: u32) -> Result<&'static [u8], u32> {
+    load_slot_cap(size, 10_000)
 }
 
 fn file_read_error(e: u32) -> Ctl {
@@ -2525,31 +2530,38 @@ fn content_plausible(path: &str, d: &[u8]) -> bool {
     files::has_ext(path, ".gym")
 }
 
-/// Чтение трека с самопроверкой (0.2.26): после openfile OS подменяет
-/// содержимое слота с задержкой, надёжного сигнала готовности нет (008A
-/// не приходит, getfile может и не переключиться), поэтому читаем,
-/// проверяем content_plausible и при провале даём OS время и читаем
-/// снова. Размер на каждой попытке берём заново: mailbox обновляется
-/// по ходу подмены. Код 98 — самопроверка не сошлась после всех попыток.
+/// Чтение трека с самопроверкой (0.2.26, бюджет времени 0.2.27):
+/// после openfile OS подменяет содержимое слота с задержкой, надёжного
+/// сигнала готовности нет (008A не приходит, getfile может и не
+/// переключиться), поэтому читаем, проверяем content_plausible и при
+/// провале даём OS время и читаем снова. Весь цикл уложен в ~9 с —
+/// 0.2.26 без лимита сжигала до 100 с молча (10-секундные таймауты
+/// чтения на каждой из 5 попыток). Ход процесса виден в строке статуса.
+/// Код 98 — самопроверка не сошлась за отведённое время.
 fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
-    let mut data = load_slot(size)?;
-    for _ in 0..4 {
-        if content_plausible(path, data) {
-            return Ok(data);
+    let t0 = chipbox_read(0x18);
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        if let Ok(data) = load_slot_cap(size, 3_000) {
+            if content_plausible(path, data) {
+                ui::status("");
+                return Ok(data);
+            }
         }
-        files::settle_ms(150);
-        size = File::size(files::slot());
-        if size == 0 || size == 0xFFFF_FFFF || size > STAGE_MAX {
-            // Промежуточное состояние слота: размер ещё мусорный.
-            // Следующая попытка возьмёт размер снова.
-            continue;
+        if chipbox_read(0x18).wrapping_sub(t0) > 9 * 44_100 {
+            ui::status("");
+            return Err(98);
         }
-        data = load_slot(size)?;
-    }
-    if content_plausible(path, data) {
-        Ok(data)
-    } else {
-        Err(98)
+        let mut msg = String::from("loading ");
+        push_code(&mut msg, attempt);
+        ui::status(&msg);
+        files::settle_ms(200);
+        // Размер берём заново: mailbox обновляется по ходу подмены.
+        let s = File::size(files::slot());
+        if s != 0 && s != 0xFFFF_FFFF && s <= STAGE_MAX {
+            size = s;
+        }
     }
 }
 
