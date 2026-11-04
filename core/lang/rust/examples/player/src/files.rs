@@ -9,7 +9,6 @@ use litex_openfpga::litex_pac as pac;
 
 /// Буфер параметр/ответ-структур (SDRAM, между staging и кучей)
 const STRUCT_BUF: u32 = 0x4170_0000;
-
 /// Активный data-слот. Слотов ТРИ (Sega / Nintendo / Computer):
 /// расширения разнесены между ними из-за лимита APF в 4 расширения на
 /// слот. Комментарий про два слота устарел — выбор слота на старте см. в
@@ -24,40 +23,6 @@ static LAST_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::
 /// SID подгружает тот же слот, и после неё трек надо открывать заново,
 /// иначе на повторе в буфер попадёт база вместо музыки.
 static SLOT_DIRTY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// Размер файла из 008A, следующего за последним успешным openfile.
-/// Отдельный флажок вместо Option: AtomicU32::new нельзя задать как None.
-static LAST_OPEN_SIZE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static LAST_OPEN_VALID: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-fn set_open_size(size: u32) {
-    LAST_OPEN_SIZE.store(size, core::sync::atomic::Ordering::Relaxed);
-    LAST_OPEN_VALID.store(true, core::sync::atomic::Ordering::Relaxed);
-}
-
-fn clear_open_size() {
-    LAST_OPEN_VALID.store(false, core::sync::atomic::Ordering::Relaxed);
-}
-
-/// Размер из 008A последнего успешного openfile. После read взять его
-/// обязательно: это актуальный размер именно открытого файла, тогда как
-/// File::size() может ещё возвращать предыдущий слот/размер из mailbox.
-pub fn take_open_size() -> Option<u32> {
-    if LAST_OPEN_VALID.swap(false, core::sync::atomic::Ordering::Relaxed) {
-        Some(LAST_OPEN_SIZE.load(core::sync::atomic::Ordering::Relaxed))
-    } else {
-        None
-    }
-}
-
-/// Размер последнего обновления слота (для файла, выбранного пользователем
-/// до старта плеера). Возвращает Some только когда id совпал с запрошенным.
-pub fn last_update_size(slot_id: u32) -> Option<u32> {
-    if upd_id() == slot_id {
-        Some(upd_size())
-    } else {
-        None
-    }
-}
 
 pub fn mark_dirty() {
     SLOT_DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -87,6 +52,11 @@ fn wait_ms(ms: u32) {
     while crate::chipbox_read(0x18).wrapping_sub(t0) < ms * 44_100 {
         core::hint::spin_loop();
     }
+}
+
+/// Пауза для внешних вызывающих (самопроверка чтения в main.rs)
+pub fn settle_ms(ms: u32) {
+    wait_ms(ms);
 }
 
 fn wait_op() -> bool {
@@ -212,11 +182,9 @@ pub fn user_slot_err() -> u32 {
 /// служебный. Удачный слот остаётся активным: из него дальше читает
 /// load_slot. Коды обеих попыток видны на экране ошибки.
 pub fn open(path: &str) -> bool {
-    clear_open_size();
     let c0 = bridge_reads();
     let user_slot = USER_SLOT.load(core::sync::atomic::Ordering::Relaxed);
     set_slot(user_slot);
-    let u0 = upd_count();
     CONFIRM_OK.store(false, core::sync::atomic::Ordering::Relaxed);
     CONFIRM_TRIES.store(0, core::sync::atomic::Ordering::Relaxed);
     OPENED_FALLBACK.store(false, core::sync::atomic::Ordering::Relaxed);
@@ -224,21 +192,22 @@ pub fn open(path: &str) -> bool {
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
-        // 008A даёт когерентный размер, но при быстрых переключениях read
-        // сразу за ним всё ещё может попасть в переходное состояние слота.
-        // Подтверждаем getfile точным путём и даём слоту короткую паузу.
-        if wait_slot_update(u0, user_slot) {
-            wait_ms(20);
-            for t in 1..=20u32 {
-                CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
-                if slot_path() == path && upd_id() == user_slot {
-                    CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
-                    set_open_size(upd_size());
-                    wait_ms(10);
-                    break;
-                }
+        // 0.2.26: уведомление 008A после openfile на железе не приходит
+        // ни разу (c:no0 во ВСЕХ отчётах 0.2.25, включая исправно
+        // играющие треки) — ждать его бессмысленно, каждое переключение
+        // только теряло секунду. Единственный доступный сигнал «OS
+        // обработал openfile» — getfile начинает отдавать новый путь.
+        // Сразу после openfile getfile отдаёт прежний путь, поэтому
+        // поллим до ~2 с. Не сошлось — всё равно читаем: самопроверка
+        // содержимого в load_validated ловит старый файл и перечитывает.
+        for t in 1..=130u32 {
+            CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
+            if slot_path() == path {
+                CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
                 wait_ms(10);
+                break;
             }
+            wait_ms(15);
         }
         return true;
     }
@@ -253,45 +222,6 @@ pub fn open(path: &str) -> bool {
         set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
     }
     ok
-}
-
-/// Счётчик уведомлений 008A «слот обновлён» (chipbox 0x20, биты 23:16)
-fn upd_count() -> u32 {
-    (crate::chipbox_read(0x20) >> 16) & 0xFF
-}
-
-/// Id слота последнего 008A (chipbox 0x20, младшие 16 бит)
-fn upd_id() -> u32 {
-    crate::chipbox_read(0x20) & 0xFFFF
-}
-
-/// Размер последнего 008A (chipbox 0x21), когерентен полю из 0x20
-fn upd_size() -> u32 {
-    crate::chipbox_read(0x21)
-}
-
-/// Дождаться 008A с новым размером файла после openfile. true — пришло
-/// именно ожидаемое обновление нужного слота; false — только таймаут.
-///
-/// Завершение openfile не означает, что Pocket уже обновил путь, размер и
-/// содержимое слота. getfile сразу за ним тоже может вернуть прежний путь,
-/// поэтому подтверждать открытие так нельзя. Для user-reloadable слота
-/// надёжный маркер — отдельное уведомление 008A. Обновление ДРУГОГО слота
-/// не считаем: иначе можно начать чтение до смены файла.
-fn wait_slot_update(u0: u32, slot_id: u32) -> bool {
-    let t0 = crate::chipbox_read(0x18); // счётчик 44100 Гц
-    for _ in 0..10_000_000u32 {
-        let info = crate::chipbox_read(0x20);
-        let count = (info >> 16) & 0xFF;
-        let id = info & 0xFFFF;
-        if count != u0 && id == slot_id {
-            return true;
-        }
-        if crate::chipbox_read(0x18).wrapping_sub(t0) > 44_100 {
-            return false;
-        }
-    }
-    false
 }
 
 /// Сколько слов APF прочитал через мост за попытку в слоте пользователя

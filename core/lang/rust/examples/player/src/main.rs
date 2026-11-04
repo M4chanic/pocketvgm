@@ -1592,8 +1592,7 @@ fn load_songlengths(md5h: &[u8; 32], dir: &str) -> alloc::vec::Vec<u32> {
         return out;
     }
     files::mark_dirty();
-    let size = files::take_open_size()
-        .unwrap_or_else(|| File::size(files::slot()));
+    let size = File::size(files::slot());
     if size == 0 || size == 0xFFFF_FFFF {
         return out;
     }
@@ -2112,10 +2111,10 @@ fn main() -> ! {
         }
     }
 
-    // Файл пользователя уже пришёл со стартовым 008A: его размер надёжнее
-    // datatable/mailbox File::size().
-    let size = files::last_update_size(files::slot())
-        .unwrap_or_else(|| File::size(files::slot()));
+    // Размер стартового файла — из mailbox. Раньше здесь был размер из
+    // стартового 008A (last_update_size), но 008A на железе не приходит
+    // ни при старте, ни после openfile (см. комментарий у files::open).
+    let size = File::size(files::slot());
 
     // Плейлист: выбранный .m3u; иначе playlist.m3u рядом с файлом;
     // иначе одиночный трек
@@ -2157,8 +2156,7 @@ fn main() -> ! {
             if files::open(&cand) {
                 // Содержимое слота теперь чужое, чем бы ни кончился разбор
                 files::mark_dirty();
-                let isize = files::take_open_size()
-                    .unwrap_or_else(|| File::size(files::slot()));
+                let isize = File::size(files::slot());
                 if isize != 0 && isize != 0xFFFF_FFFF && isize <= STAGE_MAX {
                     if let Ok(idata) = load_slot(isize) {
                         if let Some((lst, i)) = files::siblings_from_index(idata, &own_path) {
@@ -2207,8 +2205,7 @@ fn main() -> ! {
             }
             if files::open(cand) {
                 files::mark_dirty();
-                let psize = files::take_open_size()
-                    .unwrap_or_else(|| File::size(files::slot()));
+                let psize = File::size(files::slot());
                 if psize == 0 || psize > 0x40_0000 {
                     continue; // не похоже на плейлист
                 }
@@ -2296,20 +2293,12 @@ fn main() -> ! {
             push_code(&mut msg, p_own);
             error_wait4("error", &msg, files::head(&path, 56), &l3, &l4)
         } else {
-            let fsize = match files::take_open_size() {
-                Some(s) => {
-                    SIZE_008A.store(s, core::sync::atomic::Ordering::Relaxed);
-                    s
-                }
-                None => {
-                    // Путь после openfile не подтвердился: размер пойдёт из
-                    // mailbox File::size — на экране ошибки это будет видно
-                    // по прочерку в поле a:.
-                    SIZE_008A.store(0xFFFF_FFFF, core::sync::atomic::Ordering::Relaxed);
-                    File::size(files::slot())
-                }
-            };
-            SIZE_MAILBOX.store(File::size(files::slot()), core::sync::atomic::Ordering::Relaxed);
+            // Размер — только из mailbox: 008A на железе не приходит
+            // (диагностика 0.2.25, c:no0 во всех отчётах), брать нечего.
+            // Защиту от ещё не подменённого содержимого делает
+            // load_validated: читает, самопроверяет и перечитывает.
+            let fsize = File::size(files::slot());
+            SIZE_008A.store(fsize, core::sync::atomic::Ordering::Relaxed);
             if fsize == 0 || fsize == 0xFFFF_FFFF {
                 error_wait4(
                     "error",
@@ -2328,7 +2317,7 @@ fn main() -> ! {
                     &diag_confirm_str(),
                 )
             } else {
-                match load_slot(fsize) {
+                match load_validated(&path, fsize) {
                     Ok(data) => dispatch(data, &pl),
                     Err(e) => file_read_error(e),
                 }
@@ -2393,12 +2382,10 @@ static DEC_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::ne
 static LOAD_HASH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Слот, из которого реально читали
 static LOAD_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-/// Размер, переданный в load_slot: из 008A; 0xFFFF_FFFF — взят File::size()
-/// (путь не подтвердился, работаем по шаткому mailbox)
-static SIZE_008A: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0xFFFF_FFFF);
-/// File::size(слот) в момент чтения — для сличения с размером из 008A
-static SIZE_MAILBOX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Размер, использованный для чтения (из mailbox File::size). Раньше
+/// здесь лежал размер из уведомления 008A для сличения с mailbox;
+/// 008A на железе не приходит, сличать нечего.
+static SIZE_008A: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 fn fnv1a32(data: &[u8]) -> u32 {
     let mut h = 0x811c_9dc5u32;
@@ -2408,18 +2395,12 @@ fn fnv1a32(data: &[u8]) -> u32 {
     h
 }
 
-/// Строка «sl:<слот> a:<размер 008A> f:<размер mailbox>» — по ней видно,
-/// откуда взят размер и совпали ли оба источника.
+/// Строка «sl:<слот> sz:<размер>» — слот и размер, использованные
+/// для чтения.
 fn diag_size_line() -> String {
-    let a = SIZE_008A.load(core::sync::atomic::Ordering::Relaxed);
-    let f = SIZE_MAILBOX.load(core::sync::atomic::Ordering::Relaxed);
+    let s = SIZE_008A.load(core::sync::atomic::Ordering::Relaxed);
     let sl = LOAD_SLOT.load(core::sync::atomic::Ordering::Relaxed);
-    let a = if a == 0xFFFF_FFFF {
-        String::from("--------")
-    } else {
-        alloc::format!("{:08x}", a)
-    };
-    alloc::format!("sl:{} a:{} f:{:08x}", sl, a, f)
+    alloc::format!("sl:{} sz:{:08x}", sl, s)
 }
 
 /// Строка «rd:<мс> h:<fnv>» плюс 8 байт из края staging: начала файла
@@ -2501,6 +2482,77 @@ fn file_read_error(e: u32) -> Ctl {
     error_wait4("error", &msg, "", &diag_size_line(), &line4)
 }
 
+/// Самопроверка прочитанного содержимого (0.2.26). После openfile слот
+/// физически может всё ещё держать предыдущий файл: mailbox File::size
+/// уже новый, а read отдаёт начало старого содержимого на новую длину
+/// (хэши скриншотов 0.2.25 показали ровно это — префикс трека 18).
+/// Ловим по магии формата; у .vgm дополнительно сверяем EOF offset из
+/// заголовка с реальным размером, у .vgz — ISIZE из хвоста.
+fn content_plausible(path: &str, d: &[u8]) -> bool {
+    if d.len() < 8 {
+        return false;
+    }
+    if &d[0..4] == b"Vgm " {
+        // EOF offset (0x04) = размер файла минус 4. У части рипов поле
+        // нулевое — тогда остаётся только магия.
+        let eof = u32::from_le_bytes([d[4], d[5], d[6], d[7]]);
+        return eof == 0 || eof + 4 == d.len() as u32;
+    }
+    if d[0] == 0x1F && d[1] == 0x8B {
+        // gzip: ISIZE в хвосте должен быть вменяемым. Префикс чужого
+        // файла на новой длине даёт многогигабайтный мусор — все
+        // зафиксированные случаи больше 900 МБ.
+        let n = d.len();
+        let isize_le = u32::from_le_bytes([d[n - 4], d[n - 3], d[n - 2], d[n - 1]]);
+        return isize_le <= 28 * 1024 * 1024;
+    }
+    if d.len() >= 5 && &d[0..5] == b"NESM\x1A" {
+        return true;
+    }
+    if &d[0..3] == b"GBS" && d[3] == 1 {
+        return true;
+    }
+    if &d[0..4] == b"PSID" || &d[0..4] == b"RSID" {
+        return true;
+    }
+    if &d[0..4] == b"MThd" {
+        return true;
+    }
+    if &d[0..4] == b"GYMX" {
+        return true;
+    }
+    // .gym без GYMX-магии проверить нечем — пропускаем как есть
+    files::has_ext(path, ".gym")
+}
+
+/// Чтение трека с самопроверкой (0.2.26): после openfile OS подменяет
+/// содержимое слота с задержкой, надёжного сигнала готовности нет (008A
+/// не приходит, getfile может и не переключиться), поэтому читаем,
+/// проверяем content_plausible и при провале даём OS время и читаем
+/// снова. Размер на каждой попытке берём заново: mailbox обновляется
+/// по ходу подмены. Код 98 — самопроверка не сошлась после всех попыток.
+fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
+    let mut data = load_slot(size)?;
+    for _ in 0..4 {
+        if content_plausible(path, data) {
+            return Ok(data);
+        }
+        files::settle_ms(150);
+        size = File::size(files::slot());
+        if size == 0 || size == 0xFFFF_FFFF || size > STAGE_MAX {
+            // Промежуточное состояние слота: размер ещё мусорный.
+            // Следующая попытка возьмёт размер снова.
+            continue;
+        }
+        data = load_slot(size)?;
+    }
+    if content_plausible(path, data) {
+        Ok(data)
+    } else {
+        Err(98)
+    }
+}
+
 /// Определение формата по магии и запуск
 fn dispatch(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
     if staged.len() >= 5 && &staged[0..5] == b"NESM\x1a" {
@@ -2541,12 +2593,20 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 // Диагностика 0.2.25: «unpacked XXM» — это либо чужой/
                 // битый размер, либо битый хвост gzip. Показываем оба
                 // размера, хэш прочитанного и реальные байты хвоста.
+                // Размер выводим целиком: двухзначный обрезок 0.2.25
+                // показывал «68M» при реальных 3768M.
                 let mut msg = String::from("unpacked ");
                 let mb = isize_le / (1024 * 1024);
-                if mb >= 10 {
-                    msg.push((b'0' + (mb / 10 % 10) as u8) as char);
+                let mut d = 1000;
+                let mut go = mb >= 1000;
+                while d > 0 {
+                    let c = mb / d % 10;
+                    if c != 0 || go || d == 1 {
+                        msg.push((b'0' + c as u8) as char);
+                        go = true;
+                    }
+                    d /= 10;
                 }
-                msg.push((b'0' + (mb % 10) as u8) as char);
                 msg.push_str("M, over heap");
                 let line4 = alloc::format!(
                     "is:{:08x} {}",
