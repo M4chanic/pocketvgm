@@ -206,7 +206,12 @@ pub fn open(path: &str) -> bool {
         // заметно тормозило каждое переключение). Не сошлось — читаем
         // всё равно: самопроверка содержимого в load_validated ловит
         // старый файл и перечитывает.
-        for t in 1..=40u32 {
+        // 0.2.28: поллинг сильно урезан. Замер на железе (0.2.27): getfile
+        // во время подмены слота либо отвечает прежним путём, либо молчит
+        // до таймаута — 40 поллов по 400 мс съедали 8-16 с на каждое
+        // переключение. Подтверждение здесь — оптимизация, не корректность:
+        // старый файл ловит самопроверка чтения и перечитывание.
+        for t in 1..=6u32 {
             CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
             if poll_path(path) {
                 CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
@@ -394,7 +399,7 @@ pub fn poll_path(path: &str) -> bool {
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
         p.APF_BRIDGE.request_getfile.write(|w| w.bits(1));
     }
-    if !wait_op_cap(400) {
+    if !wait_op_cap(150) {
         return false;
     }
     let raw = unsafe { core::slice::from_raw_parts(STRUCT_BUF as *const u8, 256) };

@@ -2543,13 +2543,13 @@ fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
-        if let Ok(data) = load_slot_cap(size, 3_000) {
+        if let Ok(data) = load_slot_cap(size, 6_000) {
             if content_plausible(path, data) {
                 ui::status("");
                 return Ok(data);
             }
         }
-        if chipbox_read(0x18).wrapping_sub(t0) > 9 * 44_100 {
+        if chipbox_read(0x18).wrapping_sub(t0) > 15 * 44_100 {
             ui::status("");
             return Err(98);
         }
