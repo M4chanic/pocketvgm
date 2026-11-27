@@ -55,11 +55,10 @@ pub fn open_ms() -> u32 {
     OPEN_MS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Короткая пауза по 44.1-кГц счётчику chipbox. Нужна между командами APF:
-/// сразу после 008A read иногда попадает в переходное состояние слота.
+/// Короткая пауза по 44.1-кГц счётчику chipbox.
 fn wait_ms(ms: u32) {
     let t0 = crate::chipbox_read(0x18);
-    while crate::chipbox_read(0x18).wrapping_sub(t0) < ms * 44_100 {
+    while crate::chipbox_read(0x18).wrapping_sub(t0) < ms * 44 {
         core::hint::spin_loop();
     }
 }
@@ -90,7 +89,7 @@ fn wait_op_cap(max_ms: u32) -> bool {
             LAST_ERR.store(code, core::sync::atomic::Ordering::Relaxed);
             return code == 0;
         }
-        if crate::chipbox_read(0x18).wrapping_sub(t0) > max_ms * 44_100 {
+        if crate::chipbox_read(0x18).wrapping_sub(t0) > max_ms * 44 {
             break;
         }
         core::hint::spin_loop();
@@ -160,11 +159,10 @@ static USER_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32:
 /// Код APF от попытки в слоте пользователя — для экрана ошибки
 static USER_SLOT_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-// --- Диагностика 0.2.25: что на самом деле произошло с openfile ---
-/// Путь из getfile совпал с открываемым (слот реально сменил файл)
+// --- Диагностика последнего openfile ---
+/// Команда openfile завершилась успешно (1 = одна команда, без getfile)
 static CONFIRM_OK: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
-/// Сколько попыток getfile понадобилось (0 — 008A вообще не пришёл)
 static CONFIRM_TRIES: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 /// Открытие ушло в служебный слот (fallback) — читать будем не тот слот,
@@ -172,8 +170,7 @@ static CONFIRM_TRIES: core::sync::atomic::AtomicU32 =
 static OPENED_FALLBACK: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
-/// Состояние подтверждения последнего openfile: (совпал ли путь,
-/// сколько попыток, был ли fallback в служебный слот)
+/// Состояние последнего openfile: (успех, число команд, fallback в слот 3)
 pub fn diag_confirm() -> (bool, u32, bool) {
     (
         CONFIRM_OK.load(core::sync::atomic::Ordering::Relaxed),
@@ -218,29 +215,12 @@ fn open_timed(path: &str) -> bool {
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
-        // 0.2.26: уведомление 008A после openfile на железе не приходит
-        // ни разу (c:no0 во ВСЕХ отчётах 0.2.25, включая исправно
-        // играющие треки) — ждать его бессмысленно. Единственный
-        // доступный сигнал «OS обработал openfile» — getfile начинает
-        // отдавать новый путь. Сразу после openfile getfile отдаёт
-        // прежний путь, поэтому поллим недолго (0.2.27: было 2 с —
-        // заметно тормозило каждое переключение). Не сошлось — читаем
-        // всё равно: самопроверка содержимого в load_validated ловит
-        // старый файл и перечитывает.
-        // 0.2.28: поллинг сильно урезан. Замер на железе (0.2.27): getfile
-        // во время подмены слота либо отвечает прежним путём, либо молчит
-        // до таймаута — 40 поллов по 400 мс съедали 8-16 с на каждое
-        // переключение. Подтверждение здесь — оптимизация, не корректность:
-        // старый файл ловит самопроверка чтения и перечитывание.
-        for t in 1..=6u32 {
-            CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
-            if poll_path(path) {
-                CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
-                wait_ms(10);
-                break;
-            }
-            wait_ms(15);
-        }
+        // По спецификации APF после успешного openfile слот уже можно
+        // читать. 008A относится к повторному выбору файла пользователем
+        // через Interact, а не к программному openfile. Дополнительные
+        // getfile здесь только задерживали переключение.
+        CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
+        CONFIRM_TRIES.store(1, core::sync::atomic::Ordering::Relaxed);
         return true;
     }
     USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
@@ -248,6 +228,8 @@ fn open_timed(path: &str) -> bool {
     let ok = open_as(path);
     if ok {
         OPENED_FALLBACK.store(true, core::sync::atomic::Ordering::Relaxed);
+        CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
+        CONFIRM_TRIES.store(1, core::sync::atomic::Ordering::Relaxed);
     }
     READS_OPEN.store(bridge_reads().wrapping_sub(c1) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if !ok {
@@ -374,9 +356,8 @@ fn open_as(path: &str) -> bool {
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
         p.APF_BRIDGE.request_openfile.write(|w| w.bits(1));
     }
-    // Здесь завершается только сама команда openfile. Актуализации слота
-    // ждёт вызывающая сторона через 008A; немедленный getfile возвращает
-    // прежний путь и ошибочно превращает успешное открытие в open err 0/0.
+    // APF завершает openfile только после смены файла в слоте; отдельное
+    // ожидание 008A или getfile по протоколу не требуется.
     wait_op()
 }
 
@@ -407,25 +388,6 @@ pub fn read_slot_to(slot_id: u32, len: u32, addr: u32, cap_ms: u32) -> bool {
         wait_ms(20);
     }
     false
-}
-
-/// getfile с коротким ожиданием — для поллинга пути после openfile.
-/// Обычный slot_path ждёт до 10 с; в цикле опроса застрявший запрос
-/// раздул бы ожидание до минут. true — путь слота совпал с ожидаемым.
-pub fn poll_path(path: &str) -> bool {
-    let p = unsafe { pac::Peripherals::steal() };
-    unsafe {
-        core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
-        p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
-        p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
-        p.APF_BRIDGE.request_getfile.write(|w| w.bits(1));
-    }
-    if !wait_op_cap(150) {
-        return false;
-    }
-    let raw = unsafe { core::slice::from_raw_parts(STRUCT_BUF as *const u8, 256) };
-    let len = raw.iter().position(|&b| b == 0).unwrap_or(255);
-    raw[..len] == *path.as_bytes()
 }
 
 /// Расширение пути без срезов строки: `path[len-4..]` падает, если путь

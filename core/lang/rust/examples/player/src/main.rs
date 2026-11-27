@@ -649,11 +649,10 @@ fn nes_filter_set(on: bool) {
     chipbox_write(0x2D, m);
 }
 
-/// Служебная строка диагностики (только Developer info: On). 0.2.29 —
-/// тайминги фаз загрузки: c:.. — подтверждение openfile, O<мс> —
-/// длительность open() (openfile+поллинг, раньше это была «замершая
-/// картинка»), L<чтение>/<распаковка> — время чтения слота и
-/// распаковки gzip, a<n> — число попыток чтения. Хэш файла сюда больше
+/// Служебная строка диагностики (только Developer info: On): c:ok1 —
+/// openfile успешен, O<мс> — его длительность, L<чтение>/<распаковка> —
+/// время чтения слота и распаковки gzip, a<n> — число попыток чтения.
+/// Хэш файла сюда больше
 /// не влезает; на экранах ошибок он остался (diag_hash_line).
 fn diag_ff(buf: &mut [u8; 48]) -> &str {
     if !dev_mode() {
@@ -674,9 +673,7 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
             d /= 10;
         }
     };
-    // Время open(): «O5300» — openfile и поллинг подтверждения на
-    // последнем треке. На медленных картах openfile у OS идёт
-    // секунды; раньше они выглядели как просто «замерший экран».
+    // Время openfile на последнем треке.
     {
         let o = crate::files::open_ms().min(9999);
         if o >= 100 && n + 6 <= buf.len() {
@@ -686,10 +683,7 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
             put(o, buf, &mut n);
         }
     }
-    // Подтверждение openfile: «c:ok3» — путь сошёлся с третьей попытки,
-    // «c:no0» — 008A не пришёл, «c:no20» — за 20 попыток путь не совпал
-    // (файл в слоте, скорее всего, НЕ тот, что открывали). «f1» — openfile
-    // ушло в служебный слот 3 вместо выбранного пользователем.
+    // «c:ok1» — openfile успешен; «f1» — использован служебный слот 3.
     {
         let (cok, ctries, cfb) = files::diag_confirm();
         if n + 6 <= buf.len() {
@@ -2117,9 +2111,7 @@ fn main() -> ! {
         }
     }
 
-    // Размер стартового файла — из mailbox. Раньше здесь был размер из
-    // стартового 008A (last_update_size), но 008A на железе не приходит
-    // ни при старте, ни после openfile (см. комментарий у files::open).
+    // Размер стартового файла — из обновлённой Pocket таблицы слотов.
     let size = File::size(files::slot());
 
     // Плейлист: выбранный .m3u; иначе playlist.m3u рядом с файлом;
@@ -2322,12 +2314,11 @@ fn main() -> ! {
             push_code(&mut msg, p_own);
             error_wait4("error", &msg, files::head(&path, 56), &l3, &l4)
         } else {
-            // Размер — только из mailbox: 008A на железе не приходит
-            // (диагностика 0.2.25, c:no0 во всех отчётах), брать нечего.
-            // Защиту от ещё не подменённого содержимого делает
-            // load_validated: читает, самопроверяет и перечитывает.
+            // openfile завершён, размер в таблице слотов уже актуален.
+            // Самопроверка остаётся защитой от ранее наблюдавшегося
+            // старого содержимого.
             let fsize = File::size(files::slot());
-            SIZE_008A.store(fsize, core::sync::atomic::Ordering::Relaxed);
+            SIZE_USED.store(fsize, core::sync::atomic::Ordering::Relaxed);
             if fsize == 0 || fsize == 0xFFFF_FFFF {
                 error_wait4(
                     "error",
@@ -2416,10 +2407,8 @@ static LOAD_ATTEMPTS: core::sync::atomic::AtomicU32 =
 static LOAD_HASH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Слот, из которого реально читали
 static LOAD_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-/// Размер, использованный для чтения (из mailbox File::size). Раньше
-/// здесь лежал размер из уведомления 008A для сличения с mailbox;
-/// 008A на железе не приходит, сличать нечего.
-static SIZE_008A: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Размер, использованный для чтения из таблицы слотов.
+static SIZE_USED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 fn fnv1a32(data: &[u8]) -> u32 {
     let mut h = 0x811c_9dc5u32;
@@ -2432,7 +2421,7 @@ fn fnv1a32(data: &[u8]) -> u32 {
 /// Строка «sl:<слот> sz:<размер>» — слот и размер, использованные
 /// для чтения.
 fn diag_size_line() -> String {
-    let s = SIZE_008A.load(core::sync::atomic::Ordering::Relaxed);
+    let s = SIZE_USED.load(core::sync::atomic::Ordering::Relaxed);
     let sl = LOAD_SLOT.load(core::sync::atomic::Ordering::Relaxed);
     alloc::format!("sl:{} sz:{:08x}", sl, s)
 }
@@ -2462,9 +2451,7 @@ fn diag_hash_line(tail: bool, staged: &[u8]) -> String {
     )
 }
 
-/// Состояние подтверждения openfile короткой строкой: «ok3» — путь
-/// совпал с третьей попытки, «no0» — 008A не пришёл, «no7» — за 7
-/// попыток путь не совпал. Плюс « f1», если openfile ушло в слот 3.
+/// Результат openfile короткой строкой; «f1» означает служебный слот 3.
 fn diag_confirm_str() -> String {
     let (ok, tries, fb) = files::diag_confirm();
     let mut s = alloc::format!(
@@ -2564,24 +2551,25 @@ fn content_plausible(path: &str, d: &[u8]) -> bool {
     files::has_ext(path, ".gym")
 }
 
-/// Чтение трека с самопроверкой (0.2.26, бюджет времени 0.2.27):
-/// после openfile OS подменяет содержимое слота с задержкой, надёжного
-/// сигнала готовности нет (008A не приходит, getfile может и не
-/// переключиться), поэтому читаем, проверяем content_plausible и при
-/// провале даём OS время и читаем снова. Весь цикл уложен в ~9 с —
-/// 0.2.26 без лимита сжигала до 100 с молча (10-секундные таймауты
-/// чтения на каждой из 5 попыток). Ход процесса виден в строке статуса.
-/// Код 98 — самопроверка не сошлась за отведённое время.
+/// Чтение трека с самопроверкой. Ошибка APF возвращается сразу: после
+/// таймаута нельзя запускать новую команду поверх возможно активной.
+/// Повторяются только завершённые чтения с неправильным содержимым.
+/// Код 98 — самопроверка не сошлась за 15 секунд.
 fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
     let t0 = chipbox_read(0x18);
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
         LOAD_ATTEMPTS.store(attempt, core::sync::atomic::Ordering::Relaxed);
-        if let Ok(data) = load_slot_cap(size, 6_000) {
-            if content_plausible(path, data) {
+        match load_slot_cap(size, 6_000) {
+            Ok(data) if content_plausible(path, data) => {
                 ui::status("");
                 return Ok(data);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                ui::status("");
+                return Err(e);
             }
         }
         if chipbox_read(0x18).wrapping_sub(t0) > 15 * 44_100 {
