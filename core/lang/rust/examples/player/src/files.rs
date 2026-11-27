@@ -107,6 +107,7 @@ fn wait_op() -> bool {
 pub fn slot_path() -> String {
     let p = unsafe { pac::Peripherals::steal() };
     unsafe {
+        let _ = p.APF_BRIDGE.status.read();
         core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
         p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
@@ -160,9 +161,10 @@ static USER_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32:
 static USER_SLOT_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 // --- Диагностика последнего openfile ---
-/// Команда openfile завершилась успешно (1 = одна команда, без getfile)
+/// getfile подтвердил открытый путь
 static CONFIRM_OK: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+/// Сколько запросов getfile понадобилось
 static CONFIRM_TRIES: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
 /// Открытие ушло в служебный слот (fallback) — читать будем не тот слот,
@@ -215,27 +217,40 @@ fn open_timed(path: &str) -> bool {
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
-        // По спецификации APF после успешного openfile слот уже можно
-        // читать. 008A относится к повторному выбору файла пользователем
-        // через Interact, а не к программному openfile. Дополнительные
-        // getfile здесь только задерживали переключение.
-        CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
-        CONFIRM_TRIES.store(1, core::sync::atomic::Ordering::Relaxed);
-        return true;
+        return confirm_open(path);
     }
     USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
     set_slot(OPEN_SLOT);
-    let ok = open_as(path);
+    let ok = open_as(path) && confirm_open(path);
     if ok {
         OPENED_FALLBACK.store(true, core::sync::atomic::Ordering::Relaxed);
-        CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
-        CONFIRM_TRIES.store(1, core::sync::atomic::Ordering::Relaxed);
     }
     READS_OPEN.store(bridge_reads().wrapping_sub(c1) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if !ok {
         set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
     }
     ok
+}
+
+/// Ждём, пока getfile не подтвердит именно этот путь. На железе завершение
+/// openfile само по себе ещё не гарантирует одновременную смену пути, размера
+/// и содержимого. Код 97 — путь не подтвердился за две секунды.
+fn confirm_open(path: &str) -> bool {
+    let t0 = crate::chipbox_read(0x18);
+    for t in 1..=200u32 {
+        CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
+        if poll_path(path) {
+            CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
+            wait_ms(1);
+            return true;
+        }
+        if crate::chipbox_read(0x18).wrapping_sub(t0) > 2 * 44_100 {
+            break;
+        }
+        wait_ms(10);
+    }
+    LAST_ERR.store(97, core::sync::atomic::Ordering::Relaxed);
+    false
 }
 
 /// Сколько слов APF прочитал через мост за попытку в слоте пользователя
@@ -350,14 +365,14 @@ fn open_as(path: &str) -> bool {
     push_param_struct(path);
     let p = unsafe { pac::Peripherals::steal() };
     unsafe {
+        let _ = p.APF_BRIDGE.status.read();
         core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
         core::ptr::copy_nonoverlapping(path.as_ptr(), STRUCT_BUF as *mut u8, path.len());
         p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
         p.APF_BRIDGE.request_openfile.write(|w| w.bits(1));
     }
-    // APF завершает openfile только после смены файла в слоте; отдельное
-    // ожидание 008A или getfile по протоколу не требуется.
+    // После завершения команды вызывающий код подтверждает путь через getfile.
     wait_op()
 }
 
@@ -373,6 +388,7 @@ pub fn read_slot_to(slot_id: u32, len: u32, addr: u32, cap_ms: u32) -> bool {
     let p = unsafe { pac::Peripherals::steal() };
     for attempt in 0..2 {
         unsafe {
+            let _ = p.APF_BRIDGE.status.read();
             p.APF_BRIDGE.slot_id.write(|w| w.bits(slot_id));
             p.APF_BRIDGE.data_offset.write(|w| w.bits(0));
             p.APF_BRIDGE.transfer_length.write(|w| w.bits(len));
@@ -388,6 +404,24 @@ pub fn read_slot_to(slot_id: u32, len: u32, addr: u32, cap_ms: u32) -> bool {
         wait_ms(20);
     }
     false
+}
+
+/// getfile с коротким ожиданием для подтверждения openfile.
+fn poll_path(path: &str) -> bool {
+    let p = unsafe { pac::Peripherals::steal() };
+    unsafe {
+        let _ = p.APF_BRIDGE.status.read();
+        core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
+        p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
+        p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
+        p.APF_BRIDGE.request_getfile.write(|w| w.bits(1));
+    }
+    if !wait_op_cap(150) {
+        return false;
+    }
+    let raw = unsafe { core::slice::from_raw_parts(STRUCT_BUF as *const u8, 256) };
+    let len = raw.iter().position(|&b| b == 0).unwrap_or(255);
+    raw[..len] == *path.as_bytes()
 }
 
 /// Расширение пути без срезов строки: `path[len-4..]` падает, если путь

@@ -649,10 +649,10 @@ fn nes_filter_set(on: bool) {
     chipbox_write(0x2D, m);
 }
 
-/// Служебная строка диагностики (только Developer info: On): c:ok1 —
-/// openfile успешен, O<мс> — его длительность, L<чтение>/<распаковка> —
-/// время чтения слота и распаковки gzip, a<n> — число попыток чтения.
-/// Хэш файла сюда больше
+/// Служебная строка диагностики (только Developer info: On): c:okN —
+/// путь подтверждён с N-го getfile, O<мс> — длительность открытия,
+/// L<чтение>/<распаковка> — время чтения слота и распаковки gzip, a<n> —
+/// число полных циклов открытия/чтения. Хэш файла сюда больше
 /// не влезает; на экранах ошибок он остался (diag_hash_line).
 fn diag_ff(buf: &mut [u8; 48]) -> &str {
     if !dev_mode() {
@@ -673,7 +673,7 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
             d /= 10;
         }
     };
-    // Время openfile на последнем треке.
+    // Время openfile и подтверждения пути на последнем треке.
     {
         let o = crate::files::open_ms().min(9999);
         if o >= 100 && n + 6 <= buf.len() {
@@ -683,7 +683,7 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
             put(o, buf, &mut n);
         }
     }
-    // «c:ok1» — openfile успешен; «f1» — использован служебный слот 3.
+    // «c:okN» — путь подтверждён с N-го getfile; «f1» — служебный слот 3.
     {
         let (cok, ctries, cfb) = files::diag_confirm();
         if n + 6 <= buf.len() {
@@ -2451,7 +2451,7 @@ fn diag_hash_line(tail: bool, staged: &[u8]) -> String {
     )
 }
 
-/// Результат openfile короткой строкой; «f1» означает служебный слот 3.
+/// Подтверждение пути после openfile; «f1» означает служебный слот 3.
 fn diag_confirm_str() -> String {
     let (ok, tries, fb) = files::diag_confirm();
     let mut s = alloc::format!(
@@ -2553,18 +2553,36 @@ fn content_plausible(path: &str, d: &[u8]) -> bool {
 
 /// Чтение трека с самопроверкой. Ошибка APF возвращается сразу: после
 /// таймаута нельзя запускать новую команду поверх возможно активной.
-/// Повторяются только завершённые чтения с неправильным содержимым.
-/// Код 98 — самопроверка не сошлась за 15 секунд.
+/// При неверном содержимом слот открывается заново: повторный read старого
+/// состояния не меняет ни путь, ни размер и создаёт очередь поздних записей
+/// в staging. Два хэша через 20 мс отсекают перезапись после completion.
+/// Не больше трёх полных циклов openfile → getfile → read.
 fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
     let t0 = chipbox_read(0x18);
-    let mut attempt: u32 = 0;
-    loop {
-        attempt += 1;
+    for attempt in 1..=3u32 {
+        if attempt > 1 {
+            ui::status("reopening...");
+            if !files::open(path) {
+                return Err(files::last_err());
+            }
+            size = File::size(files::slot());
+            SIZE_USED.store(size, core::sync::atomic::Ordering::Relaxed);
+            if size == 0 || size == 0xFFFF_FFFF || size > STAGE_MAX {
+                return Err(98);
+            }
+            files::settle_ms(20);
+        }
         LOAD_ATTEMPTS.store(attempt, core::sync::atomic::Ordering::Relaxed);
         match load_slot_cap(size, 6_000) {
             Ok(data) if content_plausible(path, data) => {
-                ui::status("");
-                return Ok(data);
+                let first = LOAD_HASH.load(core::sync::atomic::Ordering::Relaxed);
+                files::settle_ms(20);
+                let second = fnv1a32(data);
+                LOAD_HASH.store(second, core::sync::atomic::Ordering::Relaxed);
+                if first == second {
+                    ui::status("");
+                    return Ok(data);
+                }
             }
             Ok(_) => {}
             Err(e) => {
@@ -2572,27 +2590,15 @@ fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
                 return Err(e);
             }
         }
-        if chipbox_read(0x18).wrapping_sub(t0) > 15 * 44_100 {
-            ui::status("");
-            return Err(98);
-        }
-        // 0.2.29: «loading 3 t9» — попытка и секунды с начала загрузки.
-        // По этой строке на скриншоте видно, где реально уходят
-        // секунды: в чтении (t растёт рывками по ~время чтения) или в
-        // ожидании подмены слота (t растёт равномерно).
         let mut msg = String::from("loading ");
         push_code(&mut msg, attempt);
         msg.push(' ');
         msg.push('t');
         push_code(&mut msg, (chipbox_read(0x18).wrapping_sub(t0) / 44_100).min(99));
         ui::status(&msg);
-        files::settle_ms(200);
-        // Размер берём заново: mailbox обновляется по ходу подмены.
-        let s = File::size(files::slot());
-        if s != 0 && s != 0xFFFF_FFFF && s <= STAGE_MAX {
-            size = s;
-        }
     }
+    ui::status("");
+    Err(98)
 }
 
 /// Определение формата по магии и запуск
