@@ -649,61 +649,36 @@ fn nes_filter_set(on: bool) {
     chipbox_write(0x2D, m);
 }
 
-/// Служебная строка диагностики (только Developer info: On): c:okN —
-/// путь подтверждён с N-го getfile, O<мс> — длительность открытия,
-/// L<чтение>/<распаковка> — время чтения слота и распаковки gzip, a<n> —
-/// число полных циклов открытия/чтения. Хэш файла сюда больше
-/// не влезает; на экранах ошибок он остался (diag_hash_line).
-fn diag_ff(buf: &mut [u8; 48]) -> &str {
+/// Диагностика перемотки: f — бит FF в контрол-слове, которое фирмварь
+/// послала последней; r — состояние кнопки R прямо сейчас. Если музыка
+/// идёт ускоренно при f0 r0, значит железо держит ff_r само, и дело не в
+/// фирмвари. Два прошлых захода правились вслепую — больше не гадаем.
+fn diag_ff(buf: &mut [u8; 16]) -> &str {
     if !dev_mode() {
         return "";
     }
     use core::sync::atomic::Ordering::Relaxed;
-    let mut n = 0usize;
-    let put = |v: u32, b: &mut [u8; 48], n: &mut usize| {
-        let mut d = 1000;
-        let mut go = false;
-        while d > 0 {
-            let c = v / d % 10;
-            if c != 0 || go || d == 1 {
-                b[*n] = b'0' + c as u8;
-                *n += 1;
-                go = true;
-            }
-            d /= 10;
-        }
-    };
-    // Время openfile и подтверждения пути на последнем треке.
-    {
-        let o = crate::files::open_ms().min(9999);
-        if o >= 100 && n + 6 <= buf.len() {
-            buf[n] = b' ';
-            buf[n + 1] = b'O';
-            n += 2;
-            put(o, buf, &mut n);
-        }
+    let f = (CTRL_FLAGS.load(Relaxed) >> 6) & 1;
+    let p = unsafe { litex_openfpga::litex_pac::Peripherals::steal() };
+    let r = (unsafe { p.APF_INPUT.cont1_key.read().bits() } as u16 & BTN_R != 0) as u32;
+    buf[0] = b'f';
+    buf[1] = b'0' + f as u8;
+    buf[2] = b' ';
+    buf[3] = b'r';
+    buf[4] = b'0' + r as u8;
+    // Пока играет файл Mega Drive, показываем режим фильтра прямо из
+    // пункта меню. С устройства пришло «выбор есть, но не переключается»,
+    // а проверить это в симуляции нельзя: фирмварь там не исполняется.
+    // Если цифра меняется при переключении — значит значение доезжает и
+    // виновата запись в регистр; если стоит на месте — не доезжает.
+    let mut n = 5;
+    if MD_FILTER_ON.load(Relaxed) {
+        buf[n] = b' ';
+        buf[n + 1] = b'F';
+        buf[n + 2] = b'0' + (md_filter_mode() & 3) as u8;
+        n += 3;
     }
-    // «c:okN» — путь подтверждён с N-го getfile; «f1» — служебный слот 3.
-    {
-        let (cok, ctries, cfb) = files::diag_confirm();
-        if n + 6 <= buf.len() {
-            buf[n] = b' ';
-            buf[n + 1] = b'c';
-            buf[n + 2] = b':';
-            buf[n + 3] = if cok { b'o' } else { b'n' };
-            buf[n + 4] = if cok { b'k' } else { b'o' };
-            n += 5;
-            put(ctries, buf, &mut n);
-            if cfb && n + 3 <= buf.len() {
-                buf[n] = b' ';
-                buf[n + 1] = b'f';
-                buf[n + 2] = b'1';
-                n += 3;
-            }
-        }
-    }
-    // Время загрузки: L<чтение слота>/<распаковка> в миллисекундах,
-    // a<n> — сколько попыток чтения понадобилось (1 — с первого раза).
+    // Время загрузки: L<чтение слота>/<распаковка> в миллисекундах.
     // Показываем только у файлов, где оно вообще заметно.
     let lms = LOAD_MS.load(Relaxed);
     let dms = DEC_MS.load(Relaxed);
@@ -711,17 +686,23 @@ fn diag_ff(buf: &mut [u8; 48]) -> &str {
         buf[n] = b' ';
         buf[n + 1] = b'L';
         n += 2;
+        let mut put = |v: u32, b: &mut [u8; 16], n: &mut usize| {
+            let mut d = 1000;
+            let mut go = false;
+            while d > 0 {
+                let c = v / d % 10;
+                if c != 0 || go || d == 1 {
+                    b[*n] = b'0' + c as u8;
+                    *n += 1;
+                    go = true;
+                }
+                d /= 10;
+            }
+        };
         put(lms.min(9999), buf, &mut n);
         buf[n] = b'/';
         n += 1;
         put(dms.min(9999), buf, &mut n);
-        let at = LOAD_ATTEMPTS.load(Relaxed).min(99);
-        if at > 1 && n + 4 <= buf.len() {
-            buf[n] = b' ';
-            buf[n + 1] = b'a';
-            n += 2;
-            put(at, buf, &mut n);
-        }
     }
 
     // Отброшенное: d — записи второму экземпляру чипа, g — маски стерео
@@ -946,7 +927,7 @@ fn fnv1a(d: &[u8]) -> u32 {
 /// чтение данных из слота работает — распознаём содержимое по сигнатуре
 fn probe_slot(slot: u32) -> Option<&'static str> {
     unsafe { core::ptr::write_bytes(STAGE_BASE as *mut u8, 0, 16) };
-    if !files::read_slot_to(slot, 512, STAGE_BASE, 10_000) {
+    if !files::read_slot_to(slot, 512, STAGE_BASE) {
         return None;
     }
     let d = unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, 16) };
@@ -1596,10 +1577,7 @@ fn load_songlengths(md5h: &[u8; 32], dir: &str) -> alloc::vec::Vec<u32> {
     if size == 0 || size == 0xFFFF_FFFF {
         return out;
     }
-    let db = match load_slot(size) {
-        Ok(data) => data,
-        Err(_) => return out,
-    };
+    let db = load_slot(size);
     let mut pos = 0usize;
     while pos + 33 <= db.len() {
         // строка вида md5=... — ищем совпадение в начале строки
@@ -2048,7 +2026,7 @@ fn main() -> ! {
         files::set_slot(slot);
         let has = !files::slot_path().is_empty() || probe_slot(slot).is_some();
         present[i] = has;
-        if has && files::read_slot_to(slot, 4096, STAGE_BASE, 10_000) {
+        if has && files::read_slot_to(slot, 4096, STAGE_BASE) {
             fps[i] = fnv1a(unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, 4096) });
         }
     }
@@ -2111,24 +2089,13 @@ fn main() -> ! {
         }
     }
 
-    // Размер стартового файла — из обновлённой Pocket таблицы слотов.
     let size = File::size(files::slot());
 
     // Плейлист: выбранный .m3u; иначе playlist.m3u рядом с файлом;
     // иначе одиночный трек
     let own_path = files::slot_path();
     println!("Файл: {own_path}");
-    // 0.2.29: видимый статус — чтение выбранного файла может идти
-    // секунды, а экран до этого молчал с одним «loading...» с самого
-    // старта ядра.
-    ui::status("reading...");
-    let staged = match load_slot(size) {
-        Ok(data) => data,
-        Err(e) => {
-            let _ = file_read_error(e);
-            loop {}
-        }
-    };
+    let staged = load_slot(size);
     let base = String::from(files::dir_of(&own_path));
 
     let mut list: alloc::vec::Vec<String>;
@@ -2152,30 +2119,21 @@ fn main() -> ! {
         // files::siblings_from_index про то, откуда берётся префикс пути.
         list = alloc::vec::Vec::new();
         let mut dir = String::from(base.as_str());
-        for i in 0..8 {
+        for _ in 0..8 {
             let mut cand = dir.clone();
             cand.push_str("index.txt");
-            // 0.2.29: охота за индексом на экран. Каждый openfile —
-            // обращение к OS, на медленных картах это секунды на
-            // кандидата, и весь этап до первого звука был невидимым.
-            ui::status(&alloc::format!(
-                "scan {}/8 {}",
-                i + 1,
-                files::tail(dir.trim_end_matches('/'), 6)
-            ));
             if files::open(&cand) {
                 // Содержимое слота теперь чужое, чем бы ни кончился разбор
                 files::mark_dirty();
                 let isize = File::size(files::slot());
                 if isize != 0 && isize != 0xFFFF_FFFF && isize <= STAGE_MAX {
-                    if let Ok(idata) = load_slot(isize) {
-                        if let Some((lst, i)) = files::siblings_from_index(idata, &own_path) {
-                            println!("Индекс {cand}: {} треков в папке", lst.len());
-                            list = lst;
-                            idx = i;
-                            found = Some(cand);
-                            break;
-                        }
+                    let idata = load_slot(isize);
+                    if let Some((lst, i)) = files::siblings_from_index(idata, &own_path) {
+                        println!("Индекс {cand}: {} треков в папке", lst.len());
+                        list = lst;
+                        idx = i;
+                        found = Some(cand);
+                        break;
                     }
                 }
             }
@@ -2213,20 +2171,13 @@ fn main() -> ! {
             if !list.is_empty() {
                 break; // индекс уже дал список
             }
-            ui::status(&alloc::format!(
-                "m3u {}",
-                files::head(&cand[base.len()..], 9)
-            ));
             if files::open(cand) {
                 files::mark_dirty();
                 let psize = File::size(files::slot());
                 if psize == 0 || psize > 0x40_0000 {
                     continue; // не похоже на плейлист
                 }
-                let pdata = match load_slot(psize) {
-                    Ok(data) => data,
-                    Err(_) => continue,
-                };
+                let pdata = load_slot(psize);
                 list = files::parse_m3u(pdata, &base);
                 idx = list.iter().position(|p| *p == own_path).unwrap_or(0);
                 println!("Найден плейлист {cand}: {} треков", list.len());
@@ -2270,20 +2221,13 @@ fn main() -> ! {
         let dirty = files::take_dirty();
         let opened = if path == in_slot && !dirty {
             true
+        } else if files::open(&path) {
+            // Слот выбирает files::open: служебный, при отказе —
+            // пользовательский. Пустой файл ловится ниже по размеру.
+            in_slot = path.clone();
+            true
         } else {
-            // 0.2.29: раньше секунды openfile выглядели как замершая
-            // картинка — теперь в строке статуса хотя бы видно, что
-            // идёт открытие (его миллисекунды потом в служебной строке
-            // как O<мс>).
-            ui::status("opening...");
-            if files::open(&path) {
-                // Слот выбирает files::open: служебный, при отказе —
-                // пользовательский. Пустой файл ловится ниже по размеру.
-                in_slot = path.clone();
-                true
-            } else {
-                false
-            }
+            false
         };
         let ctl = if !opened {
             // Коды APF для диагностики с экрана: «open err A/B idx:C
@@ -2314,32 +2258,38 @@ fn main() -> ! {
             push_code(&mut msg, p_own);
             error_wait4("error", &msg, files::head(&path, 56), &l3, &l4)
         } else {
-            // openfile завершён, размер в таблице слотов уже актуален.
-            // Самопроверка остаётся защитой от ранее наблюдавшегося
-            // старого содержимого.
             let fsize = File::size(files::slot());
-            SIZE_USED.store(fsize, core::sync::atomic::Ordering::Relaxed);
             if fsize == 0 || fsize == 0xFFFF_FFFF {
-                error_wait4(
-                    "error",
-                    "empty file",
-                    "",
-                    &diag_size_line(),
-                    &diag_confirm_str(),
-                )
+                error_wait("error", "empty file")
             } else if fsize > STAGE_MAX {
                 // Честнее сказать, чем играть обрезанный файл.
-                error_wait4(
-                    "error",
-                    "file too large (over 7M)",
-                    "",
-                    &diag_size_line(),
-                    &diag_confirm_str(),
-                )
+                error_wait("error", "file too large (over 7M)")
             } else {
-                match load_validated(&path, fsize) {
-                    Ok(data) => dispatch(data, &pl),
-                    Err(e) => file_read_error(e),
+                let data = load_slot(fsize);
+                // openfile у APF «успешен» и для НЕСУЩЕСТВУЮЩЕГО пути: код
+                // результата нулевой, а слот сохраняет прежнее содержимое.
+                // Тогда плеер брался играть сам плейлист и говорил
+                // «unknown format», что уводит в сторону — искать надо не
+                // формат трека, а почему не разрешился путь.
+                //
+                // Отличить можно прямо здесь: если в буфере лежит тот же
+                // текст, что мы уже разобрали как m3u, значит трек не
+                // открылся. Сравниваем начало — этого хватает, полное
+                // сравнение стоило бы лишнего прохода по мегабайтам.
+                let stale = is_m3u
+                    && data.len() >= 16
+                    && staged.len() >= 16
+                    && data[..16] == staged[..16];
+                if stale {
+                    // Начало пути, а не хвост: хвост — это имя из m3u,
+                    // оно и так известно, а спорное место — префикс,
+                    // который APF ждёт в виде «/Assets/платформа/...».
+                    // Слот тоже на экран: расширения разнесены по трём.
+                    let mut msg = String::from("track not found s");
+                    msg.push((b'0' + (files::slot() % 10) as u8) as char);
+                    error_wait2("m3u", &msg, files::head(&path, 56))
+                } else {
+                    dispatch(data, &pl)
                 }
             }
         };
@@ -2396,209 +2346,23 @@ fn main() -> ! {
 /// 44100, отсюда и миллисекунды.
 static LOAD_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static DEC_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-/// Сколько попыток чтения сделал load_validated (0.2.29): вместе с
-/// O<open> и L<чтение>/<распаковка> показывает, где реально уходят
-/// секунды при медленном переключении.
-static LOAD_ATTEMPTS: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-
-// --- Диагностика 0.2.25: сличение с эталоном скажет, портится ли файл ---
-/// FNV-1a 32 по содержимому staging после чтения слота
-static LOAD_HASH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-/// Слот, из которого реально читали
-static LOAD_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-/// Размер, использованный для чтения из таблицы слотов.
-static SIZE_USED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-fn fnv1a32(data: &[u8]) -> u32 {
-    let mut h = 0x811c_9dc5u32;
-    for &b in data {
-        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
-    }
-    h
-}
-
-/// Строка «sl:<слот> sz:<размер>» — слот и размер, использованные
-/// для чтения.
-fn diag_size_line() -> String {
-    let s = SIZE_USED.load(core::sync::atomic::Ordering::Relaxed);
-    let sl = LOAD_SLOT.load(core::sync::atomic::Ordering::Relaxed);
-    alloc::format!("sl:{} sz:{:08x}", sl, s)
-}
-
-/// Строка «rd:<мс> h:<fnv>» плюс 8 байт из края staging: начала файла
-/// (head) или конца (tail — там лежит ISIZE у .vgz).
-fn diag_hash_line(tail: bool, staged: &[u8]) -> String {
-    let edge8: alloc::vec::Vec<u8> = if staged.len() >= 8 {
-        if tail {
-            staged[staged.len() - 8..].to_vec()
-        } else {
-            staged[..8].to_vec()
-        }
-    } else {
-        alloc::vec::Vec::new()
-    };
-    let hex: String = edge8
-        .iter()
-        .map(|b| alloc::format!("{:02x}", b))
-        .collect();
-    alloc::format!(
-        "rd:{} h:{:08x} {}:{}",
-        LOAD_MS.load(core::sync::atomic::Ordering::Relaxed),
-        LOAD_HASH.load(core::sync::atomic::Ordering::Relaxed),
-        if tail { "tail" } else { "head" },
-        hex
-    )
-}
-
-/// Подтверждение пути после openfile; «f1» означает служебный слот 3.
-fn diag_confirm_str() -> String {
-    let (ok, tries, fb) = files::diag_confirm();
-    let mut s = alloc::format!(
-        "c:{}{}",
-        if ok { "ok" } else { "no" },
-        tries
-    );
-    if fb {
-        s.push_str(" f1");
-    }
-    s
-}
 
 fn ticks_ms(from: u32) -> u32 {
     chipbox_read(0x18).wrapping_sub(from) / 44
 }
 
-/// Чтение содержимого слота в staging-буфер. cap_ms — предел одной
-/// попытки; повторы внутри read_slot_to идут с коротким пределом.
-fn load_slot_cap(size: u32, cap_ms: u32) -> Result<&'static [u8], u32> {
+/// Чтение содержимого слота в staging-буфер
+fn load_slot(size: u32) -> &'static [u8] {
     let t0 = chipbox_read(0x18);
     // Дальше отсека не читаем ни при каких размерах: за ним буфер
     // структур и куча. Обрезанный файл поймает разбор формата, а порча
     // памяти ловится только падением через несколько секунд.
     let size = size.min(STAGE_MAX);
-    LOAD_SLOT.store(files::slot(), core::sync::atomic::Ordering::Relaxed);
-    if !files::read_slot_to(files::slot(), size, STAGE_BASE, cap_ms) {
-        // Время фиксируем и на ошибке: отличить медленное чтение от
-        // мгновенного отказа APF по экрану ошибки.
-        LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
-        return Err(files::last_err());
-    }
+    File::request_read(0, size, STAGE_BASE, files::slot());
+    File::block_op_complete();
     LOAD_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
     DEC_MS.store(0, core::sync::atomic::Ordering::Relaxed);
-    let data = unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) };
-    LOAD_HASH.store(fnv1a32(data), core::sync::atomic::Ordering::Relaxed);
-    Ok(data)
-}
-
-fn load_slot(size: u32) -> Result<&'static [u8], u32> {
-    load_slot_cap(size, 10_000)
-}
-
-fn file_read_error(e: u32) -> Ctl {
-    let mut msg = String::from("file read err ");
-    push_code(&mut msg, e);
-    // Хэш здесь не показываем: на неудачном чтении в staging лежит
-    // мусор/прежний файл, сличать не с чем.
-    let line4 = alloc::format!(
-        "{} rd:{}",
-        diag_confirm_str(),
-        LOAD_MS.load(core::sync::atomic::Ordering::Relaxed)
-    );
-    error_wait4("error", &msg, "", &diag_size_line(), &line4)
-}
-
-/// Самопроверка прочитанного содержимого (0.2.26). После openfile слот
-/// физически может всё ещё держать предыдущий файл: mailbox File::size
-/// уже новый, а read отдаёт начало старого содержимого на новую длину
-/// (хэши скриншотов 0.2.25 показали ровно это — префикс трека 18).
-/// Ловим по магии формата; у .vgm дополнительно сверяем EOF offset из
-/// заголовка с реальным размером, у .vgz — ISIZE из хвоста.
-fn content_plausible(path: &str, d: &[u8]) -> bool {
-    if d.len() < 8 {
-        return false;
-    }
-    if &d[0..4] == b"Vgm " {
-        // EOF offset (0x04) = размер файла минус 4. У части рипов поле
-        // нулевое — тогда остаётся только магия.
-        let eof = u32::from_le_bytes([d[4], d[5], d[6], d[7]]);
-        return eof == 0 || eof + 4 == d.len() as u32;
-    }
-    if d[0] == 0x1F && d[1] == 0x8B {
-        // gzip: ISIZE в хвосте должен быть вменяемым. Префикс чужого
-        // файла на новой длине даёт многогигабайтный мусор — все
-        // зафиксированные случаи больше 900 МБ.
-        let n = d.len();
-        let isize_le = u32::from_le_bytes([d[n - 4], d[n - 3], d[n - 2], d[n - 1]]);
-        return isize_le <= 28 * 1024 * 1024;
-    }
-    if d.len() >= 5 && &d[0..5] == b"NESM\x1A" {
-        return true;
-    }
-    if &d[0..3] == b"GBS" && d[3] == 1 {
-        return true;
-    }
-    if &d[0..4] == b"PSID" || &d[0..4] == b"RSID" {
-        return true;
-    }
-    if &d[0..4] == b"MThd" {
-        return true;
-    }
-    if &d[0..4] == b"GYMX" {
-        return true;
-    }
-    // .gym без GYMX-магии проверить нечем — пропускаем как есть
-    files::has_ext(path, ".gym")
-}
-
-/// Чтение трека с самопроверкой. Ошибка APF возвращается сразу: после
-/// таймаута нельзя запускать новую команду поверх возможно активной.
-/// При неверном содержимом слот открывается заново: повторный read старого
-/// состояния не меняет ни путь, ни размер и создаёт очередь поздних записей
-/// в staging. Два хэша через 20 мс отсекают перезапись после completion.
-/// Не больше трёх полных циклов openfile → getfile → read.
-fn load_validated(path: &str, mut size: u32) -> Result<&'static [u8], u32> {
-    let t0 = chipbox_read(0x18);
-    for attempt in 1..=3u32 {
-        if attempt > 1 {
-            ui::status("reopening...");
-            if !files::open(path) {
-                return Err(files::last_err());
-            }
-            size = File::size(files::slot());
-            SIZE_USED.store(size, core::sync::atomic::Ordering::Relaxed);
-            if size == 0 || size == 0xFFFF_FFFF || size > STAGE_MAX {
-                return Err(98);
-            }
-            files::settle_ms(20);
-        }
-        LOAD_ATTEMPTS.store(attempt, core::sync::atomic::Ordering::Relaxed);
-        match load_slot_cap(size, 6_000) {
-            Ok(data) if content_plausible(path, data) => {
-                let first = LOAD_HASH.load(core::sync::atomic::Ordering::Relaxed);
-                files::settle_ms(20);
-                let second = fnv1a32(data);
-                LOAD_HASH.store(second, core::sync::atomic::Ordering::Relaxed);
-                if first == second {
-                    ui::status("");
-                    return Ok(data);
-                }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                ui::status("");
-                return Err(e);
-            }
-        }
-        let mut msg = String::from("loading ");
-        push_code(&mut msg, attempt);
-        msg.push(' ');
-        msg.push('t');
-        push_code(&mut msg, (chipbox_read(0x18).wrapping_sub(t0) / 44_100).min(99));
-        ui::status(&msg);
-    }
-    ui::status("");
-    Err(98)
+    unsafe { core::slice::from_raw_parts(STAGE_BASE as *const u8, size as usize) }
 }
 
 /// Определение формата по магии и запуск
@@ -2638,52 +2402,24 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 staged[n - 4], staged[n - 3], staged[n - 2], staged[n - 1],
             ]);
             if isize_le > 28 * 1024 * 1024 {
-                // Диагностика 0.2.25: «unpacked XXM» — это либо чужой/
-                // битый размер, либо битый хвост gzip. Показываем оба
-                // размера, хэш прочитанного и реальные байты хвоста.
-                // Размер выводим целиком: двухзначный обрезок 0.2.25
-                // показывал «68M» при реальных 3768M.
                 let mut msg = String::from("unpacked ");
                 let mb = isize_le / (1024 * 1024);
-                let mut d = 1000;
-                let mut go = mb >= 1000;
-                while d > 0 {
-                    let c = mb / d % 10;
-                    if c != 0 || go || d == 1 {
-                        msg.push((b'0' + c as u8) as char);
-                        go = true;
-                    }
-                    d /= 10;
+                if mb >= 10 {
+                    msg.push((b'0' + (mb / 10 % 10) as u8) as char);
                 }
+                msg.push((b'0' + (mb % 10) as u8) as char);
                 msg.push_str("M, over heap");
-                let line4 = alloc::format!(
-                    "is:{:08x} {}",
-                    isize_le,
-                    diag_hash_line(true, staged)
-                );
-                return error_wait4("VGM", &msg, "", &diag_size_line(), &line4);
+                return error_wait("VGM", &msg);
             }
         }
         let t0 = chipbox_read(0x18);
-        // 0.2.29: распаковка большого .vgz на софткоре идёт секунды,
-        // и всё это время на экране висело последнее «loading N» без
-        // понятня, что происходит. DEC_MS этой фазы — вторая цифра L.
-        ui::status("unpacking...");
         match decompress(staged) {
             Ok(v) => {
                 DEC_MS.store(ticks_ms(t0), core::sync::atomic::Ordering::Relaxed);
                 decompressed = v;
                 &decompressed
             }
-            Err(_) => {
-                return error_wait4(
-                    "VGM",
-                    "vgz decompress error",
-                    "",
-                    &diag_size_line(),
-                    &diag_hash_line(true, staged),
-                )
-            }
+            Err(_) => return error_wait("VGM", "vgz decompress error"),
         }
     } else {
         staged
@@ -2696,7 +2432,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
             let tail = files::tail(&path, 24);
             let mut msg = String::from("unknown format: ");
             msg.push_str(tail);
-            return error_wait4("?", &msg, "", &diag_size_line(), &diag_hash_line(false, staged));
+            return error_wait("?", &msg);
         }
     };
 
@@ -3506,7 +3242,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 let el = elapsed_s();
                 if el != shown_s {
                     shown_s = el;
-                    let mut fbuf = [0u8; 48];
+                    let mut fbuf = [0u8; 16];
                     ui::progress(el.min(total_s), total_s, diag_ff(&mut fbuf));
                 }
             }
@@ -3550,7 +3286,7 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                         let el = elapsed_s();
                         if el != shown_s {
                             shown_s = el;
-                            let mut fbuf = [0u8; 48];
+                            let mut fbuf = [0u8; 16];
                             ui::progress(el.min(total_s), total_s, diag_ff(&mut fbuf));
                         }
                         core::hint::spin_loop();

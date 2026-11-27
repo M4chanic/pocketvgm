@@ -9,6 +9,7 @@ use litex_openfpga::litex_pac as pac;
 
 /// Буфер параметр/ответ-структур (SDRAM, между staging и кучей)
 const STRUCT_BUF: u32 = 0x4170_0000;
+
 /// Активный data-слот. Слотов ТРИ (Sega / Nintendo / Computer):
 /// расширения разнесены между ними из-за лимита APF в 4 расширения на
 /// слот. Комментарий про два слота устарел — выбор слота на старте см. в
@@ -45,69 +46,28 @@ pub fn slot() -> u32 {
     SLOT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Миллисекунды последнего open() (0.2.29): на медленных картах сам
-/// openfile у OS занимает секунды, и это время выглядело как «замерший
-/// экран» без всяких признаков жизни. Показывается в служебной строке
-/// как O<мс>.
-static OPEN_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-pub fn open_ms() -> u32 {
-    OPEN_MS.load(core::sync::atomic::Ordering::Relaxed)
-}
-
-/// Короткая пауза по 44.1-кГц счётчику chipbox.
-fn wait_ms(ms: u32) {
-    let t0 = crate::chipbox_read(0x18);
-    while crate::chipbox_read(0x18).wrapping_sub(t0) < ms * 44 {
-        core::hint::spin_loop();
-    }
-}
-
-/// Пауза для внешних вызывающих (самопроверка чтения в main.rs)
-pub fn settle_ms(ms: u32) {
-    wait_ms(ms);
-}
-
-fn wait_op_cap(max_ms: u32) -> bool {
+fn wait_op() -> bool {
     let p = unsafe { pac::Peripherals::steal() };
-    // Максимум файла в staging — 7 МБ, а APF-перекачка идёт всего несколько
-    // МБ/с. Старый предел ~1 с обрывал нормальное чтение, после чего новая
-    // команда запускалась поверх ещё не закончившейся перекачки. Десяти
-    // секунд хватает с большим запасом; бесконечный цикл не возвращаем,
-    // чтобы пустой/зависший запрос всё же освобождал плеер. Повторные
-    // попытки чтения идут через меньший предел (см. read_slot_to).
-    let t0 = crate::chipbox_read(0x18);
-    loop {
-        let st = p.APF_BRIDGE.status.read().bits();
+    for _ in 0..60_000_000u32 {
+        let st = unsafe { p.APF_BRIDGE.status.read().bits() };
         if st != 0 {
             if st & 1 == 0 {
                 return false;
             }
             // сам запрос завершён — успех определяет код результата APF
             // (0 = ok; для несуществующего файла запрос тоже «завершается»)
-            let code = p.APF_BRIDGE.command_result_code.read().bits();
+            let code = unsafe { p.APF_BRIDGE.command_result_code.read().bits() };
             LAST_ERR.store(code, core::sync::atomic::Ordering::Relaxed);
             return code == 0;
         }
-        if crate::chipbox_read(0x18).wrapping_sub(t0) > max_ms * 44 {
-            break;
-        }
-        core::hint::spin_loop();
     }
-    // 99 — наш таймаут, не код APF (у того поле результата трёхбитное).
-    LAST_ERR.store(99, core::sync::atomic::Ordering::Relaxed);
     false
-}
-
-fn wait_op() -> bool {
-    wait_op_cap(10_000)
 }
 
 /// Путь файла, выбранного в слоте (пустая строка при ошибке)
 pub fn slot_path() -> String {
     let p = unsafe { pac::Peripherals::steal() };
     unsafe {
-        let _ = p.APF_BRIDGE.status.read();
         core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
         p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
@@ -160,27 +120,6 @@ static USER_SLOT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32:
 /// Код APF от попытки в слоте пользователя — для экрана ошибки
 static USER_SLOT_ERR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
-// --- Диагностика последнего openfile ---
-/// getfile подтвердил открытый путь
-static CONFIRM_OK: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-/// Сколько запросов getfile понадобилось
-static CONFIRM_TRIES: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
-/// Открытие ушло в служебный слот (fallback) — читать будем не тот слот,
-/// что выбрал пользователь
-static OPENED_FALLBACK: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// Состояние последнего openfile: (успех, число команд, fallback в слот 3)
-pub fn diag_confirm() -> (bool, u32, bool) {
-    (
-        CONFIRM_OK.load(core::sync::atomic::Ordering::Relaxed),
-        CONFIRM_TRIES.load(core::sync::atomic::Ordering::Relaxed),
-        OPENED_FALLBACK.load(core::sync::atomic::Ordering::Relaxed),
-    )
-}
-
 pub fn set_user_slot(s: u32) {
     USER_SLOT.store(s, core::sync::atomic::Ordering::Relaxed);
     set_slot(s);
@@ -196,35 +135,19 @@ pub fn user_slot_err() -> u32 {
 /// служебный. Удачный слот остаётся активным: из него дальше читает
 /// load_slot. Коды обеих попыток видны на экране ошибки.
 pub fn open(path: &str) -> bool {
-    let t0 = crate::chipbox_read(0x18);
-    let r = open_timed(path);
-    // Счётчик 44.1 кГц; делим как ticks_ms в main.rs (/44).
-    OPEN_MS.store(
-        crate::chipbox_read(0x18).wrapping_sub(t0) / 44,
-        core::sync::atomic::Ordering::Relaxed,
-    );
-    r
-}
-
-fn open_timed(path: &str) -> bool {
     let c0 = bridge_reads();
-    let user_slot = USER_SLOT.load(core::sync::atomic::Ordering::Relaxed);
-    set_slot(user_slot);
-    CONFIRM_OK.store(false, core::sync::atomic::Ordering::Relaxed);
-    CONFIRM_TRIES.store(0, core::sync::atomic::Ordering::Relaxed);
-    OPENED_FALLBACK.store(false, core::sync::atomic::Ordering::Relaxed);
+    set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
+    let u0 = upd_count();
     let ok = open_as(path);
     let c1 = bridge_reads();
     READS_USER.store(c1.wrapping_sub(c0) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if ok {
-        return confirm_open(path);
+        wait_slot_update(u0);
+        return true;
     }
     USER_SLOT_ERR.store(last_err(), core::sync::atomic::Ordering::Relaxed);
     set_slot(OPEN_SLOT);
-    let ok = open_as(path) && confirm_open(path);
-    if ok {
-        OPENED_FALLBACK.store(true, core::sync::atomic::Ordering::Relaxed);
-    }
+    let ok = open_as(path);
     READS_OPEN.store(bridge_reads().wrapping_sub(c1) & 0xFFFF, core::sync::atomic::Ordering::Relaxed);
     if !ok {
         set_slot(USER_SLOT.load(core::sync::atomic::Ordering::Relaxed));
@@ -232,25 +155,31 @@ fn open_timed(path: &str) -> bool {
     ok
 }
 
-/// Ждём, пока getfile не подтвердит именно этот путь. На железе завершение
-/// openfile само по себе ещё не гарантирует одновременную смену пути, размера
-/// и содержимого. Код 97 — путь не подтвердился за две секунды.
-fn confirm_open(path: &str) -> bool {
-    let t0 = crate::chipbox_read(0x18);
-    for t in 1..=200u32 {
-        CONFIRM_TRIES.store(t, core::sync::atomic::Ordering::Relaxed);
-        if poll_path(path) {
-            CONFIRM_OK.store(true, core::sync::atomic::Ordering::Relaxed);
-            wait_ms(1);
-            return true;
+/// Счётчик уведомлений 008A «слот обновлён» (chipbox 0x20, биты 23:16)
+fn upd_count() -> u32 {
+    (crate::chipbox_read(0x20) >> 16) & 0xFF
+}
+
+/// Дождаться 008A с новым размером файла после openfile.
+///
+/// Размер открытого файла APF сообщает отдельной командой 008A, и она
+/// может прийти ПОСЛЕ того, как сам openfile завершился. До неё в
+/// таблице слотов лежит размер прежнего файла: трек читался с чужой
+/// длиной, отсюда «unknown format», «unpacked 84M, over heap» и «track
+/// not found» на первом открытии — со второго раза 008A уже успевал.
+/// Ядро Mega CD по той же причине ждёт 008A, а не таблицу. Приходит оно
+/// только слотам с флагом «user-reloadable», то есть слоту пользователя.
+/// Таймаут ~0.3 с — на случай, если уведомления не будет вовсе.
+fn wait_slot_update(u0: u32) {
+    let t0 = crate::chipbox_read(0x18); // счётчик 44100 Гц
+    for _ in 0..5_000_000u32 {
+        if upd_count() != u0 {
+            return;
         }
-        if crate::chipbox_read(0x18).wrapping_sub(t0) > 2 * 44_100 {
-            break;
+        if crate::chipbox_read(0x18).wrapping_sub(t0) > 13_230 {
+            return;
         }
-        wait_ms(10);
     }
-    LAST_ERR.store(97, core::sync::atomic::Ordering::Relaxed);
-    false
 }
 
 /// Сколько слов APF прочитал через мост за попытку в слоте пользователя
@@ -365,63 +294,36 @@ fn open_as(path: &str) -> bool {
     push_param_struct(path);
     let p = unsafe { pac::Peripherals::steal() };
     unsafe {
-        let _ = p.APF_BRIDGE.status.read();
         core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
         core::ptr::copy_nonoverlapping(path.as_ptr(), STRUCT_BUF as *mut u8, path.len());
         p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
         p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
         p.APF_BRIDGE.request_openfile.write(|w| w.bits(1));
     }
-    // После завершения команды вызывающий код подтверждает путь через getfile.
+    // Ответ APF — код результата, и только он. В 0.2.7 здесь стояла
+    // дополнительная проверка размера по смещению +260 ответной
+    // структуры; она давала ложный отказ НА ЛЮБОМ файле, потому что APF
+    // туда ничего не пишет, а буфер мы сами обнуляем перед запросом.
+    // Одиночные файлы это не задевало (для них open не вызывается —
+    // они уже в слоте), а все треки плейлистов падали с «open err 0»:
+    // код APF нулевой, то есть успех, отказ выставляла проверка.
+    // Пустой или битый файл ловится дальше по размеру слота и по магии
+    // формата, так что защита не потеряна.
     wait_op()
 }
 
-/// Чтение из произвольного слота (block_op_complete litex может зависнуть
-/// навечно на пустом слоте). cap_ms — предел ожидания одной попытки:
-/// первую попытку полного файла даём 10 с (большие файлы читаются
-/// секунды), повторным хватает 2 с — если мост молчит дольше, он
-/// застрял и десять секунд не спасут (0.2.27: без этого лимита серия
-/// повторов сжигала до 100 с молча). Код APF 2 («error/out of range»)
-/// сразу после openfile бывает переходным: один повтор через короткую
-/// паузу.
-pub fn read_slot_to(slot_id: u32, len: u32, addr: u32, cap_ms: u32) -> bool {
-    let p = unsafe { pac::Peripherals::steal() };
-    for attempt in 0..2 {
-        unsafe {
-            let _ = p.APF_BRIDGE.status.read();
-            p.APF_BRIDGE.slot_id.write(|w| w.bits(slot_id));
-            p.APF_BRIDGE.data_offset.write(|w| w.bits(0));
-            p.APF_BRIDGE.transfer_length.write(|w| w.bits(len));
-            p.APF_BRIDGE.ram_data_address.write(|w| w.bits(addr));
-            p.APF_BRIDGE.request_read.write(|w| w.bits(1));
-        }
-        if wait_op_cap(if attempt == 0 { cap_ms } else { 2_000 }) {
-            return true;
-        }
-        if last_err() != 2 || attempt == 1 {
-            return false;
-        }
-        wait_ms(20);
-    }
-    false
-}
-
-/// getfile с коротким ожиданием для подтверждения openfile.
-fn poll_path(path: &str) -> bool {
+/// Чтение из произвольного слота с таймаутом (block_op_complete litex
+/// может зависнуть навечно на пустом слоте)
+pub fn read_slot_to(slot_id: u32, len: u32, addr: u32) -> bool {
     let p = unsafe { pac::Peripherals::steal() };
     unsafe {
-        let _ = p.APF_BRIDGE.status.read();
-        core::ptr::write_bytes(STRUCT_BUF as *mut u8, 0, 264);
-        p.APF_BRIDGE.slot_id.write(|w| w.bits(slot()));
-        p.APF_BRIDGE.ram_data_address.write(|w| w.bits(STRUCT_BUF));
-        p.APF_BRIDGE.request_getfile.write(|w| w.bits(1));
+        p.APF_BRIDGE.slot_id.write(|w| w.bits(slot_id));
+        p.APF_BRIDGE.data_offset.write(|w| w.bits(0));
+        p.APF_BRIDGE.transfer_length.write(|w| w.bits(len));
+        p.APF_BRIDGE.ram_data_address.write(|w| w.bits(addr));
+        p.APF_BRIDGE.request_read.write(|w| w.bits(1));
     }
-    if !wait_op_cap(150) {
-        return false;
-    }
-    let raw = unsafe { core::slice::from_raw_parts(STRUCT_BUF as *const u8, 256) };
-    let len = raw.iter().position(|&b| b == 0).unwrap_or(255);
-    raw[..len] == *path.as_bytes()
+    wait_op()
 }
 
 /// Расширение пути без срезов строки: `path[len-4..]` падает, если путь
