@@ -2981,7 +2981,11 @@ fn vgm_play(staged: &'static [u8], pl: &PlayCtx) -> Ctl {
                 sink.push(OP_YM2151 | (addr as u32) << 8 | data as u32);
             }
             Ok(Event::Write { chip: Chip::Ym2612, port, addr, data }) => {
-                sink.push(OP_FM2612 | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
+                // LSI test 1 не является звуковым регистром: запись $FF
+                // останавливает огибающую в JT12. MAME в libvgm её игнорирует.
+                if port != 0 || addr != 0x21 {
+                    sink.push(OP_FM2612 | (port as u32) << 16 | (addr as u32) << 8 | data as u32);
+                }
             }
             Ok(Event::Write { chip: Chip::Sn76489, port, data, .. }) => {
                 // Защёлка громкости: бит 7 задаёт регистр, бит 4 отличает
