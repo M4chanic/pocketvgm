@@ -443,8 +443,7 @@ always @(posedge clk, posedge rst) begin
         if( write&addr[0] ) begin
             busy     <= 1;
             busy_cnt <= 0;
-        end else if(cen) begin
-            // YM2612: 32 такта основного клока, а не внутреннего clk_en/6.
+        end else if(clk_en) begin
             busy     <= ~nx_busy[5] & busy;
             busy_cnt <=  nx_busy[4:0];
         end

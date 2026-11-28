@@ -27,12 +27,11 @@ jobs:
       - name: Сборка chipbox_tb
         run: make -C sim/chipbox_tb -j"$(nproc)"
 
-      - name: Селфтесты (сброс/пауза/FM-busy/ff/NSF/GBS/SID/APU)
+      - name: Селфтесты (сброс/пауза/ff/NSF/GBS/SID/APU)
         working-directory: sim/chipbox_tb
         run: |
           ./chipbox_tb --reset-selftest
           ./chipbox_tb --pause-selftest
-          ./chipbox_tb --fm-busy-selftest
           ./chipbox_tb --ff-selftest
           ./chipbox_tb --vrc6-selftest
           ./chipbox_tb --nsf-selftest

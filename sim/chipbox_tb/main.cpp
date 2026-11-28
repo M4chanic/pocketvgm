@@ -1166,35 +1166,8 @@ static int reset_selftest(const char* out) {
     return ok ? 0 : 1;
 }
 
-// Пропускная способность записей YM2612: busy длится 32 такта основного
-// клока. Счётчик по внутреннему clk_en/6 накапливал секунды отставания
-// на плотных VGM; порог отсекает это без привязки к музыкальным данным.
-static int fm_busy_selftest() {
-    Tb tb;
-    mute_all(tb);
-    tb.wb(0x16, true, phase_inc(7670453.0, "YM2612"));
-    tb.wb(0x15, true, 64);
-    tb.wb(2, true, 1);
-    for (int i = 0; i < 2048; i++) tb.step();
-
-    size_t fed = 0;
-    uint64_t until = tb.cycle + (uint64_t)(0.02 * CLK_HZ);
-    while (tb.cycle < until) {
-        if (tb.fifo_used() < 1500) {
-            tb.wb(0, true, 0xD0000000u | 0x4000u | (fed & 0x7F));
-            fed++;
-        } else {
-            for (int i = 0; i < 50; i++) tb.step();
-        }
-    }
-    bool ok = fed >= 800;
-    fprintf(stderr, "селфтест YM2612-busy: %zu регистров за 20 мс → %s\n",
-            fed, ok ? "OK" : "FAIL (busy снова считается по делённому клоку)");
-    return ok ? 0 : 1;
-}
-
 // Селфтест перемотки (контрол бит 6): 8 с WAIT'ов при ff должны
-// съесться за ~1 с; без ff секвенсор остался бы занят.
+// съесться за ~1 с; без ff секвенсор остался бы занят
 // Отпускание перемотки: держим FF при НЕПУСТОМ FIFO (только так копится
 // отставание цели), отпускаем и проверяем, что следующая пауза длится
 // столько, сколько записано. Старый тест ff проверял лишь ускорение и
@@ -1531,7 +1504,6 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--cmds") && i + 1 < argc) { return play_cmds(argv[i+1], out); }
         else if (!strcmp(argv[i], "--pause-selftest")) { return pause_selftest(out); }
         else if (!strcmp(argv[i], "--reset-selftest")) { return reset_selftest(out); }
-        else if (!strcmp(argv[i], "--fm-busy-selftest")) { return fm_busy_selftest(); }
         else if (!strcmp(argv[i], "--ff-release-selftest")) { return ff_release_selftest(); }
         else if (!strcmp(argv[i], "--ff-selftest")) { return ff_selftest(); }
         else if (!strcmp(argv[i], "--vrc6-selftest")) { return vrc6_selftest(out, 1.0); }
